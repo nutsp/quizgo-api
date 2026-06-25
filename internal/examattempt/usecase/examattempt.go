@@ -50,10 +50,8 @@ func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examS
 	if set == nil || !set.IsActive {
 		return nil, apperrors.ErrExamSetNotFound
 	}
-	if set.AccessType != "free" {
-		// Premium stub: reject for now unless we add subscription later.
-		return nil, apperrors.ErrPremiumRequired
-	}
+	// Premium access is stubbed: payment is not implemented yet, so authenticated
+	// users may start any exam set. UI still shows premium pricing.
 
 	setQuestions, err := uc.questions.ListByExamSetID(ctx, set.ID)
 	if err != nil {

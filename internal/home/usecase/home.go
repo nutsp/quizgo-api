@@ -61,16 +61,24 @@ func (uc *HomeUseCase) GetHome(ctx context.Context, userID *uuid.UUID) (*domain.
 			Code:            s.Code,
 			Title:           s.Title,
 			Description:     s.Description,
+			CoverImageURL:   s.CoverImageURL,
 			DurationMinutes: s.DurationMinutes,
 			TotalQuestions:  s.TotalQuestions,
 			PassingScore:    s.PassingScore,
 			Difficulty:      s.Difficulty,
 			AccessType:      s.AccessType,
+			PriceAmount:     s.PriceAmount,
+			Currency:        s.Currency,
+			SalePriceAmount: s.SalePriceAmount,
 			Mode:            s.Mode,
+			IsOfficial:      s.IsOfficial,
+			IsFeatured:      s.IsFeatured,
 		}
 		if s.ExamTrack != nil {
-			item.ExamTrackCode = s.ExamTrack.Code
-			item.ExamTrackName = s.ExamTrack.Name
+			item.ExamTrack = &domain.ExamTrackRef{
+				Code: s.ExamTrack.Code,
+				Name: s.ExamTrack.Name,
+			}
 		}
 		popular = append(popular, item)
 	}

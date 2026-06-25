@@ -17,14 +17,19 @@ type ExamSetModel struct {
 	Code            string    `gorm:"uniqueIndex:uq_exam_sets_code;not null"`
 	Title           string    `gorm:"not null"`
 	Description     string
-	DurationMinutes int    `gorm:"not null"`
-	TotalQuestions  int    `gorm:"not null"`
-	PassingScore    int    `gorm:"not null"`
-	Difficulty      string `gorm:"not null"`
-	AccessType      string `gorm:"not null"`
-	Mode            string `gorm:"not null"`
-	IsOfficial      bool   `gorm:"default:false"`
-	IsActive        bool   `gorm:"default:true"`
+	CoverImageURL   *string   `gorm:"type:text"`
+	DurationMinutes int       `gorm:"not null"`
+	TotalQuestions  int       `gorm:"not null"`
+	PassingScore    int       `gorm:"not null"`
+	Difficulty      string    `gorm:"not null"`
+	AccessType      string    `gorm:"not null"`
+	PriceAmount     float64   `gorm:"type:numeric;not null;default:0"`
+	Currency        string    `gorm:"type:varchar(10);not null;default:THB"`
+	SalePriceAmount *float64  `gorm:"type:numeric"`
+	Mode            string    `gorm:"not null"`
+	IsOfficial      bool      `gorm:"default:false"`
+	IsFeatured      bool      `gorm:"not null;default:false"`
+	IsActive        bool      `gorm:"default:true"`
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 
@@ -152,7 +157,7 @@ func (r *postgresRepository) ListPopular(ctx context.Context, limit int) ([]doma
 	err := r.db.WithContext(ctx).
 		Preload("ExamTrack").
 		Where("is_active = ?", true).
-		Order("created_at DESC").
+		Order("is_featured DESC, created_at DESC").
 		Limit(limit).
 		Find(&models).Error
 	if err != nil {
@@ -172,13 +177,18 @@ func toDomain(m *ExamSetModel) domain.ExamSet {
 		Code:            m.Code,
 		Title:           m.Title,
 		Description:     m.Description,
+		CoverImageURL:   m.CoverImageURL,
 		DurationMinutes: m.DurationMinutes,
 		TotalQuestions:  m.TotalQuestions,
 		PassingScore:    m.PassingScore,
 		Difficulty:      m.Difficulty,
 		AccessType:      m.AccessType,
+		PriceAmount:     m.PriceAmount,
+		Currency:        m.Currency,
+		SalePriceAmount: m.SalePriceAmount,
 		Mode:            m.Mode,
 		IsOfficial:      m.IsOfficial,
+		IsFeatured:      m.IsFeatured,
 		IsActive:        m.IsActive,
 		CreatedAt:       m.CreatedAt,
 		UpdatedAt:       m.UpdatedAt,

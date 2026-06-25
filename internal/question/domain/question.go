@@ -21,6 +21,8 @@ type Question struct {
 	QuestionText string
 	Explanation  string
 	Difficulty   string
+	Status       string
+	IsActive     bool
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 	Subject      *SubjectRef
@@ -81,6 +83,14 @@ const (
 	ChoiceB = "B"
 	ChoiceC = "C"
 	ChoiceD = "D"
+
+	StatusDraft     = "draft"
+	StatusPublished = "published"
+	StatusArchived  = "archived"
+
+	DifficultyEasy   = "easy"
+	DifficultyMedium = "medium"
+	DifficultyHard   = "hard"
 )
 
 var ValidChoiceKeys = map[string]string{

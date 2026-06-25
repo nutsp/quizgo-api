@@ -28,6 +28,15 @@ import (
 	homeuc "virtual-exam-api/internal/home/usecase"
 	"virtual-exam-api/internal/middleware"
 	questionrepo "virtual-exam-api/internal/question/repository"
+	questionuc "virtual-exam-api/internal/question/usecase"
+	subjectrepo "virtual-exam-api/internal/subject/repository"
+	subjectuc "virtual-exam-api/internal/subject/usecase"
+	adminhttp "virtual-exam-api/internal/admin/transport/http"
+	dashboarduc "virtual-exam-api/internal/admin/dashboard/usecase"
+	trackadminuc "virtual-exam-api/internal/examtrack/usecase"
+	resultrepo "virtual-exam-api/internal/result/repository"
+	resulthttp "virtual-exam-api/internal/result/transport/http"
+	resultuc "virtual-exam-api/internal/result/usecase"
 	redisclient "virtual-exam-api/internal/redis"
 	scoringuc "virtual-exam-api/internal/scoring/usecase"
 	userrepo "virtual-exam-api/internal/user/repository"
@@ -106,6 +115,24 @@ func main() {
 	trackhttp.NewHandler(trackUseCase).RegisterRoutes(api)
 	examsethttp.NewHandler(examSetUseCase, attemptUseCase).RegisterRoutes(api, authMiddleware)
 	attempthttp.NewHandler(attemptUseCase).RegisterRoutes(api, authMiddleware)
+	resultRepository := resultrepo.NewPostgresRepository(db)
+	resultUseCase := resultuc.NewResultUseCase(resultRepository)
+	resulthttp.NewHandler(resultUseCase).RegisterRoutes(api, authMiddleware)
+
+	trackAdminRepo := trackrepo.NewAdminRepository(db)
+	examSetAdminRepo := examsetrepo.NewAdminRepository(db)
+	subjectAdminRepo := subjectrepo.NewSubjectAdminRepository(db)
+	questionAdminRepo := questionrepo.NewQuestionAdminRepository(db)
+	setQuestionAdminRepo := questionrepo.NewExamSetQuestionAdminRepository(db)
+
+	trackAdminUC := trackadminuc.NewAdminUseCase(trackAdminRepo, trackRepository)
+	examSetAdminUC := examsetuc.NewAdminUseCase(examSetAdminRepo, examSetRepository, trackRepository, trackAdminRepo)
+	subjectAdminUC := subjectuc.NewSubjectUseCase(subjectAdminRepo)
+	questionAdminUC := questionuc.NewAdminUseCase(questionAdminRepo, setQuestionAdminRepo, subjectAdminRepo, examSetRepository, examSetAdminRepo, trackAdminRepo)
+	dashboardUC := dashboarduc.NewDashboardUseCase(db)
+
+	adminhttp.NewHandler(dashboardUC, trackAdminUC, examSetAdminUC, subjectAdminUC, questionAdminUC).
+		RegisterRoutes(api, authMiddleware, middleware.AdminOnly())
 
 	e.GET("/health", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{"status": "ok"})

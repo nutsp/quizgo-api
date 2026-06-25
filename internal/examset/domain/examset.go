@@ -24,13 +24,18 @@ type ExamSet struct {
 	Code            string
 	Title           string
 	Description     string
+	CoverImageURL   *string
 	DurationMinutes int
 	TotalQuestions  int
 	PassingScore    int
 	Difficulty      string
 	AccessType      string
+	PriceAmount     float64
+	Currency        string
+	SalePriceAmount *float64
 	Mode            string
 	IsOfficial      bool
+	IsFeatured      bool
 	IsActive        bool
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
@@ -38,23 +43,28 @@ type ExamSet struct {
 }
 
 type ExamTrackRef struct {
-	Code string
-	Name string
+	Code string `json:"code"`
+	Name string `json:"name"`
 }
 
 type ExamSetSummary struct {
-	ID              string        `json:"id"`
+	ID              string        `json:"id,omitempty"`
 	Code            string        `json:"code"`
 	Title           string        `json:"title"`
 	Description     string        `json:"description,omitempty"`
+	CoverImageURL   *string       `json:"cover_image_url,omitempty"`
 	DurationMinutes int           `json:"duration_minutes"`
 	TotalQuestions  int           `json:"total_questions"`
 	PassingScore    int           `json:"passing_score"`
 	Difficulty      string        `json:"difficulty"`
 	AccessType      string        `json:"access_type"`
+	PriceAmount     float64       `json:"price_amount"`
+	Currency        string        `json:"currency"`
+	SalePriceAmount *float64      `json:"sale_price_amount,omitempty"`
 	Mode            string        `json:"mode"`
 	IsOfficial      bool          `json:"is_official"`
-	IsActive        bool          `json:"is_active"`
+	IsFeatured      bool          `json:"is_featured,omitempty"`
+	IsActive        bool          `json:"is_active,omitempty"`
 	ExamTrack       *ExamTrackRef `json:"exam_track,omitempty"`
 }
 
@@ -64,13 +74,18 @@ func (s ExamSet) ToSummary() ExamSetSummary {
 		Code:            s.Code,
 		Title:           s.Title,
 		Description:     s.Description,
+		CoverImageURL:   s.CoverImageURL,
 		DurationMinutes: s.DurationMinutes,
 		TotalQuestions:  s.TotalQuestions,
 		PassingScore:    s.PassingScore,
 		Difficulty:      s.Difficulty,
 		AccessType:      s.AccessType,
+		PriceAmount:     s.PriceAmount,
+		Currency:        s.Currency,
+		SalePriceAmount: s.SalePriceAmount,
 		Mode:            s.Mode,
 		IsOfficial:      s.IsOfficial,
+		IsFeatured:      s.IsFeatured,
 		IsActive:        s.IsActive,
 	}
 	if s.ExamTrack != nil {

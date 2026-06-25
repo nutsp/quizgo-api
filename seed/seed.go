@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
+	attemptrepo "virtual-exam-api/internal/examattempt/repository"
 	examsetrepo "virtual-exam-api/internal/examset/repository"
 	questionrepo "virtual-exam-api/internal/question/repository"
 	trackrepo "virtual-exam-api/internal/examtrack/repository"
@@ -21,7 +23,7 @@ func Run(ctx context.Context, db *gorm.DB) error {
 	}
 	if count > 0 {
 		log.Println("seed: data already exists, skipping")
-		return nil
+		return EnsureAdminUser(ctx, db)
 	}
 
 	log.Println("seed: inserting demo data")
@@ -49,17 +51,91 @@ func Run(ctx context.Context, db *gorm.DB) error {
 	}
 
 	setDefs := []struct {
-		TrackCode string
-		Code      string
-		Title     string
-		Desc      string
-		Free      bool
+		TrackCode       string
+		Code            string
+		Title           string
+		Desc            string
+		AccessType      string
+		PriceAmount     float64
+		SalePriceAmount *float64
+		CoverImageURL   string
+		IsFeatured      bool
+		IsOfficial      bool
+		TotalQuestions  int
 	}{
-		{"gpor", "gpor-set-1", "ก.พ. ชุดที่ 1", "ชุดข้อสอบ ก.พ. ชุดที่ 1 สำหรับฝึกสอบเสมือนจริง", true},
-		{"gpor", "gpor-set-2", "ก.พ. ชุดที่ 2", "ชุดข้อสอบ ก.พ. ชุดที่ 2 สำหรับฝึกสอบเสมือนจริง", true},
-		{"police", "police-set-1", "ตร. ชุดที่ 1", "ชุดข้อสอบตำรวจ ชุดที่ 1", true},
-		{"police", "police-set-2", "ตร. ชุดที่ 2", "ชุดข้อสอบตำรวจ ชุดที่ 2", false},
-		{"gpor", "demo", "ข้อสอบเสมือนจริง ชุด A", "จำลองข้อสอบเสมือนจริง พร้อมจับเวลาเหมือนสนามจริง", true},
+		{
+			TrackCode:      "gpor",
+			Code:           "gpor-set-1",
+			Title:          "ก.พ. ชุดที่ 1",
+			Desc:           "จำลองข้อสอบเสมือนจริงพร้อมจับเวลาและกระดาษคำตอบแบบฝน",
+			AccessType:     "free",
+			PriceAmount:    0,
+			CoverImageURL:  "https://images.unsplash.com/photo-1434030216411-0b793f4b4173",
+			IsFeatured:     true,
+			IsOfficial:     false,
+			TotalQuestions: 100,
+		},
+		{
+			TrackCode:       "gpor",
+			Code:            "gpor-set-2",
+			Title:           "ก.พ. ชุดที่ 2",
+			Desc:            "ชุดข้อสอบ ก.พ. ชุดที่ 2 สำหรับฝึกสอบเสมือนจริง",
+			AccessType:      "premium",
+			PriceAmount:     199,
+			SalePriceAmount: floatPtr(149),
+			CoverImageURL:   "https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8",
+			IsFeatured:      true,
+			IsOfficial:      false,
+			TotalQuestions:  100,
+		},
+		{
+			TrackCode:      "police",
+			Code:           "police-set-1",
+			Title:          "ตร. ชุดที่ 1",
+			Desc:           "ชุดข้อสอบตำรวจ ชุดที่ 1 จำลองสนามสอบเสมือนจริง",
+			AccessType:     "premium",
+			PriceAmount:    249,
+			CoverImageURL:  "https://images.unsplash.com/photo-1516321318423-f06f85e504b3",
+			IsFeatured:     false,
+			IsOfficial:     false,
+			TotalQuestions: 100,
+		},
+		{
+			TrackCode:      "police",
+			Code:           "police-set-2",
+			Title:          "ตร. ชุดที่ 2",
+			Desc:           "ชุดข้อสอบตำรวจ ชุดที่ 2",
+			AccessType:     "premium",
+			PriceAmount:    199,
+			CoverImageURL:  "https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8",
+			IsFeatured:     false,
+			IsOfficial:     false,
+			TotalQuestions: 80,
+		},
+		{
+			TrackCode:      "local",
+			Code:           "local-set-1",
+			Title:          "ท้องถิ่น ชุดที่ 1",
+			Desc:           "ชุดข้อสอบท้องถิ่น ชุดที่ 1 สำหรับฝึกสอบเสมือนจริง",
+			AccessType:     "free",
+			PriceAmount:    0,
+			CoverImageURL:  "https://images.unsplash.com/photo-1434030216411-0b793f4b4173",
+			IsFeatured:     false,
+			IsOfficial:     false,
+			TotalQuestions: 80,
+		},
+		{
+			TrackCode:      "gpor",
+			Code:           "demo",
+			Title:          "ข้อสอบเสมือนจริง ชุด A",
+			Desc:           "จำลองข้อสอบเสมือนจริง พร้อมจับเวลาเหมือนสนามจริง",
+			AccessType:     "free",
+			PriceAmount:    0,
+			CoverImageURL:  "https://images.unsplash.com/photo-1516321318423-f06f85e504b3",
+			IsFeatured:     true,
+			IsOfficial:     true,
+			TotalQuestions: 20,
+		},
 	}
 
 	questionCountPerSet := 20
@@ -67,9 +143,10 @@ func Run(ctx context.Context, db *gorm.DB) error {
 
 	for _, def := range setDefs {
 		setID := uuid.New()
-		accessType := "free"
-		if !def.Free {
-			accessType = "premium"
+		coverURL := def.CoverImageURL
+		qCount := def.TotalQuestions
+		if qCount > questionCountPerSet {
+			qCount = questionCountPerSet
 		}
 
 		set := examsetrepo.ExamSetModel{
@@ -78,20 +155,25 @@ func Run(ctx context.Context, db *gorm.DB) error {
 			Code:            def.Code,
 			Title:           def.Title,
 			Description:     def.Desc,
+			CoverImageURL:   &coverURL,
 			DurationMinutes: 120,
-			TotalQuestions:  questionCountPerSet,
+			TotalQuestions:  def.TotalQuestions,
 			PassingScore:    60,
 			Difficulty:      "medium",
-			AccessType:      accessType,
+			AccessType:      def.AccessType,
+			PriceAmount:     def.PriceAmount,
+			Currency:        "THB",
+			SalePriceAmount: def.SalePriceAmount,
 			Mode:            "mock_exam",
-			IsOfficial:      def.Code == "demo",
+			IsOfficial:      def.IsOfficial,
+			IsFeatured:      def.IsFeatured,
 			IsActive:        true,
 		}
 		if err := db.WithContext(ctx).Create(&set).Error; err != nil {
 			return fmt.Errorf("seed exam set %s: %w", def.Code, err)
 		}
 
-		for qNo := 1; qNo <= questionCountPerSet; qNo++ {
+		for qNo := 1; qNo <= qCount; qNo++ {
 			qIdx := (qNo - 1) % len(allQuestions)
 			qTemplate := allQuestions[qIdx]
 
@@ -136,10 +218,13 @@ func Run(ctx context.Context, db *gorm.DB) error {
 
 	for i := range tracks {
 		var setCount int64
+		var totalQuestions int64
 		db.Model(&examsetrepo.ExamSetModel{}).Where("exam_track_id = ?", tracks[i].ID).Count(&setCount)
+		db.Model(&examsetrepo.ExamSetModel{}).Where("exam_track_id = ?", tracks[i].ID).
+			Select("COALESCE(SUM(total_questions), 0)").Scan(&totalQuestions)
 		db.Model(&trackrepo.ExamTrackModel{}).Where("id = ?", tracks[i].ID).Updates(map[string]any{
 			"total_exam_sets": setCount,
-			"total_questions": setCount * int64(questionCountPerSet),
+			"total_questions": totalQuestions,
 		})
 	}
 
@@ -159,7 +244,65 @@ func Run(ctx context.Context, db *gorm.DB) error {
 		return fmt.Errorf("seed demo user: %w", err)
 	}
 
+	adminUser := userrepo.UserModel{
+		ID:           uuid.New(),
+		DisplayName:  "Admin",
+		Email:        "admin@example.com",
+		PasswordHash: string(hash),
+		Role:         "admin",
+	}
+	if err := db.WithContext(ctx).Create(&adminUser).Error; err != nil {
+		return fmt.Errorf("seed admin user: %w", err)
+	}
+
+	// Mark seeded questions as published for public exam APIs
+	if err := db.WithContext(ctx).Model(&questionrepo.QuestionModel{}).
+		Where("status = ? OR status IS NULL OR status = ''", "draft").
+		Updates(map[string]any{"status": "published", "is_active": true}).Error; err != nil {
+		return fmt.Errorf("seed question status: %w", err)
+	}
+
+	setByCode := map[string]examsetrepo.ExamSetModel{}
+	var allSets []examsetrepo.ExamSetModel
+	if err := db.WithContext(ctx).Find(&allSets).Error; err != nil {
+		return fmt.Errorf("load exam sets: %w", err)
+	}
+	for _, s := range allSets {
+		setByCode[s.Code] = s
+	}
+
+	if err := seedDemoAttempts(ctx, db, demoUser.ID, setByCode); err != nil {
+		return fmt.Errorf("seed demo attempts: %w", err)
+	}
+
 	log.Println("seed: completed successfully")
+	return EnsureAdminUser(ctx, db)
+}
+
+func EnsureAdminUser(ctx context.Context, db *gorm.DB) error {
+	var existing userrepo.UserModel
+	err := db.WithContext(ctx).Where("email = ?", "admin@example.com").First(&existing).Error
+	if err == nil {
+		if existing.Role != "admin" {
+			return db.WithContext(ctx).Model(&existing).Update("role", "admin").Error
+		}
+		return nil
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte("password123"), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash admin password: %w", err)
+	}
+	adminUser := userrepo.UserModel{
+		ID:           uuid.New(),
+		DisplayName:  "Admin",
+		Email:        "admin@example.com",
+		PasswordHash: string(hash),
+		Role:         "admin",
+	}
+	if err := db.WithContext(ctx).Create(&adminUser).Error; err != nil {
+		return fmt.Errorf("seed admin user: %w", err)
+	}
+	log.Println("seed: ensured admin user admin@example.com")
 	return nil
 }
 
@@ -355,4 +498,80 @@ func buildQuestions(subjectByCode map[string]uuid.UUID) []struct {
 		}
 	}
 	return out
+}
+
+func floatPtr(v float64) *float64 {
+	return &v
+}
+
+func intPtr(v int) *int {
+	return &v
+}
+
+func seedDemoAttempts(
+	ctx context.Context,
+	db *gorm.DB,
+	userID uuid.UUID,
+	setByCode map[string]examsetrepo.ExamSetModel,
+) error {
+	type attemptDef struct {
+		SetCode      string
+		ScorePercent float64
+		DaysAgo      int
+		DurationSec  int
+	}
+
+	defs := []attemptDef{
+		{"gpor-set-1", 55, 14, 7200},
+		{"gpor-set-1", 72, 7, 6600},
+		{"gpor-set-1", 80, 1, 6480},
+		{"gpor-set-2", 61, 10, 6300},
+		{"gpor-set-2", 74, 3, 6120},
+		{"police-set-1", 58, 5, 6000},
+		{"local-set-1", 70, 2, 5400},
+	}
+
+	now := time.Now().UTC()
+	for _, def := range defs {
+		set, ok := setByCode[def.SetCode]
+		if !ok {
+			continue
+		}
+
+		totalQ := 20
+		if set.TotalQuestions < totalQ {
+			totalQ = set.TotalQuestions
+		}
+		correct := int(def.ScorePercent / 100 * float64(totalQ))
+		wrong := totalQ - correct
+		if wrong < 0 {
+			wrong = 0
+		}
+
+		started := now.AddDate(0, 0, -def.DaysAgo).Add(-time.Duration(def.DurationSec) * time.Second)
+		submitted := started.Add(time.Duration(def.DurationSec) * time.Second)
+
+		attempt := attemptrepo.ExamAttemptModel{
+			ID:              uuid.New(),
+			UserID:          userID,
+			ExamTrackID:     set.ExamTrackID,
+			ExamSetID:       set.ID,
+			Status:          "submitted",
+			StartedAt:       started,
+			SubmittedAt:     &submitted,
+			ExpiresAt:       started.Add(120 * time.Minute),
+			DurationSeconds: intPtr(def.DurationSec),
+			Score:           float64(correct),
+			TotalScore:      float64(totalQ),
+			ScorePercent:    def.ScorePercent,
+			CorrectCount:    correct,
+			WrongCount:      wrong,
+			UnansweredCount: 0,
+		}
+		if err := db.WithContext(ctx).Create(&attempt).Error; err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

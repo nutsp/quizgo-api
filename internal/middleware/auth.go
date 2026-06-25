@@ -11,6 +11,7 @@ import (
 )
 
 const UserIDKey = "userID"
+const UserRoleKey = "userRole"
 
 func JWTAuth(authUC *usecase.AuthUseCase) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
@@ -36,6 +37,7 @@ func JWTAuth(authUC *usecase.AuthUseCase) echo.MiddlewareFunc {
 			}
 
 			c.Set(UserIDKey, userID)
+			c.Set(UserRoleKey, claims.Role)
 			return next(c)
 		}
 	}
@@ -51,6 +53,7 @@ func OptionalJWTAuth(authUC *usecase.AuthUseCase) echo.MiddlewareFunc {
 					if claims, err := authUC.ParseToken(parts[1]); err == nil {
 						if userID, err := uuid.Parse(claims.UserID); err == nil {
 							c.Set(UserIDKey, userID)
+							c.Set(UserRoleKey, claims.Role)
 						}
 					}
 				}

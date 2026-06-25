@@ -1,0 +1,8 @@
+ALTER TABLE exam_sets
+    ADD COLUMN IF NOT EXISTS cover_image_url TEXT,
+    ADD COLUMN IF NOT EXISTS price_amount NUMERIC NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS currency VARCHAR(10) NOT NULL DEFAULT 'THB',
+    ADD COLUMN IF NOT EXISTS sale_price_amount NUMERIC,
+    ADD COLUMN IF NOT EXISTS is_featured BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE INDEX IF NOT EXISTS idx_exam_sets_featured ON exam_sets(is_featured) WHERE is_featured = TRUE;

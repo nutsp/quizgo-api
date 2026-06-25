@@ -26,6 +26,8 @@ type QuestionModel struct {
 	QuestionText string    `gorm:"type:text;not null"`
 	Explanation  string    `gorm:"type:text"`
 	Difficulty   string
+	Status       string    `gorm:"type:varchar(50);not null;default:draft"`
+	IsActive     bool      `gorm:"not null;default:true"`
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 
@@ -82,8 +84,10 @@ func (r *postgresRepository) ListByExamSetID(ctx context.Context, examSetID uuid
 		Preload("Question.Choices", func(db *gorm.DB) *gorm.DB {
 			return db.Order("choice_key ASC")
 		}).
-		Where("exam_set_id = ?", examSetID).
-		Order("question_no ASC").
+		Joins("JOIN questions ON questions.id = exam_set_questions.question_id").
+		Where("exam_set_questions.exam_set_id = ?", examSetID).
+		Where("questions.status = ? AND questions.is_active = ?", domain.StatusPublished, true).
+		Order("exam_set_questions.question_no ASC").
 		Find(&models).Error
 	if err != nil {
 		return nil, err
@@ -95,8 +99,10 @@ func (r *postgresRepository) ListPreviewByExamSetID(ctx context.Context, examSet
 	var models []ExamSetQuestionModel
 	err := r.db.WithContext(ctx).
 		Preload("Question.Subject").
-		Where("exam_set_id = ?", examSetID).
-		Order("question_no ASC").
+		Joins("JOIN questions ON questions.id = exam_set_questions.question_id").
+		Where("exam_set_questions.exam_set_id = ?", examSetID).
+		Where("questions.status = ? AND questions.is_active = ?", domain.StatusPublished, true).
+		Order("exam_set_questions.question_no ASC").
 		Find(&models).Error
 	if err != nil {
 		return nil, err
@@ -139,6 +145,8 @@ func mapExamSetQuestions(models []ExamSetQuestionModel) []domain.ExamSetQuestion
 				QuestionText: m.Question.QuestionText,
 				Explanation:  m.Question.Explanation,
 				Difficulty:   m.Question.Difficulty,
+				Status:       m.Question.Status,
+				IsActive:     m.Question.IsActive,
 			}
 			if m.Question.Subject.ID != uuid.Nil {
 				question.Subject = &domain.SubjectRef{

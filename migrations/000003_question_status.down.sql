@@ -1,0 +1,2 @@
+ALTER TABLE questions DROP COLUMN IF EXISTS is_active;
+ALTER TABLE questions DROP COLUMN IF EXISTS status;
