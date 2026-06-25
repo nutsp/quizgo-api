@@ -1,0 +1,37 @@
+package apperrors
+
+import "net/http"
+
+type AppError struct {
+	Code       string
+	Message    string
+	HTTPStatus int
+}
+
+func (e *AppError) Error() string {
+	return e.Message
+}
+
+func New(code, message string, status int) *AppError {
+	return &AppError{Code: code, Message: message, HTTPStatus: status}
+}
+
+var (
+	ErrUnauthorized       = New("UNAUTHORIZED", "กรุณาเข้าสู่ระบบ", http.StatusUnauthorized)
+	ErrForbidden          = New("FORBIDDEN", "ไม่มีสิทธิ์เข้าถึง", http.StatusForbidden)
+	ErrNotFound           = New("NOT_FOUND", "ไม่พบข้อมูล", http.StatusNotFound)
+	ErrInvalidInput       = New("INVALID_INPUT", "ข้อมูลไม่ถูกต้อง", http.StatusBadRequest)
+	ErrInvalidUUID        = New("INVALID_UUID", "รหัสไม่ถูกต้อง", http.StatusBadRequest)
+	ErrInvalidChoiceKey   = New("INVALID_CHOICE_KEY", "ตัวเลือกคำตอบไม่ถูกต้อง", http.StatusBadRequest)
+	ErrExamSetNotFound    = New("EXAM_SET_NOT_FOUND", "ไม่พบชุดข้อสอบ", http.StatusNotFound)
+	ErrExamTrackNotFound  = New("EXAM_TRACK_NOT_FOUND", "ไม่พบสายข้อสอบ", http.StatusNotFound)
+	ErrAttemptNotFound    = New("ATTEMPT_NOT_FOUND", "ไม่พบข้อมูลการสอบ", http.StatusNotFound)
+	ErrAttemptExpired     = New("ATTEMPT_EXPIRED", "หมดเวลาทำข้อสอบแล้ว", http.StatusBadRequest)
+	ErrAttemptSubmitted   = New("ATTEMPT_SUBMITTED", "ส่งคำตอบแล้ว ไม่สามารถแก้ไขได้", http.StatusBadRequest)
+	ErrAttemptNotEditable = New("ATTEMPT_NOT_EDITABLE", "ไม่สามารถแก้ไขคำตอบได้", http.StatusBadRequest)
+	ErrQuestionNotFound   = New("QUESTION_NOT_FOUND", "ไม่พบข้อสอบ", http.StatusNotFound)
+	ErrEmailTaken         = New("EMAIL_TAKEN", "อีเมลนี้ถูกใช้งานแล้ว", http.StatusConflict)
+	ErrInvalidCredentials = New("INVALID_CREDENTIALS", "อีเมลหรือรหัสผ่านไม่ถูกต้อง", http.StatusUnauthorized)
+	ErrPremiumRequired    = New("PREMIUM_REQUIRED", "ชุดข้อสอบนี้ต้องใช้สิทธิ์ Premium", http.StatusForbidden)
+	ErrExamSetInactive    = New("EXAM_SET_INACTIVE", "ชุดข้อสอบนี้ไม่เปิดให้ทำ", http.StatusBadRequest)
+)

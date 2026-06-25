@@ -1,0 +1,9 @@
+DROP TABLE IF EXISTS exam_answers;
+DROP TABLE IF EXISTS exam_attempts;
+DROP TABLE IF EXISTS exam_set_questions;
+DROP TABLE IF EXISTS choices;
+DROP TABLE IF EXISTS questions;
+DROP TABLE IF EXISTS subjects;
+DROP TABLE IF EXISTS exam_sets;
+DROP TABLE IF EXISTS exam_tracks;
+DROP TABLE IF EXISTS users;
