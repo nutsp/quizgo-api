@@ -24,6 +24,7 @@ type QuestionAdminRepository interface {
 	List(ctx context.Context, filter QuestionAdminFilter) ([]domain.Question, int64, error)
 	FindByID(ctx context.Context, id uuid.UUID) (*domain.Question, error)
 	CreateWithChoices(ctx context.Context, question *domain.Question) error
+	CreateWithChoicesTx(ctx context.Context, tx *gorm.DB, question *domain.Question) error
 	UpdateWithChoices(ctx context.Context, question *domain.Question) error
 	Delete(ctx context.Context, id uuid.UUID) (archived bool, err error)
 	CountByStatus(ctx context.Context, status string) (int64, error)
@@ -88,48 +89,56 @@ func (r *questionAdminRepository) FindByID(ctx context.Context, id uuid.UUID) (*
 
 func (r *questionAdminRepository) CreateWithChoices(ctx context.Context, question *domain.Question) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if question.ID == uuid.Nil {
-			question.ID = uuid.New()
+		return r.createWithChoicesTx(tx, question)
+	})
+}
+
+func (r *questionAdminRepository) CreateWithChoicesTx(ctx context.Context, tx *gorm.DB, question *domain.Question) error {
+	return r.createWithChoicesTx(tx, question)
+}
+
+func (r *questionAdminRepository) createWithChoicesTx(tx *gorm.DB, question *domain.Question) error {
+	if question.ID == uuid.Nil {
+		question.ID = uuid.New()
+	}
+	now := time.Now().UTC()
+	question.CreatedAt = now
+	question.UpdatedAt = now
+	qModel := QuestionModel{
+		ID:           question.ID,
+		SubjectID:    question.SubjectID,
+		QuestionText: question.QuestionText,
+		Explanation:  question.Explanation,
+		Difficulty:   question.Difficulty,
+		Status:       question.Status,
+		IsActive:     question.IsActive,
+		CreatedAt:    question.CreatedAt,
+		UpdatedAt:    question.UpdatedAt,
+	}
+	if err := tx.Create(&qModel).Error; err != nil {
+		return err
+	}
+	for i := range question.Choices {
+		c := &question.Choices[i]
+		if c.ID == uuid.Nil {
+			c.ID = uuid.New()
 		}
-		now := time.Now().UTC()
-		question.CreatedAt = now
-		question.UpdatedAt = now
-		qModel := QuestionModel{
-			ID:           question.ID,
-			SubjectID:    question.SubjectID,
-			QuestionText: question.QuestionText,
-			Explanation:  question.Explanation,
-			Difficulty:   question.Difficulty,
-			Status:       question.Status,
-			IsActive:     question.IsActive,
-			CreatedAt:    question.CreatedAt,
-			UpdatedAt:    question.UpdatedAt,
+		c.QuestionID = question.ID
+		cModel := ChoiceModel{
+			ID:          c.ID,
+			QuestionID:  c.QuestionID,
+			ChoiceKey:   c.ChoiceKey,
+			ChoiceLabel: c.ChoiceLabel,
+			ChoiceText:  c.ChoiceText,
+			IsCorrect:   c.IsCorrect,
+			CreatedAt:   now,
+			UpdatedAt:   now,
 		}
-		if err := tx.Create(&qModel).Error; err != nil {
+		if err := tx.Create(&cModel).Error; err != nil {
 			return err
 		}
-		for i := range question.Choices {
-			c := &question.Choices[i]
-			if c.ID == uuid.Nil {
-				c.ID = uuid.New()
-			}
-			c.QuestionID = question.ID
-			cModel := ChoiceModel{
-				ID:          c.ID,
-				QuestionID:  c.QuestionID,
-				ChoiceKey:   c.ChoiceKey,
-				ChoiceLabel: c.ChoiceLabel,
-				ChoiceText:  c.ChoiceText,
-				IsCorrect:   c.IsCorrect,
-				CreatedAt:   now,
-				UpdatedAt:   now,
-			}
-			if err := tx.Create(&cModel).Error; err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 func (r *questionAdminRepository) UpdateWithChoices(ctx context.Context, question *domain.Question) error {
@@ -226,8 +235,8 @@ func (r *questionAdminRepository) IsUsedInAttempts(ctx context.Context, question
 	var count int64
 	err := r.db.WithContext(ctx).
 		Table("exam_answers").
-		Joins("JOIN exam_set_questions ON exam_set_questions.exam_set_id = exam_answers.exam_set_id AND exam_set_questions.question_no = exam_answers.question_no").
-		Where("exam_set_questions.question_id = ?", questionID).
+		Joins("JOIN exam_attempts ON exam_attempts.id = exam_answers.attempt_id").
+		Where("exam_answers.question_id = ?", questionID).
 		Count(&count).Error
 	if err != nil {
 		return false, err

@@ -3,9 +3,10 @@ package apperrors
 import "net/http"
 
 type AppError struct {
-	Code       string
-	Message    string
-	HTTPStatus int
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	HTTPStatus int    `json:"-"`
+	Details    any    `json:"details,omitempty"`
 }
 
 func (e *AppError) Error() string {
@@ -38,5 +39,10 @@ var (
 	ErrSubjectHasQuestions = New("SUBJECT_HAS_QUESTIONS", "ไม่สามารถลบหมวดวิชาที่มีคำถามอยู่", http.StatusBadRequest)
 	ErrDuplicateQuestion  = New("DUPLICATE_QUESTION", "คำถามนี้อยู่ในชุดข้อสอบแล้ว", http.StatusConflict)
 	ErrInvalidChoices     = New("INVALID_CHOICES", "ตัวเลือกคำตอบไม่ถูกต้อง", http.StatusBadRequest)
-	ErrQuestionNotPublished = New("QUESTION_NOT_PUBLISHED", "เฉพาะคำถามที่เผยแพร่แล้วเท่านั้นที่เพิ่มได้", http.StatusBadRequest)
+	ErrQuestionNotPublished    = New("QUESTION_NOT_PUBLISHED", "เฉพาะคำถามที่เผยแพร่แล้วเท่านั้นที่เพิ่มได้", http.StatusBadRequest)
+	ErrExamSetLockedByAttempts = New("EXAM_SET_LOCKED_BY_ATTEMPTS", "ชุดข้อสอบนี้มีผลสอบแล้ว ไม่สามารถแก้ไขคำถามในชุดได้", http.StatusConflict)
+	ErrExamSetHasAttempts      = New("EXAM_SET_HAS_ATTEMPTS", "ชุดข้อสอบนี้มีประวัติการทำข้อสอบแล้ว ไม่สามารถลบคำถามทั้งหมดได้", http.StatusConflict)
+	ErrExamSetHasNoQuestions   = New("EXAM_SET_HAS_NO_QUESTIONS", "ชุดข้อสอบนี้ยังไม่มีคำถาม", http.StatusBadRequest)
+	ErrExamSetNotPublished     = New("EXAM_SET_NOT_PUBLISHED", "ชุดข้อสอบนี้ยังไม่เปิดให้ทำข้อสอบ", http.StatusBadRequest)
+	ErrExamSetNotReady         = New("EXAM_SET_NOT_READY", "ชุดข้อสอบยังไม่พร้อมเผยแพร่", http.StatusBadRequest)
 )

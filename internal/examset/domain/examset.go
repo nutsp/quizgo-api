@@ -16,6 +16,10 @@ const (
 	DifficultyEasy   = "easy"
 	DifficultyMedium = "medium"
 	DifficultyHard   = "hard"
+
+	StatusDraft     = "draft"
+	StatusPublished = "published"
+	StatusArchived  = "archived"
 )
 
 type ExamSet struct {
@@ -37,6 +41,7 @@ type ExamSet struct {
 	IsOfficial      bool
 	IsFeatured      bool
 	IsActive        bool
+	Status          string
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 	ExamTrack       *ExamTrackRef
@@ -65,6 +70,7 @@ type ExamSetSummary struct {
 	IsOfficial      bool          `json:"is_official"`
 	IsFeatured      bool          `json:"is_featured,omitempty"`
 	IsActive        bool          `json:"is_active,omitempty"`
+	Status          string        `json:"status,omitempty"`
 	ExamTrack       *ExamTrackRef `json:"exam_track,omitempty"`
 }
 
@@ -87,6 +93,7 @@ func (s ExamSet) ToSummary() ExamSetSummary {
 		IsOfficial:      s.IsOfficial,
 		IsFeatured:      s.IsFeatured,
 		IsActive:        s.IsActive,
+		Status:          s.Status,
 	}
 	if s.ExamTrack != nil {
 		summary.ExamTrack = s.ExamTrack
@@ -103,7 +110,8 @@ type ListFilter struct {
 	Mode        string
 	Page        int
 	Limit       int
-	OnlyActive  bool
+	OnlyActive     bool
+	OnlyPublished  bool
 }
 
 type PaginatedResult struct {

@@ -84,6 +84,61 @@ UPDATE users SET role = 'admin' WHERE email = 'admin@example.com';
 
 Non-admin users see a forbidden page at `/admin/*`.
 
+### Admin workflow
+
+1. Create subjects (`/admin/subjects`)
+2. Create or import questions (`/admin/questions`, `/admin/questions/import`)
+3. Create exam set (`/admin/exam-sets/new`)
+4. Bulk assign questions to exam set (`/admin/exam-sets/:id/questions`)
+5. Preview public exam detail (`/exams/:examSetCode`)
+6. Start test attempt (public API or `/exams/:examSetCode/take`)
+
+### Admin exam set questions API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | /exam-sets/:id/available-questions | List question bank with filters |
+| GET | /exam-sets/:id/questions | List assigned questions + exam set summary |
+| POST | /exam-sets/:id/questions/bulk | Bulk add questions to exam set |
+| POST | /exam-sets/:id/questions | Add single question (legacy) |
+| PUT | /exam-sets/:id/questions/reorder | Reorder assigned questions |
+| DELETE | /exam-sets/:id/questions/:questionId | Remove one question |
+| DELETE | /exam-sets/:id/questions | Clear all questions (requires `{"confirm":true}`) |
+
+**Bulk add (curl)**
+
+```bash
+curl -X POST http://localhost:8080/api/v1/admin/exam-sets/<EXAM_SET_ID>/questions/bulk \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"question_ids":["<Q1>","<Q2>"],"score":1,"append_to_end":true}'
+```
+
+**List assigned (curl)**
+
+```bash
+curl http://localhost:8080/api/v1/admin/exam-sets/<EXAM_SET_ID>/questions \
+  -H "Authorization: Bearer <TOKEN>"
+```
+
+**List available questions (curl)**
+
+```bash
+curl "http://localhost:8080/api/v1/admin/exam-sets/<EXAM_SET_ID>/available-questions?exclude_assigned=true&status=published&page=1&limit=20" \
+  -H "Authorization: Bearer <TOKEN>"
+```
+
+If the exam set has submitted attempts, add/remove/reorder returns:
+
+```json
+{
+  "error": {
+    "code": "EXAM_SET_LOCKED_BY_ATTEMPTS",
+    "message": "ชุดข้อสอบนี้มีผลสอบแล้ว ไม่สามารถแก้ไขคำถามในชุดได้"
+  }
+}
+```
+
 ### Admin routes (frontend)
 
 | Path |
@@ -93,6 +148,7 @@ Non-admin users see a forbidden page at `/admin/*`.
 | /admin/exam-sets |
 | /admin/subjects |
 | /admin/questions |
+| /admin/questions/import |
 | /admin/exam-sets/:id/questions |
 
 ### Admin API (prefix `/api/v1/admin`, JWT + admin role required)
@@ -105,10 +161,88 @@ Non-admin users see a forbidden page at `/admin/*`.
 | GET/POST | /exam-sets |
 | GET/PUT/DELETE | /exam-sets/:id |
 | GET/POST/PUT reorder/DELETE | /exam-sets/:id/questions |
+| GET | /exam-sets/:id/available-questions |
+| POST | /exam-sets/:id/questions/bulk |
 | GET/POST | /subjects |
 | GET/PUT/DELETE | /subjects/:id |
 | GET/POST | /questions |
 | GET/PUT/DELETE | /questions/:id |
+| GET | /questions/import/template |
+| POST | /questions/import/preview |
+| POST | /questions/import/confirm |
+
+### Admin Question Import
+
+Admin can bulk-import questions from CSV or Excel into the question bank at `/admin/questions/import`.
+
+**Template columns**
+
+| Column | Required | Notes |
+|--------|----------|-------|
+| subject_code | Yes | Must match an existing subject code (e.g. `law`, `math`) |
+| question_text | Yes | At least 5 characters |
+| choice_a … choice_d | Yes | Choice text for ก ข ค ง |
+| correct_choice | Yes | `A`–`D` or `ก`–`ง` |
+| explanation | No | Recommended |
+| difficulty | No | `easy`, `medium`, `hard` (default: `medium`) |
+| status | No | `draft`, `published`, `archived` (default: `draft`) |
+
+**Example CSV**
+
+```csv
+subject_code,question_text,choice_a,choice_b,choice_c,choice_d,correct_choice,explanation,difficulty,status
+law,"ข้อใดเป็นหนังสือราชการภายนอก","บันทึกข้อความ","หนังสือภายนอก","หนังสือสั่งการ","หนังสือประชาสัมพันธ์","B","หนังสือภายนอกใช้สำหรับติดต่อระหว่างส่วนราชการ",medium,published
+math,"5 + 7 เท่ากับข้อใด","10","11","12","13","C","5 + 7 = 12",easy,published
+```
+
+**How to import**
+
+1. Log in as admin and open `/admin/questions/import`
+2. Download the CSV template
+3. Fill in your questions and upload the file
+4. Click **Preview ข้อมูล** — review valid/invalid rows and warnings
+5. Confirm import (optionally import only valid rows if some rows have errors)
+6. Imported questions appear in `/admin/questions`
+
+**Common validation errors**
+
+| Message | Cause |
+|---------|-------|
+| ไม่พบคอลัมน์ subject_code | Missing required column in header |
+| ไม่พบหมวดวิชานี้ในระบบ | `subject_code` does not exist |
+| กรุณาระบุคำถาม | Empty question text |
+| กรุณาระบุตัวเลือก ก/ข/ค/ง | Empty choice |
+| เฉลยต้องเป็น A, B, C, D หรือ ก, ข, ค, ง | Invalid correct_choice |
+| ระดับความยากไม่ถูกต้อง | Invalid difficulty value |
+| สถานะไม่ถูกต้อง | Invalid status value |
+
+Warnings (non-blocking): missing explanation, duplicate question in file, question already exists in database.
+
+**Download template (curl)**
+
+```bash
+curl -OJ http://localhost:8080/api/v1/admin/questions/import/template \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Preview upload (curl)**
+
+```bash
+curl -X POST http://localhost:8080/api/v1/admin/questions/import/preview \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@questions.csv"
+```
+
+**Confirm import (curl)**
+
+```bash
+curl -X POST http://localhost:8080/api/v1/admin/questions/import/confirm \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"import_id":"<UUID>","import_only_valid_rows":true}'
+```
+
+SQL migration: `migrations/000004_question_import.up.sql`
 
 ### Example curl
 
@@ -352,6 +486,55 @@ curl -s http://localhost:8080/api/v1/exam-sets/gpor-set-1 | jq
 curl -s -X POST http://localhost:8080/api/v1/exam-sets/gpor-set-1/attempts \
   -H "Authorization: Bearer $TOKEN" | jq
 ```
+
+## Exam Set Publish Workflow
+
+Admin workflow for making exam sets visible to users on **สนามสอบเสมือนจริง**:
+
+1. **Create exam set** — `POST /api/v1/admin/exam-sets` (status starts as `draft`)
+2. **Assign questions** — add published questions via `/admin/exam-sets/:id/questions/bulk`
+3. **Check readiness** — `GET /api/v1/admin/exam-sets/:id/readiness`
+4. **Preview** — `GET /api/v1/admin/exam-sets/:id/preview` or admin UI at `/admin/exam-sets/:id/preview`
+5. **Publish** — `POST /api/v1/admin/exam-sets/:id/publish`
+6. Public users see the set on `/exams` and can start attempts
+
+Exam set status values:
+
+| Status | Meaning |
+|--------|---------|
+| `draft` | Admin is editing; hidden from users |
+| `published` | Visible and startable (`status = published` AND `is_active = true`) |
+| `archived` | Hidden from users; history preserved |
+
+Readiness check (admin only):
+
+```bash
+curl http://localhost:8080/api/v1/admin/exam-sets/<ID>/readiness \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Publish:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/admin/exam-sets/<ID>/publish \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Unpublish (returns to draft, blocks new attempts):
+
+```bash
+curl -X POST http://localhost:8080/api/v1/admin/exam-sets/<ID>/unpublish \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Archive:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/admin/exam-sets/<ID>/archive \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Starting an attempt on an unpublished set returns `EXAM_SET_NOT_PUBLISHED`.
 
 ## Response Format
 

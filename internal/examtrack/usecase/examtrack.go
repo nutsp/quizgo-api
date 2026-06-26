@@ -53,6 +53,6 @@ func (uc *ExamTrackUseCase) ListExamSets(ctx context.Context, trackCode string, 
 	}
 
 	filter.TrackID = track.ID
-	filter.OnlyActive = true
+	filter.OnlyPublished = true
 	return uc.examSets.List(ctx, filter)
 }

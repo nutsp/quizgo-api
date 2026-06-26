@@ -7,18 +7,32 @@ import (
 	"virtual-exam-api/internal/apperrors"
 	"virtual-exam-api/internal/examset/domain"
 	examsetrepo "virtual-exam-api/internal/examset/repository"
+	questionrepo "virtual-exam-api/internal/question/repository"
 	trackrepo "virtual-exam-api/internal/examtrack/repository"
 )
 
 type AdminUseCase struct {
-	sets        examsetrepo.AdminRepository
-	reads       examsetrepo.Repository
-	tracks      trackrepo.Repository
-	trackAdmin  trackrepo.AdminRepository
+	sets          examsetrepo.AdminRepository
+	reads         examsetrepo.Repository
+	tracks        trackrepo.Repository
+	trackAdmin    trackrepo.AdminRepository
+	setQuestions  questionrepo.ExamSetQuestionAdminRepository
 }
 
-func NewAdminUseCase(sets examsetrepo.AdminRepository, reads examsetrepo.Repository, tracks trackrepo.Repository, trackAdmin trackrepo.AdminRepository) *AdminUseCase {
-	return &AdminUseCase{sets: sets, reads: reads, tracks: tracks, trackAdmin: trackAdmin}
+func NewAdminUseCase(
+	sets examsetrepo.AdminRepository,
+	reads examsetrepo.Repository,
+	tracks trackrepo.Repository,
+	trackAdmin trackrepo.AdminRepository,
+	setQuestions questionrepo.ExamSetQuestionAdminRepository,
+) *AdminUseCase {
+	return &AdminUseCase{
+		sets:         sets,
+		reads:        reads,
+		tracks:       tracks,
+		trackAdmin:   trackAdmin,
+		setQuestions: setQuestions,
+	}
 }
 
 type CreateSetInput struct {
@@ -98,6 +112,7 @@ func (uc *AdminUseCase) Update(ctx context.Context, id uuid.UUID, input UpdateSe
 	}
 	set.ID = id
 	set.CreatedAt = existing.CreatedAt
+	set.Status = existing.Status
 	if set.Code != existing.Code {
 		byCode, err := uc.reads.FindByCode(ctx, set.Code)
 		if err != nil {
@@ -183,6 +198,7 @@ func (uc *AdminUseCase) buildSetFromInput(input CreateSetInput) (*domain.ExamSet
 		IsOfficial:      input.IsOfficial,
 		IsFeatured:      input.IsFeatured,
 		IsActive:        input.IsActive,
+		Status:          domain.StatusDraft,
 		ExamTrack:       &domain.ExamTrackRef{Code: track.Code, Name: track.Name},
 	}, nil
 }

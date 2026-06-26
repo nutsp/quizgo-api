@@ -9,6 +9,7 @@ import (
 	"virtual-exam-api/internal/apperrors"
 	"virtual-exam-api/internal/examattempt/domain"
 	attemptrepo "virtual-exam-api/internal/examattempt/repository"
+	examsetdomain "virtual-exam-api/internal/examset/domain"
 	examsetrepo "virtual-exam-api/internal/examset/repository"
 	qdomain "virtual-exam-api/internal/question/domain"
 	questionrepo "virtual-exam-api/internal/question/repository"
@@ -47,8 +48,11 @@ func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examS
 	if err != nil {
 		return nil, err
 	}
-	if set == nil || !set.IsActive {
+	if set == nil {
 		return nil, apperrors.ErrExamSetNotFound
+	}
+	if set.Status != examsetdomain.StatusPublished || !set.IsActive {
+		return nil, apperrors.ErrExamSetNotPublished
 	}
 	// Premium access is stubbed: payment is not implemented yet, so authenticated
 	// users may start any exam set. UI still shows premium pricing.
@@ -58,7 +62,7 @@ func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examS
 		return nil, err
 	}
 	if len(setQuestions) == 0 {
-		return nil, apperrors.ErrExamSetNotFound
+		return nil, apperrors.ErrExamSetHasNoQuestions
 	}
 
 	now := time.Now().UTC()

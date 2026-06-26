@@ -29,6 +29,7 @@ type AdminRepository interface {
 	Update(ctx context.Context, set *domain.ExamSet) error
 	Delete(ctx context.Context, id uuid.UUID) (deactivated bool, err error)
 	UpdateTotalQuestions(ctx context.Context, examSetID uuid.UUID, count int) error
+	UpdateStatus(ctx context.Context, id uuid.UUID, status string, isActive bool) error
 }
 
 type adminRepository struct {
@@ -114,6 +115,7 @@ func (r *adminRepository) Create(ctx context.Context, set *domain.ExamSet) error
 		IsOfficial:      set.IsOfficial,
 		IsFeatured:      set.IsFeatured,
 		IsActive:        set.IsActive,
+		Status:          domain.StatusDraft,
 		CreatedAt:       set.CreatedAt,
 		UpdatedAt:       set.UpdatedAt,
 	}
@@ -164,6 +166,14 @@ func (r *adminRepository) UpdateTotalQuestions(ctx context.Context, examSetID uu
 	return r.db.WithContext(ctx).Model(&ExamSetModel{}).Where("id = ?", examSetID).Updates(map[string]any{
 		"total_questions": count,
 		"updated_at":      time.Now().UTC(),
+	}).Error
+}
+
+func (r *adminRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status string, isActive bool) error {
+	return r.db.WithContext(ctx).Model(&ExamSetModel{}).Where("id = ?", id).Updates(map[string]any{
+		"status":     status,
+		"is_active":  isActive,
+		"updated_at": time.Now().UTC(),
 	}).Error
 }
 
@@ -222,7 +232,9 @@ func FindSetByCodeAdmin(ctx context.Context, db *gorm.DB, code string) (*domain.
 
 func CountActiveSets(ctx context.Context, db *gorm.DB) (int64, error) {
 	var count int64
-	err := db.WithContext(ctx).Model(&ExamSetModel{}).Where("is_active = ?", true).Count(&count).Error
+	err := db.WithContext(ctx).Model(&ExamSetModel{}).
+		Where("status = ? AND is_active = ?", domain.StatusPublished, true).
+		Count(&count).Error
 	return count, err
 }
 

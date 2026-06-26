@@ -33,7 +33,13 @@ import (
 	subjectuc "virtual-exam-api/internal/subject/usecase"
 	adminhttp "virtual-exam-api/internal/admin/transport/http"
 	dashboarduc "virtual-exam-api/internal/admin/dashboard/usecase"
+	esqrepo "virtual-exam-api/internal/examsetquestion/repository"
+	esquc "virtual-exam-api/internal/examsetquestion/usecase"
+	esqhttp "virtual-exam-api/internal/examsetquestion/transport/http"
 	trackadminuc "virtual-exam-api/internal/examtrack/usecase"
+	importhttp "virtual-exam-api/internal/questionimport/transport/http"
+	importrepo "virtual-exam-api/internal/questionimport/repository"
+	importuc "virtual-exam-api/internal/questionimport/usecase"
 	resultrepo "virtual-exam-api/internal/result/repository"
 	resulthttp "virtual-exam-api/internal/result/transport/http"
 	resultuc "virtual-exam-api/internal/result/usecase"
@@ -65,6 +71,8 @@ func main() {
 			&questionrepo.ExamSetQuestionModel{},
 			&attemptrepo.ExamAttemptModel{},
 			&attemptrepo.ExamAnswerModel{},
+			&importrepo.ImportJobModel{},
+			&importrepo.ImportRowModel{},
 		)
 	}
 
@@ -126,12 +134,21 @@ func main() {
 	setQuestionAdminRepo := questionrepo.NewExamSetQuestionAdminRepository(db)
 
 	trackAdminUC := trackadminuc.NewAdminUseCase(trackAdminRepo, trackRepository)
-	examSetAdminUC := examsetuc.NewAdminUseCase(examSetAdminRepo, examSetRepository, trackRepository, trackAdminRepo)
+	examSetAdminUC := examsetuc.NewAdminUseCase(examSetAdminRepo, examSetRepository, trackRepository, trackAdminRepo, setQuestionAdminRepo)
 	subjectAdminUC := subjectuc.NewSubjectUseCase(subjectAdminRepo)
 	questionAdminUC := questionuc.NewAdminUseCase(questionAdminRepo, setQuestionAdminRepo, subjectAdminRepo, examSetRepository, examSetAdminRepo, trackAdminRepo)
 	dashboardUC := dashboarduc.NewDashboardUseCase(db)
 
-	adminhttp.NewHandler(dashboardUC, trackAdminUC, examSetAdminUC, subjectAdminUC, questionAdminUC).
+	examSetQuestionRepo := esqrepo.NewPostgresRepository(db)
+	examSetQuestionUC := esquc.NewUseCase(examSetQuestionRepo, questionAdminRepo, examSetRepository, examSetAdminRepo, trackAdminRepo)
+	examSetQuestionHandler := esqhttp.NewHandler(examSetQuestionUC)
+
+	importRepository := importrepo.NewRepository(db)
+	importUseCase := importuc.NewUseCase(importRepository, subjectAdminRepo, questionAdminRepo)
+
+	importhttp.NewHandler(importUseCase).
+		RegisterRoutes(api, authMiddleware, middleware.AdminOnly())
+	adminhttp.NewHandler(dashboardUC, trackAdminUC, examSetAdminUC, subjectAdminUC, questionAdminUC, examSetQuestionHandler).
 		RegisterRoutes(api, authMiddleware, middleware.AdminOnly())
 
 	e.GET("/health", func(c echo.Context) error {

@@ -30,6 +30,7 @@ type ExamSetModel struct {
 	IsOfficial      bool      `gorm:"default:false"`
 	IsFeatured      bool      `gorm:"not null;default:false"`
 	IsActive        bool      `gorm:"default:true"`
+	Status          string    `gorm:"type:varchar(50);not null;default:draft"`
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 
@@ -75,7 +76,9 @@ func (r *postgresRepository) List(ctx context.Context, filter domain.ListFilter)
 	}
 
 	q := r.db.WithContext(ctx).Model(&ExamSetModel{}).Preload("ExamTrack")
-	if filter.OnlyActive {
+	if filter.OnlyPublished {
+		q = q.Where("exam_sets.status = ? AND exam_sets.is_active = ?", domain.StatusPublished, true)
+	} else if filter.OnlyActive {
 		q = q.Where("exam_sets.is_active = ?", true)
 	}
 	if filter.TrackID != uuid.Nil {
@@ -156,7 +159,7 @@ func (r *postgresRepository) ListPopular(ctx context.Context, limit int) ([]doma
 	var models []ExamSetModel
 	err := r.db.WithContext(ctx).
 		Preload("ExamTrack").
-		Where("is_active = ?", true).
+		Where("status = ? AND is_active = ?", domain.StatusPublished, true).
 		Order("is_featured DESC, created_at DESC").
 		Limit(limit).
 		Find(&models).Error
@@ -190,6 +193,7 @@ func toDomain(m *ExamSetModel) domain.ExamSet {
 		IsOfficial:      m.IsOfficial,
 		IsFeatured:      m.IsFeatured,
 		IsActive:        m.IsActive,
+		Status:          m.Status,
 		CreatedAt:       m.CreatedAt,
 		UpdatedAt:       m.UpdatedAt,
 	}

@@ -1,7 +1,6 @@
 package http
 
 import (
-	"errors"
 	"strconv"
 
 	"github.com/google/uuid"
@@ -17,14 +16,16 @@ import (
 	subjectrepo "virtual-exam-api/internal/subject/repository"
 	subjectuc "virtual-exam-api/internal/subject/usecase"
 	examsetrepo "virtual-exam-api/internal/examset/repository"
+	esqhttp "virtual-exam-api/internal/examsetquestion/transport/http"
 )
 
 type Handler struct {
-	dashboard  *dashboarduc.DashboardUseCase
-	tracks     *trackuc.AdminUseCase
-	sets       *examsetuc.AdminUseCase
-	subjects   *subjectuc.SubjectUseCase
-	questions  *questionuc.AdminUseCase
+	dashboard        *dashboarduc.DashboardUseCase
+	tracks           *trackuc.AdminUseCase
+	sets             *examsetuc.AdminUseCase
+	subjects         *subjectuc.SubjectUseCase
+	questions        *questionuc.AdminUseCase
+	examSetQuestions *esqhttp.Handler
 }
 
 func NewHandler(
@@ -33,13 +34,15 @@ func NewHandler(
 	sets *examsetuc.AdminUseCase,
 	subjects *subjectuc.SubjectUseCase,
 	questions *questionuc.AdminUseCase,
+	examSetQuestions *esqhttp.Handler,
 ) *Handler {
 	return &Handler{
-		dashboard: dashboard,
-		tracks:    tracks,
-		sets:      sets,
-		subjects:  subjects,
-		questions: questions,
+		dashboard:        dashboard,
+		tracks:           tracks,
+		sets:             sets,
+		subjects:         subjects,
+		questions:        questions,
+		examSetQuestions: examSetQuestions,
 	}
 }
 
@@ -55,13 +58,18 @@ func (h *Handler) RegisterRoutes(g *echo.Group, authMiddleware echo.MiddlewareFu
 
 	admin.GET("/exam-sets", h.ListSets)
 	admin.POST("/exam-sets", h.CreateSet)
+	admin.GET("/exam-sets/:id/readiness", h.GetSetReadiness)
+	admin.GET("/exam-sets/:id/preview", h.GetSetPreview)
+	admin.POST("/exam-sets/:id/publish", h.PublishSet)
+	admin.POST("/exam-sets/:id/unpublish", h.UnpublishSet)
+	admin.POST("/exam-sets/:id/archive", h.ArchiveSet)
 	admin.GET("/exam-sets/:id", h.GetSet)
 	admin.PUT("/exam-sets/:id", h.UpdateSet)
 	admin.DELETE("/exam-sets/:id", h.DeleteSet)
-	admin.GET("/exam-sets/:id/questions", h.ListSetQuestions)
-	admin.POST("/exam-sets/:id/questions", h.AddSetQuestion)
-	admin.PUT("/exam-sets/:id/questions/reorder", h.ReorderSetQuestions)
-	admin.DELETE("/exam-sets/:id/questions/:questionId", h.RemoveSetQuestion)
+
+	if h.examSetQuestions != nil {
+		h.examSetQuestions.RegisterRoutes(admin)
+	}
 
 	admin.GET("/subjects", h.ListSubjects)
 	admin.POST("/subjects", h.CreateSubject)
@@ -232,6 +240,66 @@ func (h *Handler) DeleteSet(c echo.Context) error {
 	return response.JSON(c, 200, map[string]any{"deactivated": deactivated})
 }
 
+func (h *Handler) GetSetReadiness(c echo.Context) error {
+	id, err := parseUUID(c.Param("id"))
+	if err != nil {
+		return response.Error(c, err)
+	}
+	result, err := h.sets.CheckReadiness(c.Request().Context(), id)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	return response.JSON(c, 200, result)
+}
+
+func (h *Handler) GetSetPreview(c echo.Context) error {
+	id, err := parseUUID(c.Param("id"))
+	if err != nil {
+		return response.Error(c, err)
+	}
+	result, err := h.sets.GetPreview(c.Request().Context(), id)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	return response.JSON(c, 200, result)
+}
+
+func (h *Handler) PublishSet(c echo.Context) error {
+	id, err := parseUUID(c.Param("id"))
+	if err != nil {
+		return response.Error(c, err)
+	}
+	result, err := h.sets.Publish(c.Request().Context(), id)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	return response.JSON(c, 200, result)
+}
+
+func (h *Handler) UnpublishSet(c echo.Context) error {
+	id, err := parseUUID(c.Param("id"))
+	if err != nil {
+		return response.Error(c, err)
+	}
+	result, err := h.sets.Unpublish(c.Request().Context(), id)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	return response.JSON(c, 200, result)
+}
+
+func (h *Handler) ArchiveSet(c echo.Context) error {
+	id, err := parseUUID(c.Param("id"))
+	if err != nil {
+		return response.Error(c, err)
+	}
+	result, err := h.sets.Archive(c.Request().Context(), id)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	return response.JSON(c, 200, result)
+}
+
 func (h *Handler) ListSubjects(c echo.Context) error {
 	filter := subjectrepo.SubjectAdminFilter{
 		Query: c.QueryParam("q"),
@@ -368,66 +436,6 @@ func (h *Handler) DeleteQuestion(c echo.Context) error {
 		return response.Error(c, err)
 	}
 	return response.JSON(c, 200, map[string]any{"archived": archived})
-}
-
-func (h *Handler) ListSetQuestions(c echo.Context) error {
-	id, err := parseUUID(c.Param("id"))
-	if err != nil {
-		return response.Error(c, err)
-	}
-	result, err := h.questions.ListExamSetQuestions(c.Request().Context(), id)
-	if err != nil {
-		return response.Error(c, err)
-	}
-	return response.JSON(c, 200, map[string]any{"items": result})
-}
-
-func (h *Handler) AddSetQuestion(c echo.Context) error {
-	id, err := parseUUID(c.Param("id"))
-	if err != nil {
-		return response.Error(c, err)
-	}
-	var input questionuc.AddSetQuestionInput
-	if err := c.Bind(&input); err != nil {
-		return response.Error(c, apperrors.ErrInvalidInput)
-	}
-	if err := h.questions.AddExamSetQuestion(c.Request().Context(), id, input); err != nil {
-		if errors.Is(err, apperrors.ErrDuplicateQuestion) {
-			return response.Error(c, err)
-		}
-		return response.Error(c, err)
-	}
-	return response.JSON(c, 201, map[string]string{"status": "added"})
-}
-
-func (h *Handler) ReorderSetQuestions(c echo.Context) error {
-	id, err := parseUUID(c.Param("id"))
-	if err != nil {
-		return response.Error(c, err)
-	}
-	var input questionuc.ReorderInput
-	if err := c.Bind(&input); err != nil {
-		return response.Error(c, apperrors.ErrInvalidInput)
-	}
-	if err := h.questions.ReorderExamSetQuestions(c.Request().Context(), id, input); err != nil {
-		return response.Error(c, err)
-	}
-	return response.JSON(c, 200, map[string]string{"status": "reordered"})
-}
-
-func (h *Handler) RemoveSetQuestion(c echo.Context) error {
-	setID, err := parseUUID(c.Param("id"))
-	if err != nil {
-		return response.Error(c, err)
-	}
-	questionID, err := parseUUID(c.Param("questionId"))
-	if err != nil {
-		return response.Error(c, err)
-	}
-	if err := h.questions.RemoveExamSetQuestion(c.Request().Context(), setID, questionID); err != nil {
-		return response.Error(c, err)
-	}
-	return response.JSON(c, 200, map[string]string{"status": "removed"})
 }
 
 func parseUUID(s string) (uuid.UUID, error) {

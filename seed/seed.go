@@ -168,6 +168,7 @@ func Run(ctx context.Context, db *gorm.DB) error {
 			IsOfficial:      def.IsOfficial,
 			IsFeatured:      def.IsFeatured,
 			IsActive:        true,
+			Status:          "published",
 		}
 		if err := db.WithContext(ctx).Create(&set).Error; err != nil {
 			return fmt.Errorf("seed exam set %s: %w", def.Code, err)

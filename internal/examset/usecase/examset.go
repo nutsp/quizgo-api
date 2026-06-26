@@ -19,8 +19,12 @@ func NewExamSetUseCase(examSets examsetrepo.Repository, questions questionrepo.R
 }
 
 func (uc *ExamSetUseCase) List(ctx context.Context, filter domain.ListFilter) (*domain.PaginatedResult, error) {
-	filter.OnlyActive = true
+	filter.OnlyPublished = true
 	return uc.examSets.List(ctx, filter)
+}
+
+func (uc *ExamSetUseCase) isPubliclyVisible(set *domain.ExamSet) bool {
+	return set != nil && set.Status == domain.StatusPublished && set.IsActive
 }
 
 func (uc *ExamSetUseCase) GetByCode(ctx context.Context, code string) (*domain.ExamSetSummary, error) {
@@ -28,7 +32,7 @@ func (uc *ExamSetUseCase) GetByCode(ctx context.Context, code string) (*domain.E
 	if err != nil {
 		return nil, err
 	}
-	if set == nil || !set.IsActive {
+	if !uc.isPubliclyVisible(set) {
 		return nil, apperrors.ErrExamSetNotFound
 	}
 	summary := set.ToSummary()
@@ -40,7 +44,7 @@ func (uc *ExamSetUseCase) QuestionsPreview(ctx context.Context, code string) (*d
 	if err != nil {
 		return nil, err
 	}
-	if set == nil || !set.IsActive {
+	if !uc.isPubliclyVisible(set) {
 		return nil, apperrors.ErrExamSetNotFound
 	}
 
