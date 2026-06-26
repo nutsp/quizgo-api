@@ -62,6 +62,40 @@ Demo exam set code for frontend: `demo`
 | admin@example.com | password123 | admin |
 | demo@example.com | password123 | user |
 
+## Google Social Login Setup
+
+1. Create a Google OAuth Client in [Google Cloud Console](https://console.cloud.google.com/apis/credentials).
+2. Set **Authorized redirect URI**:
+
+```text
+http://localhost:8080/api/v1/auth/oauth/google/callback
+```
+
+3. Add to `.env`:
+
+```env
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_REDIRECT_URL=http://localhost:8080/api/v1/auth/oauth/google/callback
+FRONTEND_URL=http://localhost:3000
+OAUTH_STATE_SECRET=change-me
+```
+
+4. Restart the backend.
+
+Flow:
+
+```text
+Frontend → GET /api/v1/auth/oauth/google/login
+         → Google consent
+         → GET /api/v1/auth/oauth/google/callback
+         → redirect to FRONTEND_URL/auth/callback?token=<internal_jwt>
+```
+
+The backend issues its own JWT after Google login. Google access tokens are not exposed to the frontend.
+
+> **Production TODO:** Prefer setting an httpOnly secure cookie instead of passing the JWT in the callback URL query string.
+
 ## Admin
 
 Admin UI lives in the Next.js app at `/admin` (requires `role = admin`).
@@ -279,6 +313,8 @@ curl -X POST http://localhost:8080/api/v1/admin/subjects \
 | POST | /api/v1/auth/register | No |
 | POST | /api/v1/auth/login | No |
 | GET | /api/v1/auth/me | Yes |
+| GET | /api/v1/auth/oauth/google/login | No |
+| GET | /api/v1/auth/oauth/google/callback | No |
 | GET | /api/v1/home | Optional |
 | GET | /api/v1/exam-tracks | No |
 | GET | /api/v1/exam-tracks/:trackCode | No |

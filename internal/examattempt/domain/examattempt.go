@@ -121,25 +121,39 @@ type SubmitResponse struct {
 type SubjectBreakdown struct {
 	SubjectName  string  `json:"subject_name"`
 	Correct      int     `json:"correct"`
+	Wrong        int     `json:"wrong"`
+	Unanswered   int     `json:"unanswered"`
 	Total        int     `json:"total"`
 	ScorePercent float64 `json:"score_percent"`
 }
 
+type WeaknessAnalysisItem struct {
+	SubjectName    string  `json:"subject_name"`
+	ScorePercent   float64 `json:"score_percent"`
+	Recommendation string  `json:"recommendation"`
+}
+
+type ResultSummary struct {
+	Status          string     `json:"status"`
+	Score           float64    `json:"score"`
+	TotalScore      float64    `json:"total_score"`
+	ScorePercent    float64    `json:"score_percent"`
+	Passed          bool       `json:"passed"`
+	CorrectCount    int        `json:"correct_count"`
+	WrongCount      int        `json:"wrong_count"`
+	UnansweredCount int        `json:"unanswered_count"`
+	DurationSeconds int        `json:"duration_seconds"`
+	StartedAt       time.Time  `json:"started_at"`
+	SubmittedAt     *time.Time `json:"submitted_at,omitempty"`
+}
+
 type ResultResponse struct {
-	AttemptID         string             `json:"attempt_id"`
-	Status            string             `json:"status"`
-	Score             float64            `json:"score"`
-	TotalScore        float64            `json:"total_score"`
-	ScorePercent      float64            `json:"score_percent"`
-	CorrectCount      int                `json:"correct_count"`
-	WrongCount        int                `json:"wrong_count"`
-	UnansweredCount   int                `json:"unanswered_count"`
-	DurationSeconds   int                `json:"duration_seconds"`
-	Passed            bool               `json:"passed"`
-	ExamSet           ExamSetRef         `json:"exam_set"`
-	SubjectBreakdown  []SubjectBreakdown `json:"subject_breakdown"`
-	WeaknessAnalysis  []SubjectBreakdown `json:"weakness_analysis"`
-	NextRecommended   []string           `json:"next_recommended_actions"`
+	AttemptID        string                 `json:"attempt_id"`
+	ExamSet          ExamSetRef             `json:"exam_set"`
+	ExamTrack        ExamTrackRef           `json:"exam_track"`
+	Summary          ResultSummary          `json:"summary"`
+	SubjectBreakdown []SubjectBreakdown     `json:"subject_breakdown"`
+	WeaknessAnalysis []WeaknessAnalysisItem `json:"weakness_analysis"`
 }
 
 type ReviewResponse struct {
@@ -148,14 +162,23 @@ type ReviewResponse struct {
 	Questions []QuestionForReview `json:"questions"`
 }
 
+type ReviewChoice struct {
+	ChoiceKey   string `json:"choice_key"`
+	ChoiceLabel string `json:"choice_label"`
+	ChoiceText  string `json:"choice_text"`
+	IsSelected  bool   `json:"is_selected"`
+	IsCorrect   bool   `json:"is_correct"`
+}
+
 type QuestionForReview struct {
 	QuestionNo        int            `json:"question_no"`
 	QuestionID        string         `json:"question_id"`
 	QuestionText      string         `json:"question_text"`
-	Choices           []ChoicePublic `json:"choices"`
+	Choices           []ReviewChoice `json:"choices"`
 	SelectedChoiceKey *string        `json:"selected_choice_key"`
 	CorrectChoiceKey  string         `json:"correct_choice_key"`
 	IsCorrect         bool           `json:"is_correct"`
+	IsUnanswered      bool           `json:"is_unanswered"`
 	Explanation       string         `json:"explanation"`
 	Subject           string         `json:"subject"`
 }

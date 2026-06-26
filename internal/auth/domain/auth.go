@@ -26,9 +26,10 @@ type LoginResponse struct {
 }
 
 type UserProfileResponse struct {
-	ID          string  `json:"id"`
-	DisplayName string  `json:"display_name"`
-	Email       string  `json:"email"`
-	Role        string  `json:"role"`
-	AvatarURL   *string `json:"avatar_url,omitempty"`
+	ID                string  `json:"id"`
+	DisplayName       string  `json:"display_name"`
+	PublicDisplayName string  `json:"public_display_name"`
+	Email             string  `json:"email"`
+	Role              string  `json:"role"`
+	AvatarURL         *string `json:"avatar_url,omitempty"`
 }

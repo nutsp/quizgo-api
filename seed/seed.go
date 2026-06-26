@@ -233,12 +233,13 @@ func Run(ctx context.Context, db *gorm.DB) error {
 	if err != nil {
 		return fmt.Errorf("hash demo password: %w", err)
 	}
+	passwordHash := string(hash)
 
 	demoUser := userrepo.UserModel{
 		ID:           uuid.New(),
 		DisplayName:  "Demo User",
 		Email:        "demo@example.com",
-		PasswordHash: string(hash),
+		PasswordHash: &passwordHash,
 		Role:         "user",
 	}
 	if err := db.WithContext(ctx).Create(&demoUser).Error; err != nil {
@@ -249,7 +250,7 @@ func Run(ctx context.Context, db *gorm.DB) error {
 		ID:           uuid.New(),
 		DisplayName:  "Admin",
 		Email:        "admin@example.com",
-		PasswordHash: string(hash),
+		PasswordHash: &passwordHash,
 		Role:         "admin",
 	}
 	if err := db.WithContext(ctx).Create(&adminUser).Error; err != nil {
@@ -293,11 +294,12 @@ func EnsureAdminUser(ctx context.Context, db *gorm.DB) error {
 	if err != nil {
 		return fmt.Errorf("hash admin password: %w", err)
 	}
+	adminPasswordHash := string(hash)
 	adminUser := userrepo.UserModel{
 		ID:           uuid.New(),
 		DisplayName:  "Admin",
 		Email:        "admin@example.com",
-		PasswordHash: string(hash),
+		PasswordHash: &adminPasswordHash,
 		Role:         "admin",
 	}
 	if err := db.WithContext(ctx).Create(&adminUser).Error; err != nil {

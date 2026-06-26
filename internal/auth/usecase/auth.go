@@ -83,6 +83,10 @@ func (uc *AuthUseCase) Login(ctx context.Context, req authdomain.LoginRequest) (
 		return nil, apperrors.ErrInvalidCredentials
 	}
 
+	if user.PasswordHash == "" {
+		return nil, apperrors.ErrInvalidCredentials
+	}
+
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
 		return nil, apperrors.ErrInvalidCredentials
 	}
@@ -100,12 +104,14 @@ func (uc *AuthUseCase) Me(ctx context.Context, userID uuid.UUID) (*authdomain.Us
 	}
 
 	profile := user.ToProfile()
+	publicName := userdomain.PublicDisplayName(user.DisplayName, user.Email)
 	return &authdomain.UserProfileResponse{
-		ID:          profile.ID.String(),
-		DisplayName: profile.DisplayName,
-		Email:       profile.Email,
-		Role:        profile.Role,
-		AvatarURL:   profile.AvatarURL,
+		ID:                profile.ID.String(),
+		DisplayName:       profile.DisplayName,
+		PublicDisplayName: publicName,
+		Email:             profile.Email,
+		Role:              profile.Role,
+		AvatarURL:         profile.AvatarURL,
 	}, nil
 }
 
@@ -122,6 +128,10 @@ func (uc *AuthUseCase) ParseToken(tokenStr string) (*authdomain.Claims, error) {
 		return nil, apperrors.ErrUnauthorized
 	}
 	return claims, nil
+}
+
+func (uc *AuthUseCase) IssueTokenForUser(user *userdomain.User) (*authdomain.LoginResponse, error) {
+	return uc.buildLoginResponse(user)
 }
 
 func (uc *AuthUseCase) buildLoginResponse(user *userdomain.User) (*authdomain.LoginResponse, error) {
@@ -144,14 +154,16 @@ func (uc *AuthUseCase) buildLoginResponse(user *userdomain.User) (*authdomain.Lo
 	}
 
 	profile := user.ToProfile()
+	publicName := userdomain.PublicDisplayName(user.DisplayName, user.Email)
 	return &authdomain.LoginResponse{
 		AccessToken: tokenStr,
 		User: authdomain.UserProfileResponse{
-			ID:          profile.ID.String(),
-			DisplayName: profile.DisplayName,
-			Email:       profile.Email,
-			Role:        profile.Role,
-			AvatarURL:   profile.AvatarURL,
+			ID:                profile.ID.String(),
+			DisplayName:       profile.DisplayName,
+			PublicDisplayName: publicName,
+			Email:             profile.Email,
+			Role:              profile.Role,
+			AvatarURL:         profile.AvatarURL,
 		},
 	}, nil
 }

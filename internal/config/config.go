@@ -27,6 +27,11 @@ type Config struct {
 	CORSAllowedOrigins []string
 	AutoMigrate        bool
 	AutoSeed           bool
+	GoogleClientID     string
+	GoogleClientSecret string
+	GoogleRedirectURL  string
+	FrontendURL        string
+	OAuthStateSecret   string
 }
 
 func Load() (*Config, error) {
@@ -59,6 +64,11 @@ func Load() (*Config, error) {
 		CORSAllowedOrigins: splitCSV(getEnv("CORS_ALLOWED_ORIGINS", "http://localhost:3000")),
 		AutoMigrate:        getEnvBool("AUTO_MIGRATE", true),
 		AutoSeed:           getEnvBool("AUTO_SEED", true),
+		GoogleClientID:     getEnv("GOOGLE_CLIENT_ID", ""),
+		GoogleClientSecret: getEnv("GOOGLE_CLIENT_SECRET", ""),
+		GoogleRedirectURL:  getEnv("GOOGLE_REDIRECT_URL", "http://localhost:8080/api/v1/auth/oauth/google/callback"),
+		FrontendURL:        getEnv("FRONTEND_URL", "http://localhost:3000"),
+		OAuthStateSecret:   getEnv("OAUTH_STATE_SECRET", "change-me"),
 	}
 
 	return cfg, nil

@@ -13,6 +13,8 @@ import (
 	echomw "github.com/labstack/echo/v4/middleware"
 	authhttp "virtual-exam-api/internal/auth/transport/http"
 	authuc "virtual-exam-api/internal/auth/usecase"
+	oauthpkg "virtual-exam-api/internal/auth/oauth"
+	oauthrepo "virtual-exam-api/internal/auth/oauth/repository"
 	"virtual-exam-api/internal/config"
 	"virtual-exam-api/internal/database"
 	attempthttp "virtual-exam-api/internal/examattempt/transport/http"
@@ -40,6 +42,11 @@ import (
 	importhttp "virtual-exam-api/internal/questionimport/transport/http"
 	importrepo "virtual-exam-api/internal/questionimport/repository"
 	importuc "virtual-exam-api/internal/questionimport/usecase"
+	leaderboardrepo "virtual-exam-api/internal/leaderboard/repository"
+	leaderboardhttp "virtual-exam-api/internal/leaderboard/transport/http"
+	leaderboarduc "virtual-exam-api/internal/leaderboard/usecase"
+	profilehttp "virtual-exam-api/internal/profile/transport/http"
+	profileuc "virtual-exam-api/internal/profile/usecase"
 	resultrepo "virtual-exam-api/internal/result/repository"
 	resulthttp "virtual-exam-api/internal/result/transport/http"
 	resultuc "virtual-exam-api/internal/result/usecase"
@@ -63,6 +70,7 @@ func main() {
 	if cfg.AutoMigrate {
 		database.MustMigrate(db,
 			&userrepo.UserModel{},
+			&oauthrepo.OAuthAccountModel{},
 			&trackrepo.ExamTrackModel{},
 			&examsetrepo.ExamSetModel{},
 			&questionrepo.SubjectModel{},
@@ -96,6 +104,8 @@ func main() {
 	attemptCache := attemptrepo.NewRedisRepository(rdb.Raw())
 
 	authUseCase := authuc.NewAuthUseCase(userRepository, cfg)
+	oauthRepository := oauthrepo.NewPostgresRepository(db)
+	oauthService := oauthpkg.NewService(userRepository, oauthRepository, authUseCase, cfg)
 	trackUseCase := trackuc.NewExamTrackUseCase(trackRepository, examSetRepository)
 	examSetUseCase := examsetuc.NewExamSetUseCase(examSetRepository, questionRepository)
 	scoringUseCase := scoringuc.NewScoringUseCase()
@@ -118,7 +128,7 @@ func main() {
 	optionalAuth := middleware.OptionalJWTAuth(authUseCase)
 
 	api := e.Group("/api/v1")
-	authhttp.NewHandler(authUseCase).RegisterRoutes(api, authMiddleware)
+	authhttp.NewHandler(authUseCase, oauthService).RegisterRoutes(api, authMiddleware)
 	homehttp.NewHandler(homeUseCase).RegisterRoutes(api, optionalAuth)
 	trackhttp.NewHandler(trackUseCase).RegisterRoutes(api)
 	examsethttp.NewHandler(examSetUseCase, attemptUseCase).RegisterRoutes(api, authMiddleware)
@@ -126,6 +136,13 @@ func main() {
 	resultRepository := resultrepo.NewPostgresRepository(db)
 	resultUseCase := resultuc.NewResultUseCase(resultRepository)
 	resulthttp.NewHandler(resultUseCase).RegisterRoutes(api, authMiddleware)
+
+	leaderboardRepository := leaderboardrepo.NewPostgresRepository(db)
+	leaderboardUseCase := leaderboarduc.NewLeaderboardUseCase(leaderboardRepository)
+	leaderboardhttp.NewHandler(leaderboardUseCase).RegisterRoutes(api, authMiddleware)
+
+	profileUseCase := profileuc.NewProfileUseCase(userRepository, resultRepository)
+	profilehttp.NewHandler(profileUseCase).RegisterRoutes(api, authMiddleware)
 
 	trackAdminRepo := trackrepo.NewAdminRepository(db)
 	examSetAdminRepo := examsetrepo.NewAdminRepository(db)

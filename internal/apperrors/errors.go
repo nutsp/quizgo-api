@@ -17,6 +17,10 @@ func New(code, message string, status int) *AppError {
 	return &AppError{Code: code, Message: message, HTTPStatus: status}
 }
 
+func ValidationError(message string) *AppError {
+	return New("VALIDATION_ERROR", message, http.StatusBadRequest)
+}
+
 var (
 	ErrUnauthorized       = New("UNAUTHORIZED", "กรุณาเข้าสู่ระบบ", http.StatusUnauthorized)
 	ErrForbidden          = New("FORBIDDEN", "ไม่มีสิทธิ์เข้าถึง", http.StatusForbidden)
@@ -29,7 +33,10 @@ var (
 	ErrAttemptNotFound    = New("ATTEMPT_NOT_FOUND", "ไม่พบข้อมูลการสอบ", http.StatusNotFound)
 	ErrAttemptExpired     = New("ATTEMPT_EXPIRED", "หมดเวลาทำข้อสอบแล้ว", http.StatusBadRequest)
 	ErrAttemptSubmitted   = New("ATTEMPT_SUBMITTED", "ส่งคำตอบแล้ว ไม่สามารถแก้ไขได้", http.StatusBadRequest)
-	ErrAttemptNotEditable = New("ATTEMPT_NOT_EDITABLE", "ไม่สามารถแก้ไขคำตอบได้", http.StatusBadRequest)
+	ErrAttemptNotEditable      = New("ATTEMPT_NOT_EDITABLE", "ไม่สามารถแก้ไขคำตอบได้", http.StatusBadRequest)
+	ErrAttemptNotSubmitted     = New("ATTEMPT_NOT_SUBMITTED", "ยังไม่ได้ส่งคำตอบ ไม่สามารถดูผลสอบได้", http.StatusBadRequest)
+	ErrResultNotAvailable      = New("RESULT_NOT_AVAILABLE", "ยังไม่สามารถดูผลสอบได้", http.StatusBadRequest)
+	ErrUnauthorizedAttemptAccess = New("UNAUTHORIZED_ATTEMPT_ACCESS", "ไม่มีสิทธิ์เข้าถึงการสอบนี้", http.StatusForbidden)
 	ErrQuestionNotFound   = New("QUESTION_NOT_FOUND", "ไม่พบข้อสอบ", http.StatusNotFound)
 	ErrEmailTaken         = New("EMAIL_TAKEN", "อีเมลนี้ถูกใช้งานแล้ว", http.StatusConflict)
 	ErrInvalidCredentials = New("INVALID_CREDENTIALS", "อีเมลหรือรหัสผ่านไม่ถูกต้อง", http.StatusUnauthorized)

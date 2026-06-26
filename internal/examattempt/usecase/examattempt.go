@@ -396,28 +396,37 @@ func (uc *ExamAttemptUseCase) GetResult(ctx context.Context, userID, attemptID u
 		examSetRef = *attempt.ExamSet
 	}
 
+	examTrackRef := domain.ExamTrackRef{}
+	if attempt.ExamTrack != nil {
+		examTrackRef = *attempt.ExamTrack
+	}
+
 	duration := 0
 	if attempt.DurationSeconds != nil {
 		duration = *attempt.DurationSeconds
 	}
 
-	recommendations := buildRecommendations(weakness)
+	passed := int(attempt.ScorePercent) >= examSetRef.PassingScore
 
 	return &domain.ResultResponse{
-		AttemptID:        attempt.ID.String(),
-		Status:           attempt.Status,
-		Score:            attempt.Score,
-		TotalScore:       attempt.TotalScore,
-		ScorePercent:     attempt.ScorePercent,
-		CorrectCount:     attempt.CorrectCount,
-		WrongCount:       attempt.WrongCount,
-		UnansweredCount:  attempt.UnansweredCount,
-		DurationSeconds:  duration,
-		Passed:           int(attempt.ScorePercent) >= examSetRef.PassingScore,
-		ExamSet:          examSetRef,
+		AttemptID: attempt.ID.String(),
+		ExamSet:   examSetRef,
+		ExamTrack: examTrackRef,
+		Summary: domain.ResultSummary{
+			Status:          attempt.Status,
+			Score:           attempt.Score,
+			TotalScore:      attempt.TotalScore,
+			ScorePercent:    attempt.ScorePercent,
+			Passed:          passed,
+			CorrectCount:    attempt.CorrectCount,
+			WrongCount:      attempt.WrongCount,
+			UnansweredCount: attempt.UnansweredCount,
+			DurationSeconds: duration,
+			StartedAt:       attempt.StartedAt,
+			SubmittedAt:     attempt.SubmittedAt,
+		},
 		SubjectBreakdown: mapSubjectBreakdown(breakdown),
-		WeaknessAnalysis: mapSubjectBreakdown(weakness),
-		NextRecommended:  recommendations,
+		WeaknessAnalysis: mapWeaknessAnalysis(weakness),
 	}, nil
 }
 
@@ -435,16 +444,21 @@ func (uc *ExamAttemptUseCase) GetReview(ctx context.Context, userID, attemptID u
 	questions := make([]domain.QuestionForReview, 0, len(rows))
 	for _, row := range rows {
 		correctKey := ""
-		publicChoices := make([]domain.ChoicePublic, 0, len(row.Question.Choices))
+		selectedKey := row.Answer.SelectedChoiceKey
+		isUnanswered := selectedKey == nil || *selectedKey == ""
+		reviewChoices := make([]domain.ReviewChoice, 0, len(row.Question.Choices))
 		for _, c := range row.Question.Choices {
-			publicChoices = append(publicChoices, domain.ChoicePublic{
-				ChoiceKey:   c.ChoiceKey,
-				ChoiceLabel: c.ChoiceLabel,
-				ChoiceText:  c.ChoiceText,
-			})
 			if c.IsCorrect {
 				correctKey = c.ChoiceKey
 			}
+			isSelected := selectedKey != nil && *selectedKey == c.ChoiceKey
+			reviewChoices = append(reviewChoices, domain.ReviewChoice{
+				ChoiceKey:   c.ChoiceKey,
+				ChoiceLabel: c.ChoiceLabel,
+				ChoiceText:  c.ChoiceText,
+				IsSelected:  isSelected,
+				IsCorrect:   c.IsCorrect,
+			})
 		}
 		isCorrect := false
 		if row.Answer.IsCorrect != nil {
@@ -454,10 +468,11 @@ func (uc *ExamAttemptUseCase) GetReview(ctx context.Context, userID, attemptID u
 			QuestionNo:        row.Answer.QuestionNo,
 			QuestionID:        row.Answer.QuestionID.String(),
 			QuestionText:      row.Question.QuestionText,
-			Choices:           publicChoices,
-			SelectedChoiceKey: row.Answer.SelectedChoiceKey,
+			Choices:           reviewChoices,
+			SelectedChoiceKey: selectedKey,
 			CorrectChoiceKey:  correctKey,
 			IsCorrect:         isCorrect,
+			IsUnanswered:      isUnanswered,
 			Explanation:       row.Question.Explanation,
 			Subject:           row.Question.SubjectName,
 		})
@@ -544,7 +559,7 @@ func (uc *ExamAttemptUseCase) getSubmittedAttempt(ctx context.Context, userID, a
 		return nil, err
 	}
 	if attempt.Status != domain.StatusSubmitted && attempt.Status != domain.StatusTimeout {
-		return nil, apperrors.ErrAttemptNotEditable
+		return nil, apperrors.ErrResultNotAvailable
 	}
 	return attempt, nil
 }
@@ -618,6 +633,8 @@ func mapSubjectBreakdown(items []scoringdomain.SubjectScore) []domain.SubjectBre
 		out[i] = domain.SubjectBreakdown{
 			SubjectName:  s.SubjectName,
 			Correct:      s.Correct,
+			Wrong:        s.Wrong,
+			Unanswered:   s.Unanswered,
 			Total:        s.Total,
 			ScorePercent: s.ScorePercent,
 		}
@@ -625,13 +642,14 @@ func mapSubjectBreakdown(items []scoringdomain.SubjectScore) []domain.SubjectBre
 	return out
 }
 
-func buildRecommendations(weakness []scoringdomain.SubjectScore) []string {
-	if len(weakness) == 0 {
-		return []string{"ทำข้อสอบชุดใหม่เพื่อวัดความก้าวหน้า"}
+func mapWeaknessAnalysis(items []scoringdomain.SubjectScore) []domain.WeaknessAnalysisItem {
+	out := make([]domain.WeaknessAnalysisItem, len(items))
+	for i, s := range items {
+		out[i] = domain.WeaknessAnalysisItem{
+			SubjectName:    s.SubjectName,
+			ScorePercent:   s.ScorePercent,
+			Recommendation: "ควรฝึกข้อสอบหมวดนี้เพิ่ม",
+		}
 	}
-	recs := make([]string, 0, len(weakness))
-	for _, w := range weakness {
-		recs = append(recs, "ฝึกทำข้อสอบวิชา"+w.SubjectName+"เพิ่มเติม")
-	}
-	return recs
+	return out
 }

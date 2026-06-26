@@ -23,6 +23,8 @@ type AnswerScore struct {
 type SubjectScore struct {
 	SubjectName  string
 	Correct      int
+	Wrong        int
+	Unanswered   int
 	Total        int
 	ScorePercent float64
 }

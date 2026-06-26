@@ -85,10 +85,14 @@ func (uc *ScoringUseCase) SubjectBreakdown(answers []AnswerInput, correctChoices
 			subjectStats[name] = &scoringdomain.SubjectScore{SubjectName: name}
 		}
 		subjectStats[name].Total++
-		if a.SelectedChoiceKey != nil {
-			if correctKey, ok := correctChoices[a.QuestionID]; ok && *a.SelectedChoiceKey == correctKey {
-				subjectStats[name].Correct++
-			}
+		if a.SelectedChoiceKey == nil || *a.SelectedChoiceKey == "" {
+			subjectStats[name].Unanswered++
+			continue
+		}
+		if correctKey, ok := correctChoices[a.QuestionID]; ok && *a.SelectedChoiceKey == correctKey {
+			subjectStats[name].Correct++
+		} else {
+			subjectStats[name].Wrong++
 		}
 	}
 
