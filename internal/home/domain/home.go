@@ -1,10 +1,12 @@
 package domain
 
+import examsetdomain "virtual-exam-api/internal/examset/domain"
+
 type HomeResponse struct {
-	RecommendedExamTracks []ExamTrackItem   `json:"recommended_exam_tracks"`
-	PopularExamSets       []ExamSetItem     `json:"popular_exam_sets"`
-	ContinueAttempt       *ContinueAttempt  `json:"continue_attempt"`
-	MyProgressSummary     *ProgressSummary  `json:"my_progress_summary"`
+	RecommendedExamTracks []ExamTrackItem                    `json:"recommended_exam_tracks"`
+	PopularExamSets       []examsetdomain.ExamSetSummary       `json:"popular_exam_sets"`
+	ContinueAttempt       *ContinueAttempt                     `json:"continue_attempt"`
+	MyProgressSummary     *ProgressSummary                     `json:"my_progress_summary"`
 }
 
 type ExamTrackItem struct {
@@ -20,26 +22,6 @@ type ExamTrackItem struct {
 type ExamTrackRef struct {
 	Code string `json:"code"`
 	Name string `json:"name"`
-}
-
-type ExamSetItem struct {
-	ID              string        `json:"id,omitempty"`
-	Code            string        `json:"code"`
-	Title           string        `json:"title"`
-	Description     string        `json:"description,omitempty"`
-	CoverImageURL   *string       `json:"cover_image_url,omitempty"`
-	DurationMinutes int           `json:"duration_minutes"`
-	TotalQuestions  int           `json:"total_questions"`
-	PassingScore    int           `json:"passing_score"`
-	Difficulty      string        `json:"difficulty"`
-	AccessType      string        `json:"access_type"`
-	PriceAmount     float64       `json:"price_amount"`
-	Currency        string        `json:"currency"`
-	SalePriceAmount *float64      `json:"sale_price_amount,omitempty"`
-	Mode            string        `json:"mode"`
-	IsOfficial      bool          `json:"is_official"`
-	IsFeatured      bool          `json:"is_featured,omitempty"`
-	ExamTrack       *ExamTrackRef `json:"exam_track,omitempty"`
 }
 
 type ContinueAttempt struct {

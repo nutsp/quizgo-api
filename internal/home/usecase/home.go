@@ -7,26 +7,31 @@ import (
 
 	"github.com/google/uuid"
 	attemptrepo "virtual-exam-api/internal/examattempt/repository"
+	entitlementuc "virtual-exam-api/internal/entitlement/usecase"
+	examsetdomain "virtual-exam-api/internal/examset/domain"
 	examsetrepo "virtual-exam-api/internal/examset/repository"
 	"virtual-exam-api/internal/home/domain"
 	trackrepo "virtual-exam-api/internal/examtrack/repository"
 )
 
 type HomeUseCase struct {
-	tracks    trackrepo.Repository
-	examSets  examsetrepo.Repository
-	attempts  attemptrepo.Repository
+	tracks       trackrepo.Repository
+	examSets     examsetrepo.Repository
+	attempts     attemptrepo.Repository
+	entitlements *entitlementuc.UseCase
 }
 
 func NewHomeUseCase(
 	tracks trackrepo.Repository,
 	examSets examsetrepo.Repository,
 	attempts attemptrepo.Repository,
+	entitlements *entitlementuc.UseCase,
 ) *HomeUseCase {
 	return &HomeUseCase{
-		tracks:   tracks,
-		examSets: examSets,
-		attempts: attempts,
+		tracks:       tracks,
+		examSets:     examSets,
+		attempts:     attempts,
+		entitlements: entitlements,
 	}
 }
 
@@ -54,33 +59,14 @@ func (uc *HomeUseCase) GetHome(ctx context.Context, userID *uuid.UUID) (*domain.
 		return nil, err
 	}
 
-	popular := make([]domain.ExamSetItem, 0, len(popularSets))
-	for _, s := range popularSets {
-		item := domain.ExamSetItem{
-			ID:              s.ID.String(),
-			Code:            s.Code,
-			Title:           s.Title,
-			Description:     s.Description,
-			CoverImageURL:   s.CoverImageURL,
-			DurationMinutes: s.DurationMinutes,
-			TotalQuestions:  s.TotalQuestions,
-			PassingScore:    s.PassingScore,
-			Difficulty:      s.Difficulty,
-			AccessType:      s.AccessType,
-			PriceAmount:     s.PriceAmount,
-			Currency:        s.Currency,
-			SalePriceAmount: s.SalePriceAmount,
-			Mode:            s.Mode,
-			IsOfficial:      s.IsOfficial,
-			IsFeatured:      s.IsFeatured,
+	popular := make([]examsetdomain.ExamSetSummary, 0, len(popularSets))
+	for i := range popularSets {
+		summary := popularSets[i].ToSummary()
+		if uc.entitlements != nil {
+			access := uc.entitlements.BuildAccessInfo(ctx, userID, &popularSets[i])
+			summary.Access = &access
 		}
-		if s.ExamTrack != nil {
-			item.ExamTrack = &domain.ExamTrackRef{
-				Code: s.ExamTrack.Code,
-				Name: s.ExamTrack.Name,
-			}
-		}
-		popular = append(popular, item)
+		popular = append(popular, summary)
 	}
 
 	resp := &domain.HomeResponse{
