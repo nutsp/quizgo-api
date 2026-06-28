@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"virtual-exam-api/internal/apperrors"
+	"virtual-exam-api/internal/cache"
 	"virtual-exam-api/internal/common/pagination"
 	esdomain "virtual-exam-api/internal/examset/domain"
 	examsetrepo "virtual-exam-api/internal/examset/repository"
@@ -18,11 +19,12 @@ import (
 )
 
 type UseCase struct {
-	repo       esqrepo.Repository
-	questions  questionrepo.QuestionAdminRepository
-	sets       examsetrepo.Repository
-	setAdmin   examsetrepo.AdminRepository
-	trackAdmin trackrepo.AdminRepository
+	repo        esqrepo.Repository
+	questions   questionrepo.QuestionAdminRepository
+	sets        examsetrepo.Repository
+	setAdmin    examsetrepo.AdminRepository
+	trackAdmin  trackrepo.AdminRepository
+	invalidator *cache.Invalidator
 }
 
 func NewUseCase(
@@ -31,13 +33,15 @@ func NewUseCase(
 	sets examsetrepo.Repository,
 	setAdmin examsetrepo.AdminRepository,
 	trackAdmin trackrepo.AdminRepository,
+	invalidator *cache.Invalidator,
 ) *UseCase {
 	return &UseCase{
-		repo:       repo,
-		questions:  questions,
-		sets:       sets,
-		setAdmin:   setAdmin,
-		trackAdmin: trackAdmin,
+		repo:        repo,
+		questions:   questions,
+		sets:        sets,
+		setAdmin:    setAdmin,
+		trackAdmin:  trackAdmin,
+		invalidator: invalidator,
 	}
 }
 
@@ -357,7 +361,7 @@ func (uc *UseCase) Reorder(ctx context.Context, examSetID uuid.UUID, input Reord
 	if err := uc.repo.Reorder(ctx, examSetID, items); err != nil {
 		return err
 	}
-	_ = set
+	uc.invalidateExamSetCache(ctx, set)
 	return nil
 }
 
@@ -442,7 +446,18 @@ func (uc *UseCase) syncExamSetQuestionCount(ctx context.Context, set *esdomain.E
 	if err := uc.setAdmin.UpdateTotalQuestions(ctx, set.ID, int(count)); err != nil {
 		return err
 	}
-	return uc.trackAdmin.RefreshCounters(ctx, set.ExamTrackID)
+	if err := uc.trackAdmin.RefreshCounters(ctx, set.ExamTrackID); err != nil {
+		return err
+	}
+	uc.invalidateExamSetCache(ctx, set)
+	return nil
+}
+
+func (uc *UseCase) invalidateExamSetCache(ctx context.Context, set *esdomain.ExamSet) {
+	if uc.invalidator == nil || set == nil {
+		return
+	}
+	uc.invalidator.OnExamSetChanged(ctx, set.ID.String(), set.Code)
 }
 
 func toAvailableResponse(item esqdomain.AvailableQuestion) AvailableQuestionResponse {

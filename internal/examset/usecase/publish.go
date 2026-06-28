@@ -154,6 +154,9 @@ func (uc *AdminUseCase) Publish(ctx context.Context, id uuid.UUID) (*PublishStat
 	if err := uc.sets.UpdateStatus(ctx, id, domain.StatusPublished, true); err != nil {
 		return nil, err
 	}
+	if uc.invalidator != nil {
+		uc.invalidator.OnExamSetChanged(ctx, id.String(), set.Code)
+	}
 	return &PublishStatusResponse{
 		ID:       id.String(),
 		Code:     set.Code,
@@ -174,6 +177,9 @@ func (uc *AdminUseCase) Unpublish(ctx context.Context, id uuid.UUID) (*PublishSt
 	if err := uc.sets.UpdateStatus(ctx, id, domain.StatusDraft, set.IsActive); err != nil {
 		return nil, err
 	}
+	if uc.invalidator != nil {
+		uc.invalidator.OnExamSetChanged(ctx, id.String(), set.Code)
+	}
 	return &PublishStatusResponse{
 		ID:     id.String(),
 		Status: domain.StatusDraft,
@@ -190,6 +196,9 @@ func (uc *AdminUseCase) Archive(ctx context.Context, id uuid.UUID) (*PublishStat
 	}
 	if err := uc.sets.UpdateStatus(ctx, id, domain.StatusArchived, false); err != nil {
 		return nil, err
+	}
+	if uc.invalidator != nil {
+		uc.invalidator.OnExamSetChanged(ctx, id.String(), set.Code)
 	}
 	return &PublishStatusResponse{
 		ID:       id.String(),

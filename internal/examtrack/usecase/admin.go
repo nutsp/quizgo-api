@@ -5,18 +5,20 @@ import (
 
 	"github.com/google/uuid"
 	"virtual-exam-api/internal/apperrors"
+	"virtual-exam-api/internal/cache"
 	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/examtrack/domain"
 	trackrepo "virtual-exam-api/internal/examtrack/repository"
 )
 
 type AdminUseCase struct {
-	tracks trackrepo.AdminRepository
-	reads  trackrepo.Repository
+	tracks      trackrepo.AdminRepository
+	reads       trackrepo.Repository
+	invalidator *cache.Invalidator
 }
 
-func NewAdminUseCase(tracks trackrepo.AdminRepository, reads trackrepo.Repository) *AdminUseCase {
-	return &AdminUseCase{tracks: tracks, reads: reads}
+func NewAdminUseCase(tracks trackrepo.AdminRepository, reads trackrepo.Repository, invalidator *cache.Invalidator) *AdminUseCase {
+	return &AdminUseCase{tracks: tracks, reads: reads, invalidator: invalidator}
 }
 
 type CreateTrackInput struct {
@@ -95,6 +97,9 @@ func (uc *AdminUseCase) Create(ctx context.Context, input CreateTrackInput) (*Tr
 	if err := uc.tracks.Create(ctx, &track); err != nil {
 		return nil, err
 	}
+	if uc.invalidator != nil {
+		uc.invalidator.OnExamTrackChanged(ctx)
+	}
 	resp := toTrackAdminResponse(track)
 	return &resp, nil
 }
@@ -130,6 +135,9 @@ func (uc *AdminUseCase) Update(ctx context.Context, id uuid.UUID, input UpdateTr
 	if err := uc.tracks.Update(ctx, track); err != nil {
 		return nil, err
 	}
+	if uc.invalidator != nil {
+		uc.invalidator.OnExamTrackChanged(ctx)
+	}
 	resp := toTrackAdminResponse(*track)
 	return &resp, nil
 }
@@ -142,7 +150,11 @@ func (uc *AdminUseCase) Delete(ctx context.Context, id uuid.UUID) (deactivated b
 	if track == nil {
 		return false, apperrors.ErrExamTrackNotFound
 	}
-	return uc.tracks.Delete(ctx, id)
+	deactivated, err = uc.tracks.Delete(ctx, id)
+	if err == nil && uc.invalidator != nil {
+		uc.invalidator.OnExamTrackChanged(ctx)
+	}
+	return deactivated, err
 }
 
 func toTrackAdminResponse(t domain.ExamTrack) TrackAdminResponse {

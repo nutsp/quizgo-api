@@ -16,6 +16,7 @@ import (
 	oauthpkg "virtual-exam-api/internal/auth/oauth"
 	oauthrepo "virtual-exam-api/internal/auth/oauth/repository"
 	"virtual-exam-api/internal/config"
+	"virtual-exam-api/internal/cache"
 	"virtual-exam-api/internal/database"
 	attempthttp "virtual-exam-api/internal/examattempt/transport/http"
 	attemptrepo "virtual-exam-api/internal/examattempt/repository"
@@ -110,26 +111,32 @@ func main() {
 		}
 	}
 
-	rdb, err := redisclient.NewClient(cfg)
+	rdb, err := redisclient.NewClients(cfg)
 	if err != nil {
 		log.Fatalf("connect redis: %v", err)
 	}
 	defer rdb.Close()
+
+	contentCache := cache.NewRedisCache(rdb.Content, "content", cfg.RedisCacheEnabled)
+	userCache := cache.NewRedisCache(rdb.User, "user", cfg.RedisCacheEnabled)
+	resultCache := cache.NewRedisCache(rdb.Result, "result", cfg.RedisCacheEnabled)
+	cacheInvalidator := cache.NewInvalidator(contentCache, userCache, resultCache)
+	runtimeLocks := cache.NewRuntimeLocks(rdb.Runtime)
 
 	userRepository := userrepo.NewPostgresRepository(db)
 	trackRepository := trackrepo.NewPostgresRepository(db)
 	examSetRepository := examsetrepo.NewPostgresRepository(db)
 	questionRepository := questionrepo.NewPostgresRepository(db)
 	attemptRepository := attemptrepo.NewPostgresRepository(db)
-	attemptCache := attemptrepo.NewRedisRepository(rdb.Raw())
+	attemptCache := attemptrepo.NewRedisRepository(rdb.Runtime)
 
 	authUseCase := authuc.NewAuthUseCase(userRepository, cfg)
 	oauthRepository := oauthrepo.NewPostgresRepository(db)
 	oauthService := oauthpkg.NewService(userRepository, oauthRepository, authUseCase, cfg)
-	trackUseCase := trackuc.NewExamTrackUseCase(trackRepository, examSetRepository)
 	entitlementRepository := entrepo.NewPostgresRepository(db)
-	entitlementUseCase := entuc.NewUseCase(entitlementRepository, examSetRepository, userRepository)
-	examSetUseCase := examsetuc.NewExamSetUseCase(examSetRepository, questionRepository, entitlementUseCase)
+	entitlementUseCase := entuc.NewUseCaseWithAttempts(entitlementRepository, examSetRepository, userRepository, attemptRepository, userCache, cacheInvalidator)
+	trackUseCase := trackuc.NewExamTrackUseCase(trackRepository, examSetRepository, contentCache)
+	examSetUseCase := examsetuc.NewExamSetUseCaseWithAttempts(examSetRepository, questionRepository, entitlementUseCase, attemptRepository, contentCache)
 	scoringUseCase := scoringuc.NewScoringUseCase()
 	attemptUseCase := attemptuc.NewExamAttemptUseCase(
 		attemptRepository,
@@ -138,8 +145,11 @@ func main() {
 		questionRepository,
 		scoringUseCase,
 		entitlementUseCase,
+		resultCache,
+		runtimeLocks,
+		cacheInvalidator,
 	)
-	homeUseCase := homeuc.NewHomeUseCase(trackRepository, examSetRepository, attemptRepository, entitlementUseCase)
+	homeUseCase := homeuc.NewHomeUseCase(trackRepository, examSetRepository, attemptRepository, entitlementUseCase, contentCache)
 
 	e := echo.New()
 	e.HideBanner = true
@@ -173,15 +183,15 @@ func main() {
 	questionAdminRepo := questionrepo.NewQuestionAdminRepository(db, tagAdminRepo)
 	setQuestionAdminRepo := questionrepo.NewExamSetQuestionAdminRepository(db)
 
-	trackAdminUC := trackadminuc.NewAdminUseCase(trackAdminRepo, trackRepository)
-	examSetAdminUC := examsetuc.NewAdminUseCase(examSetAdminRepo, examSetRepository, trackRepository, trackAdminRepo, setQuestionAdminRepo)
+	trackAdminUC := trackadminuc.NewAdminUseCase(trackAdminRepo, trackRepository, cacheInvalidator)
+	examSetAdminUC := examsetuc.NewAdminUseCase(examSetAdminRepo, examSetRepository, trackRepository, trackAdminRepo, setQuestionAdminRepo, cacheInvalidator)
 	subjectAdminUC := subjectuc.NewSubjectUseCase(subjectAdminRepo)
 	tagAdminUC := taguc.NewTagUseCase(tagAdminRepo)
 	questionAdminUC := questionuc.NewAdminUseCase(questionAdminRepo, setQuestionAdminRepo, subjectAdminRepo, tagAdminUC, examSetRepository, examSetAdminRepo, trackAdminRepo)
 	dashboardUC := dashboarduc.NewDashboardUseCase(db)
 
 	examSetQuestionRepo := esqrepo.NewPostgresRepository(db)
-	examSetQuestionUC := esquc.NewUseCase(examSetQuestionRepo, questionAdminRepo, examSetRepository, examSetAdminRepo, trackAdminRepo)
+	examSetQuestionUC := esquc.NewUseCase(examSetQuestionRepo, questionAdminRepo, examSetRepository, examSetAdminRepo, trackAdminRepo, cacheInvalidator)
 	examSetQuestionHandler := esqhttp.NewHandler(examSetQuestionUC)
 
 	importRepository := importrepo.NewRepository(db)

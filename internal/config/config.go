@@ -22,6 +22,11 @@ type Config struct {
 	RedisAddr          string
 	RedisPassword      string
 	RedisDB            int
+	RedisContentDB     int
+	RedisUserDB        int
+	RedisResultDB      int
+	RedisRuntimeDB     int
+	RedisCacheEnabled  bool
 	JWTSecret          string
 	JWTExpiresIn       time.Duration
 	CORSAllowedOrigins []string
@@ -46,6 +51,22 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse REDIS_DB: %w", err)
 	}
+	redisContentDB, err := strconv.Atoi(getEnv("REDIS_CONTENT_DB", "0"))
+	if err != nil {
+		return nil, fmt.Errorf("parse REDIS_CONTENT_DB: %w", err)
+	}
+	redisUserDB, err := strconv.Atoi(getEnv("REDIS_USER_DB", "1"))
+	if err != nil {
+		return nil, fmt.Errorf("parse REDIS_USER_DB: %w", err)
+	}
+	redisResultDB, err := strconv.Atoi(getEnv("REDIS_RESULT_DB", "2"))
+	if err != nil {
+		return nil, fmt.Errorf("parse REDIS_RESULT_DB: %w", err)
+	}
+	redisRuntimeDB, err := strconv.Atoi(getEnv("REDIS_RUNTIME_DB", "3"))
+	if err != nil {
+		return nil, fmt.Errorf("parse REDIS_RUNTIME_DB: %w", err)
+	}
 
 	cfg := &Config{
 		AppEnv:             getEnv("APP_ENV", "local"),
@@ -59,6 +80,11 @@ func Load() (*Config, error) {
 		RedisAddr:          getEnv("REDIS_ADDR", "localhost:6379"),
 		RedisPassword:      getEnv("REDIS_PASSWORD", ""),
 		RedisDB:            redisDB,
+		RedisContentDB:     redisContentDB,
+		RedisUserDB:        redisUserDB,
+		RedisResultDB:      redisResultDB,
+		RedisRuntimeDB:     redisRuntimeDB,
+		RedisCacheEnabled:  getEnvBool("REDIS_CACHE_ENABLED", true),
 		JWTSecret:          getEnv("JWT_SECRET", "change-me"),
 		JWTExpiresIn:       jwtExpires,
 		CORSAllowedOrigins: splitCSV(getEnv("CORS_ALLOWED_ORIGINS", "http://localhost:3000")),

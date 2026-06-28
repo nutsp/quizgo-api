@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	entdomain "virtual-exam-api/internal/entitlement/domain"
 	entrepo "virtual-exam-api/internal/entitlement/repository"
+	"virtual-exam-api/internal/cache"
 	examsetdomain "virtual-exam-api/internal/examset/domain"
 )
 
@@ -38,6 +39,9 @@ func (f *fakeEntitlementRepo) FindActiveExamSetEntitlementForUpdate(context.Cont
 	return nil, nil
 }
 func (f *fakeEntitlementRepo) ListAccessibleExamSets(context.Context, uuid.UUID, time.Time) ([]entdomain.AccessibleExamSetRow, error) {
+	return nil, nil
+}
+func (f *fakeEntitlementRepo) ListActiveExamSetEntitlementsByUser(context.Context, uuid.UUID, time.Time) ([]entdomain.EntitlementExamSetRow, error) {
 	return nil, nil
 }
 
@@ -305,7 +309,7 @@ func TestCheckExamSetAccess(t *testing.T) {
 				tt.setup(repo, set)
 			}
 
-			uc := NewUseCase(repo, nil, nil)
+			uc := NewUseCase(repo, nil, nil, cache.Noop(), nil)
 			got := uc.CheckExamSetAccessWithQuestionCount(ctx, tt.userID, set, tt.questions)
 
 			if got.CanStart != tt.wantStart {
@@ -314,12 +318,21 @@ func TestCheckExamSetAccess(t *testing.T) {
 			if reasonOf(got) != tt.wantReason {
 				t.Fatalf("Reason = %q, want %q", reasonOf(got), tt.wantReason)
 			}
+			if got.CanStart && got.AccessSource == "" {
+				t.Fatalf("expected access_source when CanStart is true")
+			}
+			if got.CanStart && set.AccessType == examsetdomain.AccessFree && got.AccessSource != entdomain.AccessSourceFree {
+				t.Fatalf("free access_source = %q", got.AccessSource)
+			}
+			if got.CanStart && set.AccessType == examsetdomain.AccessPremium && got.HasPremium && got.AccessSource != entdomain.AccessSourcePremium {
+				t.Fatalf("premium access_source = %q", got.AccessSource)
+			}
 		})
 	}
 }
 
 func TestAccessDeniedError(t *testing.T) {
-	uc := NewUseCase(newFakeEntitlementRepo(), nil, nil)
+	uc := NewUseCase(newFakeEntitlementRepo(), nil, nil, cache.Noop(), nil)
 	set := publishedExamSet()
 	set.AccessType = examsetdomain.AccessPaid
 

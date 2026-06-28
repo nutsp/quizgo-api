@@ -7,6 +7,8 @@ import (
 
 	"github.com/google/uuid"
 	"virtual-exam-api/internal/apperrors"
+	attemptrepo "virtual-exam-api/internal/examattempt/repository"
+	"virtual-exam-api/internal/cache"
 	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/entitlement/domain"
 	entrepo "virtual-exam-api/internal/entitlement/repository"
@@ -19,18 +21,41 @@ type UseCase struct {
 	entitlements entrepo.Repository
 	examSets     examsetrepo.Repository
 	users        userrepo.Repository
+	attempts     attemptrepo.Repository
+	userCache    cache.CacheService
+	invalidator  *cache.Invalidator
 }
 
 func NewUseCase(
 	entitlements entrepo.Repository,
 	examSets examsetrepo.Repository,
 	users userrepo.Repository,
+	userCache cache.CacheService,
+	invalidator *cache.Invalidator,
 ) *UseCase {
+	if userCache == nil {
+		userCache = cache.Noop()
+	}
 	return &UseCase{
 		entitlements: entitlements,
 		examSets:     examSets,
 		users:        users,
+		userCache:    userCache,
+		invalidator:  invalidator,
 	}
+}
+
+func NewUseCaseWithAttempts(
+	entitlements entrepo.Repository,
+	examSets examsetrepo.Repository,
+	users userrepo.Repository,
+	attempts attemptrepo.Repository,
+	userCache cache.CacheService,
+	invalidator *cache.Invalidator,
+) *UseCase {
+	uc := NewUseCase(entitlements, examSets, users, userCache, invalidator)
+	uc.attempts = attempts
+	return uc
 }
 
 func (uc *UseCase) CheckExamSetAccess(ctx context.Context, userID *uuid.UUID, set *examsetdomain.ExamSet) domain.ExamSetAccessResult {
@@ -62,18 +87,22 @@ func (uc *UseCase) CheckExamSetAccessWithQuestionCount(
 	}
 
 	now := time.Now().UTC()
-	hasPremium := uc.hasActivePremium(ctx, *userID, now)
-	hasExamSet := uc.hasActiveExamSet(ctx, *userID, set.ID, now)
+	premiumEnt, _ := uc.entitlements.FindActivePremiumEntitlement(ctx, *userID, now)
+	examSetEnt, _ := uc.entitlements.FindActiveExamSetEntitlement(ctx, *userID, set.ID, now)
+	hasPremium := premiumEnt != nil
+	hasExamSet := examSetEnt != nil
 	result.HasPremium = hasPremium
 	result.HasExamSetAccess = hasExamSet
 
 	switch set.AccessType {
 	case examsetdomain.AccessFree:
 		result.CanStart = true
+		result.AccessSource = domain.AccessSourceFree
 		return result
 	case examsetdomain.AccessPaid:
 		if hasExamSet {
 			result.CanStart = true
+			uc.applyExamSetAccessSnapshot(&result, examSetEnt, set.AccessType)
 			return result
 		}
 		result.Reason = strPtr(domain.ReasonAccessRequired)
@@ -82,11 +111,13 @@ func (uc *UseCase) CheckExamSetAccessWithQuestionCount(
 		if hasPremium {
 			result.CanStart = true
 			result.AvailableOptions = []string{"premium"}
+			uc.applyPremiumAccessSnapshot(&result, premiumEnt)
 			return result
 		}
 		if set.AllowSinglePurchase && hasExamSet {
 			result.CanStart = true
 			result.AvailableOptions = []string{"single_purchase"}
+			uc.applyExamSetAccessSnapshot(&result, examSetEnt, set.AccessType)
 			return result
 		}
 		if set.AllowSinglePurchase {
@@ -100,6 +131,7 @@ func (uc *UseCase) CheckExamSetAccessWithQuestionCount(
 	case examsetdomain.AccessPrivate:
 		if hasExamSet {
 			result.CanStart = true
+			uc.applyExamSetAccessSnapshot(&result, examSetEnt, set.AccessType)
 			return result
 		}
 		result.Reason = strPtr(domain.ReasonPrivateExamAccessRequired)
@@ -108,6 +140,37 @@ func (uc *UseCase) CheckExamSetAccessWithQuestionCount(
 		result.Reason = strPtr(domain.ReasonAccessRequired)
 		return result
 	}
+}
+
+func (uc *UseCase) applyPremiumAccessSnapshot(result *domain.ExamSetAccessResult, ent *domain.Entitlement) {
+	if ent == nil {
+		result.AccessSource = domain.AccessSourcePremium
+		return
+	}
+	result.AccessSource = domain.AccessSourcePremium
+	result.EntitlementID = &ent.ID
+	result.AccessExpiresAt = ent.ExpiresAt
+}
+
+func (uc *UseCase) applyExamSetAccessSnapshot(result *domain.ExamSetAccessResult, ent *domain.Entitlement, accessType string) {
+	if ent == nil {
+		if accessType == examsetdomain.AccessPrivate {
+			result.AccessSource = domain.AccessSourcePrivateGrant
+		} else {
+			result.AccessSource = domain.AccessSourceSinglePurchase
+		}
+		return
+	}
+	switch {
+	case accessType == examsetdomain.AccessPrivate:
+		result.AccessSource = domain.AccessSourcePrivateGrant
+	case ent.Source == domain.SourceManual:
+		result.AccessSource = domain.AccessSourceManualGrant
+	default:
+		result.AccessSource = domain.AccessSourceSinglePurchase
+	}
+	result.EntitlementID = &ent.ID
+	result.AccessExpiresAt = ent.ExpiresAt
 }
 
 func isExamSetAvailable(set *examsetdomain.ExamSet, assignedQuestionCount int) bool {
@@ -254,6 +317,9 @@ func (uc *UseCase) GrantExamSetAccess(ctx context.Context, input domain.GrantExa
 		return nil, err
 	}
 	ent.RefName = &set.Title
+	if uc.invalidator != nil {
+		uc.invalidator.OnUserAccessChanged(ctx, input.UserID.String())
+	}
 	return ent, nil
 }
 
@@ -287,6 +353,9 @@ func (uc *UseCase) GrantPremiumAccess(ctx context.Context, input domain.GrantPre
 	if err := uc.entitlements.Create(ctx, ent); err != nil {
 		return nil, err
 	}
+	if uc.invalidator != nil {
+		uc.invalidator.OnUserAccessChanged(ctx, input.UserID.String())
+	}
 	return ent, nil
 }
 
@@ -305,6 +374,9 @@ func (uc *UseCase) RevokeEntitlement(ctx context.Context, entitlementID, actorID
 		return nil, err
 	}
 	ent.IsActive = false
+	if uc.invalidator != nil {
+		uc.invalidator.OnUserAccessChanged(ctx, ent.UserID.String())
+	}
 	return ent, nil
 }
 
@@ -367,6 +439,14 @@ func (uc *UseCase) hasActivePremium(ctx context.Context, userID uuid.UUID, now t
 func (uc *UseCase) hasActiveExamSet(ctx context.Context, userID, examSetID uuid.UUID, now time.Time) bool {
 	ent, err := uc.entitlements.FindActiveExamSetEntitlement(ctx, userID, examSetID, now)
 	return err == nil && ent != nil
+}
+
+func (uc *UseCase) GetActivePremiumEntitlement(ctx context.Context, userID uuid.UUID) (*domain.Entitlement, bool, error) {
+	ent, err := uc.entitlements.FindActivePremiumEntitlement(ctx, userID, time.Now().UTC())
+	if err != nil {
+		return nil, false, err
+	}
+	return ent, ent != nil, nil
 }
 
 type EntitlementResponse struct {

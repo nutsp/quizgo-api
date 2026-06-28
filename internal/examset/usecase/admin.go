@@ -5,6 +5,7 @@ import (
 
 	"github.com/google/uuid"
 	"virtual-exam-api/internal/apperrors"
+	"virtual-exam-api/internal/cache"
 	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/examset/domain"
 	examsetrepo "virtual-exam-api/internal/examset/repository"
@@ -18,6 +19,7 @@ type AdminUseCase struct {
 	tracks        trackrepo.Repository
 	trackAdmin    trackrepo.AdminRepository
 	setQuestions  questionrepo.ExamSetQuestionAdminRepository
+	invalidator   *cache.Invalidator
 }
 
 func NewAdminUseCase(
@@ -26,6 +28,7 @@ func NewAdminUseCase(
 	tracks trackrepo.Repository,
 	trackAdmin trackrepo.AdminRepository,
 	setQuestions questionrepo.ExamSetQuestionAdminRepository,
+	invalidator *cache.Invalidator,
 ) *AdminUseCase {
 	return &AdminUseCase{
 		sets:         sets,
@@ -33,6 +36,7 @@ func NewAdminUseCase(
 		tracks:       tracks,
 		trackAdmin:   trackAdmin,
 		setQuestions: setQuestions,
+		invalidator:  invalidator,
 	}
 }
 
@@ -119,6 +123,9 @@ func (uc *AdminUseCase) Create(ctx context.Context, input CreateSetInput) (*SetA
 		return nil, err
 	}
 	_ = uc.trackAdmin.RefreshCounters(ctx, set.ExamTrackID)
+	if uc.invalidator != nil {
+		uc.invalidator.OnExamSetChanged(ctx, set.ID.String(), set.Code)
+	}
 	return toSetAdminResponse(set), nil
 }
 
@@ -153,6 +160,12 @@ func (uc *AdminUseCase) Update(ctx context.Context, id uuid.UUID, input UpdateSe
 	if existing.ExamTrackID != set.ExamTrackID {
 		_ = uc.trackAdmin.RefreshCounters(ctx, existing.ExamTrackID)
 	}
+	if uc.invalidator != nil {
+		uc.invalidator.OnExamSetChanged(ctx, set.ID.String(), set.Code)
+		if existing.Code != set.Code {
+			uc.invalidator.OnExamSetChanged(ctx, set.ID.String(), existing.Code)
+		}
+	}
 	return toSetAdminResponse(set), nil
 }
 
@@ -164,7 +177,11 @@ func (uc *AdminUseCase) Delete(ctx context.Context, id uuid.UUID) (bool, error) 
 	if set == nil {
 		return false, apperrors.ErrExamSetNotFound
 	}
-	return uc.sets.Delete(ctx, id)
+	deactivated, err := uc.sets.Delete(ctx, id)
+	if err == nil && uc.invalidator != nil {
+		uc.invalidator.OnExamSetChanged(ctx, set.ID.String(), set.Code)
+	}
+	return deactivated, err
 }
 
 func (uc *AdminUseCase) buildSetFromInput(input CreateSetInput, existingLayout *domain.AnswerSheetLayoutConfig) (*domain.ExamSet, error) {

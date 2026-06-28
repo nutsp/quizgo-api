@@ -47,6 +47,7 @@ type Repository interface {
 	HasActivePremiumEntitlement(ctx context.Context, userID uuid.UUID) (bool, *time.Time, error)
 	FindActiveExamSetEntitlementForUpdate(ctx context.Context, userID, examSetID uuid.UUID) (*domain.Entitlement, error)
 	ListAccessibleExamSets(ctx context.Context, userID uuid.UUID, now time.Time) ([]domain.AccessibleExamSetRow, error)
+	ListActiveExamSetEntitlementsByUser(ctx context.Context, userID uuid.UUID, now time.Time) ([]domain.EntitlementExamSetRow, error)
 }
 
 type PostgresRepository struct {
@@ -355,6 +356,108 @@ ORDER BY es.title ASC`
 			AttemptStatus:      row.AttemptStatus,
 			ScorePercent:       row.ScorePercent,
 			AttemptSubmittedAt: row.AttemptSubmittedAt,
+		}
+	}
+	return out, nil
+}
+
+type entitlementExamSetRow struct {
+	ExamSetID          uuid.UUID  `gorm:"column:exam_set_id"`
+	ExamTrackID        uuid.UUID  `gorm:"column:exam_track_id"`
+	ExamSetCode        string     `gorm:"column:exam_set_code"`
+	ExamSetTitle       string     `gorm:"column:exam_set_title"`
+	ExamSetDescription string     `gorm:"column:exam_set_description"`
+	CoverImageURL      *string    `gorm:"column:cover_image_url"`
+	DurationMinutes    int        `gorm:"column:duration_minutes"`
+	TotalQuestions     int        `gorm:"column:total_questions"`
+	PassingScore       int        `gorm:"column:passing_score"`
+	Difficulty         string     `gorm:"column:difficulty"`
+	AccessType         string     `gorm:"column:access_type"`
+	AllowSinglePurchase bool      `gorm:"column:allow_single_purchase"`
+	TrackCode          string     `gorm:"column:track_code"`
+	TrackName          string     `gorm:"column:track_name"`
+	EntitlementID      uuid.UUID  `gorm:"column:entitlement_id"`
+	EntitlementSource  string     `gorm:"column:entitlement_source"`
+	EntitlementStarts  time.Time  `gorm:"column:entitlement_starts_at"`
+	EntitlementExpires *time.Time `gorm:"column:entitlement_expires_at"`
+}
+
+func (r *PostgresRepository) ListActiveExamSetEntitlementsByUser(ctx context.Context, userID uuid.UUID, now time.Time) ([]domain.EntitlementExamSetRow, error) {
+	const query = `
+SELECT
+  es.id AS exam_set_id,
+  es.exam_track_id,
+  es.code AS exam_set_code,
+  es.title AS exam_set_title,
+  es.description AS exam_set_description,
+  es.cover_image_url,
+  es.duration_minutes,
+  es.total_questions,
+  es.passing_score,
+  es.difficulty,
+  es.access_type,
+  es.allow_single_purchase,
+  et.code AS track_code,
+  et.name AS track_name,
+  ue.id AS entitlement_id,
+  ue.source AS entitlement_source,
+  ue.starts_at AS entitlement_starts_at,
+  ue.expires_at AS entitlement_expires_at
+FROM user_entitlements ue
+JOIN exam_sets es ON es.id = ue.ref_id
+JOIN exam_tracks et ON et.id = es.exam_track_id
+WHERE ue.user_id = ?
+  AND ue.entitlement_type = ?
+  AND ue.ref_type = ?
+  AND ue.is_active = true
+  AND ue.starts_at <= ?
+  AND (ue.expires_at IS NULL OR ue.expires_at > ?)
+  AND es.status = 'published'
+  AND es.is_active = true
+ORDER BY es.title ASC`
+
+	var rows []entitlementExamSetRow
+	err := r.db.WithContext(ctx).Raw(
+		query,
+		userID,
+		domain.TypeExamSet,
+		domain.RefTypeExamSet,
+		now,
+		now,
+	).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]domain.EntitlementExamSetRow, len(rows))
+	for i, row := range rows {
+		out[i] = domain.EntitlementExamSetRow{
+			ExamSet: examsetdomain.ExamSet{
+				ID:                  row.ExamSetID,
+				ExamTrackID:         row.ExamTrackID,
+				Code:                row.ExamSetCode,
+				Title:               row.ExamSetTitle,
+				Description:         row.ExamSetDescription,
+				CoverImageURL:       row.CoverImageURL,
+				DurationMinutes:     row.DurationMinutes,
+				TotalQuestions:      row.TotalQuestions,
+				PassingScore:        row.PassingScore,
+				Difficulty:          row.Difficulty,
+				AccessType:            row.AccessType,
+				AllowSinglePurchase: row.AllowSinglePurchase,
+				ExamTrack: &examsetdomain.ExamTrackRef{
+					Code: row.TrackCode,
+					Name: row.TrackName,
+				},
+			},
+			Entitlement: domain.Entitlement{
+				ID:        row.EntitlementID,
+				UserID:    userID,
+				Source:    row.EntitlementSource,
+				StartsAt:  row.EntitlementStarts,
+				ExpiresAt: row.EntitlementExpires,
+				IsActive:  true,
+			},
 		}
 	}
 	return out, nil

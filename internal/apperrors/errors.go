@@ -58,6 +58,7 @@ var (
 	ErrCodeTaken          = New("CODE_TAKEN", "รหัสนี้ถูกใช้งานแล้ว", http.StatusConflict)
 	ErrSubjectHasQuestions = New("SUBJECT_HAS_QUESTIONS", "ไม่สามารถลบหมวดวิชาที่มีคำถามอยู่", http.StatusBadRequest)
 	ErrDuplicateQuestion  = New("DUPLICATE_QUESTION", "คำถามนี้อยู่ในชุดข้อสอบแล้ว", http.StatusConflict)
+	ErrDuplicateRequest   = New("DUPLICATE_REQUEST", "กรุณารอสักครู่แล้วลองใหม่", http.StatusConflict)
 	ErrInvalidChoices     = New("INVALID_CHOICES", "ตัวเลือกคำตอบไม่ถูกต้อง", http.StatusBadRequest)
 	ErrQuestionNotPublished    = New("QUESTION_NOT_PUBLISHED", "เฉพาะคำถามที่เผยแพร่แล้วเท่านั้นที่เพิ่มได้", http.StatusBadRequest)
 	ErrExamSetLockedByAttempts = New("EXAM_SET_LOCKED_BY_ATTEMPTS", "ชุดข้อสอบนี้มีผลสอบแล้ว ไม่สามารถแก้ไขคำถามในชุดได้", http.StatusConflict)

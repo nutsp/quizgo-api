@@ -65,6 +65,12 @@ type AccessInfo struct {
 	AvailableOptions []string `json:"available_options,omitempty"`
 }
 
+type UserExamActivitySummary struct {
+	HasSubmittedAttempts     bool     `json:"has_submitted_attempts"`
+	LatestSubmittedAttemptID *string  `json:"latest_submitted_attempt_id,omitempty"`
+	LatestScorePercent       *float64 `json:"latest_score_percent,omitempty"`
+}
+
 type ExamSetSummary struct {
 	ID              string        `json:"id,omitempty"`
 	Code            string        `json:"code"`
@@ -87,8 +93,9 @@ type ExamSetSummary struct {
 	IsActive        bool          `json:"is_active,omitempty"`
 	Status          string        `json:"status,omitempty"`
 	AnswerSheetLayout AnswerSheetLayoutConfig `json:"answer_sheet_layout,omitempty"`
-	ExamTrack       *ExamTrackRef `json:"exam_track,omitempty"`
-	Access          *AccessInfo   `json:"access,omitempty"`
+	ExamTrack       *ExamTrackRef             `json:"exam_track,omitempty"`
+	Access          *AccessInfo               `json:"access,omitempty"`
+	UserActivity    *UserExamActivitySummary  `json:"user_activity,omitempty"`
 }
 
 type ExamSetDetailResponse struct {

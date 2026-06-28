@@ -15,25 +15,29 @@ const (
 )
 
 type ExamAttempt struct {
-	ID               uuid.UUID
-	UserID           uuid.UUID
-	ExamTrackID      uuid.UUID
-	ExamSetID        uuid.UUID
-	Status           string
-	StartedAt        time.Time
-	SubmittedAt      *time.Time
-	ExpiresAt        time.Time
-	DurationSeconds  *int
-	Score            float64
-	TotalScore       float64
-	ScorePercent     float64
-	CorrectCount     int
-	WrongCount       int
-	UnansweredCount  int
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
-	ExamSet          *ExamSetRef
-	ExamTrack        *ExamTrackRef
+	ID                  uuid.UUID
+	UserID              uuid.UUID
+	ExamTrackID         uuid.UUID
+	ExamSetID           uuid.UUID
+	Status              string
+	StartedAt           time.Time
+	SubmittedAt         *time.Time
+	ExpiresAt           time.Time
+	AccessSource        *string
+	AccessEntitlementID *uuid.UUID
+	AccessGrantedAt     *time.Time
+	AccessExpiresAt     *time.Time
+	DurationSeconds     *int
+	Score               float64
+	TotalScore          float64
+	ScorePercent        float64
+	CorrectCount        int
+	WrongCount          int
+	UnansweredCount     int
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	ExamSet             *ExamSetRef
+	ExamTrack           *ExamTrackRef
 }
 
 type ExamSetRef struct {
@@ -199,4 +203,22 @@ type ContinueAttempt struct {
 	TotalQuestions   int        `json:"total_questions"`
 	RemainingSeconds int        `json:"remaining_seconds"`
 	ExpiresAt        time.Time  `json:"expires_at"`
+}
+
+type LatestAttemptSummary struct {
+	ExamSetID    uuid.UUID
+	AttemptID    uuid.UUID
+	Status       string
+	ScorePercent *float64
+	SubmittedAt  *time.Time
+	AccessSource *string
+	StartedAt    time.Time
+	ExpiresAt    time.Time
+}
+
+type UserExamActivity struct {
+	HasSubmittedAttempts     bool
+	LatestSubmittedAttemptID *uuid.UUID
+	LatestAttemptStatus      *string
+	LatestScorePercent       *float64
 }

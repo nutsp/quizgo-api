@@ -27,6 +27,13 @@ const (
 	ReasonAccessRequiredOrPremium    = "ACCESS_REQUIRED_OR_PREMIUM"
 	ReasonPrivateExamAccessRequired  = "PRIVATE_EXAM_ACCESS_REQUIRED"
 	ReasonExamNotAvailable           = "EXAM_NOT_AVAILABLE"
+
+	AccessSourceFree           = "free"
+	AccessSourceSinglePurchase = "single_purchase"
+	AccessSourcePremium        = "premium"
+	AccessSourcePrivateGrant   = "private_grant"
+	AccessSourceManualGrant    = "manual_grant"
+	AccessSourceAdminGrant     = "admin_grant"
 )
 
 type Entitlement struct {
@@ -65,16 +72,19 @@ func (e Entitlement) IsCurrentlyActive(now time.Time) bool {
 }
 
 type ExamSetAccessResult struct {
-	CanStart            bool     `json:"can_start"`
-	Reason              *string  `json:"reason,omitempty"`
-	HasExamSetAccess    bool     `json:"has_exam_set_access"`
-	HasPremium          bool     `json:"has_premium"`
-	AvailableOptions    []string `json:"available_options,omitempty"`
-	AccessType          string   `json:"access_type"`
-	AllowSinglePurchase bool     `json:"allow_single_purchase"`
-	PriceAmount         int      `json:"price_amount"`
-	PriceCurrency       string   `json:"price_currency"`
-	UnlockURL           string   `json:"-"`
+	CanStart            bool       `json:"can_start"`
+	Reason              *string    `json:"reason,omitempty"`
+	HasExamSetAccess    bool       `json:"has_exam_set_access"`
+	HasPremium          bool       `json:"has_premium"`
+	AvailableOptions    []string   `json:"available_options,omitempty"`
+	AccessType          string     `json:"access_type"`
+	AccessSource        string     `json:"access_source,omitempty"`
+	EntitlementID       *uuid.UUID `json:"entitlement_id,omitempty"`
+	AccessExpiresAt     *time.Time `json:"access_expires_at,omitempty"`
+	AllowSinglePurchase bool       `json:"allow_single_purchase"`
+	PriceAmount         int        `json:"price_amount"`
+	PriceCurrency       string     `json:"price_currency"`
+	UnlockURL           string     `json:"-"`
 }
 
 // AccessResult is kept as an alias for internal backward compatibility.

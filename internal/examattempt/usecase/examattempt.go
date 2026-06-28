@@ -7,6 +7,8 @@ import (
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
 	"virtual-exam-api/internal/apperrors"
+	appcache "virtual-exam-api/internal/cache"
+	entdomain "virtual-exam-api/internal/entitlement/domain"
 	entitlementuc "virtual-exam-api/internal/entitlement/usecase"
 	"virtual-exam-api/internal/examattempt/domain"
 	attemptrepo "virtual-exam-api/internal/examattempt/repository"
@@ -25,24 +27,36 @@ type ExamAttemptUseCase struct {
 	questions    questionrepo.Repository
 	scoring      *scoringuc.ScoringUseCase
 	entitlements *entitlementuc.UseCase
+	resultCache  appcache.CacheService
+	runtimeLocks *appcache.RuntimeLocks
+	invalidator  *appcache.Invalidator
 	validator    *validator.Validate
 }
 
 func NewExamAttemptUseCase(
 	attempts attemptrepo.Repository,
-	cache attemptrepo.AttemptCacheRepository,
+	attemptCache attemptrepo.AttemptCacheRepository,
 	examSets examsetrepo.Repository,
 	questions questionrepo.Repository,
 	scoring *scoringuc.ScoringUseCase,
 	entitlements *entitlementuc.UseCase,
+	resultCache appcache.CacheService,
+	runtimeLocks *appcache.RuntimeLocks,
+	invalidator *appcache.Invalidator,
 ) *ExamAttemptUseCase {
+	if resultCache == nil {
+		resultCache = appcache.Noop()
+	}
 	return &ExamAttemptUseCase{
 		attempts:     attempts,
-		cache:        cache,
+		cache:        attemptCache,
 		examSets:     examSets,
 		questions:    questions,
 		scoring:      scoring,
 		entitlements: entitlements,
+		resultCache:  resultCache,
+		runtimeLocks: runtimeLocks,
+		invalidator:  invalidator,
 		validator:    validator.New(),
 	}
 }
@@ -61,17 +75,38 @@ func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examS
 		return nil, err
 	}
 
-	if uc.entitlements != nil {
-		userIDPtr := &userID
-		check := uc.entitlements.CheckExamSetAccessWithQuestionCount(ctx, userIDPtr, set, len(setQuestions))
-		if !check.CanStart {
-			return nil, uc.entitlements.AccessDeniedError(set, check)
-		}
-	} else if set.Status != examsetdomain.StatusPublished || !set.IsActive || len(setQuestions) == 0 {
+	if set.Status != examsetdomain.StatusPublished || !set.IsActive || len(setQuestions) == 0 {
 		return nil, apperrors.ErrExamNotAvailable
 	}
 
+	existing, err := uc.attempts.FindActiveAttemptByUserAndExamSet(ctx, userID, set.ID)
+	if err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
+	if existing != nil {
+		if now.After(existing.ExpiresAt) {
+			_ = uc.attempts.MarkAttemptTimeout(ctx, existing.ID)
+			uc.invalidateUserExams(ctx, userID)
+		} else {
+			return uc.buildStartResponseFromExisting(ctx, existing, set, setQuestions)
+		}
+	}
+
+	var check entdomain.ExamSetAccessResult
+	if uc.entitlements != nil {
+		userIDPtr := &userID
+		check = uc.entitlements.CheckExamSetAccessWithQuestionCount(ctx, userIDPtr, set, len(setQuestions))
+		if !check.CanStart {
+			return nil, uc.entitlements.AccessDeniedError(set, check)
+		}
+	}
+
+	if !uc.runtimeLocks.TryDuplicateCreateLock(ctx, userID.String(), set.ID.String()) {
+		return nil, apperrors.ErrDuplicateRequest
+	}
+	defer uc.runtimeLocks.ReleaseDuplicateCreateLock(ctx, userID.String(), set.ID.String())
+
 	expiresAt := now.Add(time.Duration(set.DurationMinutes) * time.Minute)
 	attemptID := uuid.New()
 
@@ -84,6 +119,7 @@ func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examS
 		StartedAt:   now,
 		ExpiresAt:   expiresAt,
 	}
+	uc.applyAccessSnapshot(attempt, check, now)
 
 	answers := make([]domain.ExamAnswer, len(setQuestions))
 	for i, sq := range setQuestions {
@@ -102,6 +138,7 @@ func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examS
 	ttl := attemptrepo.AttemptTTL(set.DurationMinutes)
 	_ = uc.cache.SetAttemptState(ctx, attemptID.String(), ttl)
 	_ = uc.cache.SetTimer(ctx, attemptID.String(), expiresAt, ttl)
+	uc.invalidateUserExams(ctx, userID)
 
 	return &domain.StartAttemptResponse{
 		AttemptID: attemptID.String(),
@@ -111,6 +148,46 @@ func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examS
 		Questions: buildQuestionsForExam(setQuestions),
 		Answers:   map[int]string{},
 	}, nil
+}
+
+func (uc *ExamAttemptUseCase) applyAccessSnapshot(attempt *domain.ExamAttempt, check entdomain.ExamSetAccessResult, now time.Time) {
+	if check.AccessSource == "" {
+		source := entdomain.AccessSourceFree
+		attempt.AccessSource = &source
+		return
+	}
+	source := check.AccessSource
+	attempt.AccessSource = &source
+	attempt.AccessEntitlementID = check.EntitlementID
+	attempt.AccessGrantedAt = &now
+	attempt.AccessExpiresAt = check.AccessExpiresAt
+}
+
+func (uc *ExamAttemptUseCase) buildStartResponseFromExisting(
+	ctx context.Context,
+	attempt *domain.ExamAttempt,
+	set *examsetdomain.ExamSet,
+	setQuestions []qdomain.ExamSetQuestion,
+) (*domain.StartAttemptResponse, error) {
+	answers, err := uc.attempts.ListAnswersByAttemptID(ctx, attempt.ID)
+	if err != nil {
+		return nil, err
+	}
+	answerMap, _ := buildAnswerMap(answers)
+	return &domain.StartAttemptResponse{
+		AttemptID: attempt.ID.String(),
+		ExamSet:   buildExamSetRef(set),
+		StartedAt: attempt.StartedAt,
+		ExpiresAt: attempt.ExpiresAt,
+		Questions: buildQuestionsForExam(setQuestions),
+		Answers:   answerMap,
+	}, nil
+}
+
+func (uc *ExamAttemptUseCase) invalidateUserExams(ctx context.Context, userID uuid.UUID) {
+	if uc.invalidator != nil {
+		uc.invalidator.OnUserAccessChanged(ctx, userID.String())
+	}
 }
 
 func (uc *ExamAttemptUseCase) Get(ctx context.Context, userID, attemptID uuid.UUID) (*domain.GetAttemptResponse, error) {
@@ -260,6 +337,21 @@ func (uc *ExamAttemptUseCase) ClearAnswer(ctx context.Context, userID, attemptID
 }
 
 func (uc *ExamAttemptUseCase) Submit(ctx context.Context, userID, attemptID uuid.UUID) (*domain.SubmitResponse, error) {
+	if !uc.runtimeLocks.TrySubmitLock(ctx, attemptID.String()) {
+		attempt, err := uc.attempts.FindByIDForUser(ctx, attemptID, userID)
+		if err != nil {
+			return nil, err
+		}
+		if attempt == nil {
+			return nil, apperrors.ErrAttemptNotFound
+		}
+		if attempt.Status == domain.StatusSubmitted || attempt.Status == domain.StatusTimeout {
+			return uc.buildSubmitResponse(attempt), nil
+		}
+		return nil, apperrors.ErrDuplicateRequest
+	}
+	defer uc.runtimeLocks.ReleaseSubmitLock(ctx, attemptID.String())
+
 	attempt, err := uc.attempts.FindByIDForUser(ctx, attemptID, userID)
 	if err != nil {
 		return nil, err
@@ -351,6 +443,8 @@ func (uc *ExamAttemptUseCase) Submit(ctx context.Context, userID, attemptID uuid
 	}
 
 	_ = uc.cache.ClearAttempt(ctx, attemptID.String())
+	_ = uc.resultCache.DeleteByIndex(ctx, appcache.IndexAttemptResult(attemptID.String()))
+	uc.invalidateUserExams(ctx, userID)
 
 	return uc.buildSubmitResponse(attempt), nil
 }
@@ -360,6 +454,26 @@ func (uc *ExamAttemptUseCase) GetResult(ctx context.Context, userID, attemptID u
 	if err != nil {
 		return nil, err
 	}
+
+	key := appcache.ResultSummary(attemptID.String())
+	var cached domain.ResultResponse
+	if ok, _ := uc.resultCache.GetJSON(ctx, key, &cached); ok {
+		return &cached, nil
+	}
+
+	result, err := uc.buildResultResponse(ctx, attempt)
+	if err != nil {
+		return nil, err
+	}
+
+	_ = uc.resultCache.SetJSON(ctx, key, result, appcache.TTLResult)
+	_ = uc.resultCache.AddIndex(ctx, appcache.IndexAttemptResult(attemptID.String()), key, appcache.TTLResult+appcache.TTLIndexBuffer)
+
+	return result, nil
+}
+
+func (uc *ExamAttemptUseCase) buildResultResponse(ctx context.Context, attempt *domain.ExamAttempt) (*domain.ResultResponse, error) {
+	attemptID := attempt.ID
 
 	setQuestions, err := uc.questions.ListByExamSetID(ctx, attempt.ExamSetID)
 	if err != nil {
@@ -437,6 +551,25 @@ func (uc *ExamAttemptUseCase) GetReview(ctx context.Context, userID, attemptID u
 		return nil, err
 	}
 
+	key := appcache.ResultReview(attemptID.String())
+	var cached domain.ReviewResponse
+	if ok, _ := uc.resultCache.GetJSON(ctx, key, &cached); ok {
+		return &cached, nil
+	}
+
+	review, err := uc.buildReviewResponse(ctx, attempt)
+	if err != nil {
+		return nil, err
+	}
+
+	_ = uc.resultCache.SetJSON(ctx, key, review, appcache.TTLResult)
+	_ = uc.resultCache.AddIndex(ctx, appcache.IndexAttemptResult(attemptID.String()), key, appcache.TTLResult+appcache.TTLIndexBuffer)
+
+	return review, nil
+}
+
+func (uc *ExamAttemptUseCase) buildReviewResponse(ctx context.Context, attempt *domain.ExamAttempt) (*domain.ReviewResponse, error) {
+	attemptID := attempt.ID
 	rows, err := uc.attempts.ListAnswersWithQuestions(ctx, attemptID)
 	if err != nil {
 		return nil, err
