@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/examtrack/domain"
 )
 
@@ -19,6 +20,15 @@ type AdminFilter struct {
 	IsActive *bool
 	Page     int
 	Limit    int
+	Sort     string
+	Order    string
+}
+
+var trackSortColumns = map[string]string{
+	"created_at": "created_at",
+	"updated_at": "updated_at",
+	"name":       "name",
+	"code":       "code",
 }
 
 type AdminRepository interface {
@@ -39,7 +49,9 @@ func NewAdminRepository(db *gorm.DB) AdminRepository {
 }
 
 func (r *adminRepository) List(ctx context.Context, filter AdminFilter) ([]domain.ExamTrack, int64, error) {
-	page, limit := normalizePagination(filter.Page, filter.Limit)
+	page, limit := pagination.Sanitize(filter.Page, filter.Limit)
+	sortCol := pagination.ResolveSort(filter.Sort, trackSortColumns, "updated_at")
+	orderDir := pagination.ResolveOrder(filter.Order, true)
 	q := r.db.WithContext(ctx).Model(&ExamTrackModel{})
 	if filter.Query != "" {
 		like := "%" + filter.Query + "%"
@@ -53,7 +65,7 @@ func (r *adminRepository) List(ctx context.Context, filter AdminFilter) ([]domai
 		return nil, 0, err
 	}
 	var models []ExamTrackModel
-	err := q.Order("updated_at DESC").Offset((page - 1) * limit).Limit(limit).Find(&models).Error
+	err := q.Order(pagination.OrderClause(sortCol, orderDir)).Offset(pagination.Offset(page, limit)).Limit(limit).Find(&models).Error
 	if err != nil {
 		return nil, 0, err
 	}

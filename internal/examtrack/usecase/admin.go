@@ -5,6 +5,7 @@ import (
 
 	"github.com/google/uuid"
 	"virtual-exam-api/internal/apperrors"
+	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/examtrack/domain"
 	trackrepo "virtual-exam-api/internal/examtrack/repository"
 )
@@ -42,12 +43,7 @@ type TrackAdminResponse struct {
 	UpdatedAt      string  `json:"updated_at"`
 }
 
-type TrackListResponse struct {
-	Items      []TrackAdminResponse `json:"items"`
-	TotalItems int64                `json:"total_items"`
-	Page       int                  `json:"page"`
-	Limit      int                  `json:"limit"`
-}
+type TrackListResponse = pagination.PaginatedList[TrackAdminResponse]
 
 func (uc *AdminUseCase) List(ctx context.Context, filter trackrepo.AdminFilter) (*TrackListResponse, error) {
 	items, total, err := uc.tracks.List(ctx, filter)
@@ -58,15 +54,9 @@ func (uc *AdminUseCase) List(ctx context.Context, filter trackrepo.AdminFilter) 
 	for i, t := range items {
 		resp[i] = toTrackAdminResponse(t)
 	}
-	page := filter.Page
-	if page < 1 {
-		page = 1
-	}
-	limit := filter.Limit
-	if limit < 1 {
-		limit = 20
-	}
-	return &TrackListResponse{Items: resp, TotalItems: total, Page: page, Limit: limit}, nil
+	page, limit := pagination.Sanitize(filter.Page, filter.Limit)
+	result := pagination.NewList(resp, page, limit, total)
+	return &result, nil
 }
 
 func (uc *AdminUseCase) Get(ctx context.Context, id uuid.UUID) (*TrackAdminResponse, error) {

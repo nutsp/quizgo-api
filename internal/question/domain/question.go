@@ -27,6 +27,14 @@ type Question struct {
 	UpdatedAt    time.Time
 	Subject      *SubjectRef
 	Choices      []Choice
+	Tags         []TagRef
+}
+
+type TagRef struct {
+	ID    uuid.UUID
+	Name  string
+	Code  string
+	Color string
 }
 
 type SubjectRef struct {

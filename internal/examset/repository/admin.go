@@ -3,12 +3,12 @@ package repository
 import (
 	"context"
 	"errors"
-	"math"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/examset/domain"
 )
 
@@ -18,13 +18,24 @@ type AdminFilter struct {
 	AccessType  string
 	Difficulty  string
 	Mode        string
+	Status      string
 	IsActive    *bool
 	Page        int
 	Limit       int
+	Sort        string
+	Order       string
+}
+
+var examSetSortColumns = map[string]string{
+	"created_at": "created_at",
+	"updated_at": "updated_at",
+	"title":      "title",
+	"code":       "code",
+	"status":     "status",
 }
 
 type AdminRepository interface {
-	List(ctx context.Context, filter AdminFilter) (*domain.PaginatedResult, error)
+	List(ctx context.Context, filter AdminFilter) (pagination.PaginatedList[domain.ExamSetSummary], error)
 	Create(ctx context.Context, set *domain.ExamSet) error
 	Update(ctx context.Context, set *domain.ExamSet) error
 	Delete(ctx context.Context, id uuid.UUID) (deactivated bool, err error)
@@ -40,8 +51,10 @@ func NewAdminRepository(db *gorm.DB) AdminRepository {
 	return &adminRepository{db: db}
 }
 
-func (r *adminRepository) List(ctx context.Context, filter AdminFilter) (*domain.PaginatedResult, error) {
-	page, limit := normalizePagination(filter.Page, filter.Limit)
+func (r *adminRepository) List(ctx context.Context, filter AdminFilter) (pagination.PaginatedList[domain.ExamSetSummary], error) {
+	page, limit := pagination.Sanitize(filter.Page, filter.Limit)
+	sortCol := pagination.ResolveSort(filter.Sort, examSetSortColumns, "updated_at")
+	orderDir := pagination.ResolveOrder(filter.Order, true)
 	q := r.db.WithContext(ctx).Model(&ExamSetModel{}).Preload("ExamTrack")
 	if filter.Query != "" {
 		like := "%" + filter.Query + "%"
@@ -59,31 +72,27 @@ func (r *adminRepository) List(ctx context.Context, filter AdminFilter) (*domain
 	if filter.Mode != "" {
 		q = q.Where("mode = ?", filter.Mode)
 	}
+	if filter.Status != "" {
+		q = q.Where("status = ?", filter.Status)
+	}
 	if filter.IsActive != nil {
 		q = q.Where("is_active = ?", *filter.IsActive)
 	}
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
-		return nil, err
+		return pagination.PaginatedList[domain.ExamSetSummary]{}, err
 	}
 	var models []ExamSetModel
-	err := q.Order("updated_at DESC").Offset((page - 1) * limit).Limit(limit).Find(&models).Error
+	err := q.Order(pagination.OrderClause(sortCol, orderDir)).Offset(pagination.Offset(page, limit)).Limit(limit).Find(&models).Error
 	if err != nil {
-		return nil, err
+		return pagination.PaginatedList[domain.ExamSetSummary]{}, err
 	}
 	items := make([]domain.ExamSetSummary, len(models))
 	for i := range models {
 		set := toDomain(&models[i])
 		items[i] = set.ToSummary()
 	}
-	totalPages := int(math.Ceil(float64(total) / float64(limit)))
-	return &domain.PaginatedResult{
-		Items:      items,
-		Page:       page,
-		Limit:      limit,
-		TotalItems: total,
-		TotalPages: totalPages,
-	}, nil
+	return pagination.NewList(items, page, limit, total), nil
 }
 
 func (r *adminRepository) Create(ctx context.Context, set *domain.ExamSet) error {
@@ -107,15 +116,23 @@ func (r *adminRepository) Create(ctx context.Context, set *domain.ExamSet) error
 		TotalQuestions:  set.TotalQuestions,
 		PassingScore:    set.PassingScore,
 		Difficulty:      set.Difficulty,
-		AccessType:      set.AccessType,
-		PriceAmount:     set.PriceAmount,
-		Currency:        set.Currency,
-		SalePriceAmount: set.SalePriceAmount,
+		AccessType:          set.AccessType,
+		AllowSinglePurchase: set.AllowSinglePurchase,
+		PriceAmount:         set.PriceAmount,
+		OriginalPriceAmount: set.OriginalPriceAmount,
+		Currency:            set.Currency,
+		SalePriceAmount:     set.SalePriceAmount,
 		Mode:            set.Mode,
 		IsOfficial:      set.IsOfficial,
 		IsFeatured:      set.IsFeatured,
 		IsActive:        set.IsActive,
 		Status:          domain.StatusDraft,
+		AnswerSheetBlockColumns:      set.AnswerSheetLayout.BlockColumns,
+		AnswerSheetQuestionsPerBlock: set.AnswerSheetLayout.QuestionsPerBlock,
+		AnswerSheetChoiceLabelStyle:  set.AnswerSheetLayout.ChoiceLabelStyle,
+		AnswerSheetShowHeader:        set.AnswerSheetLayout.ShowHeader,
+		AnswerSheetShowInstructions:  set.AnswerSheetLayout.ShowInstructions,
+		AnswerSheetShowCandidateInfo: set.AnswerSheetLayout.ShowCandidateInfo,
 		CreatedAt:       set.CreatedAt,
 		UpdatedAt:       set.UpdatedAt,
 	}
@@ -134,14 +151,22 @@ func (r *adminRepository) Update(ctx context.Context, set *domain.ExamSet) error
 		"total_questions":   set.TotalQuestions,
 		"passing_score":     set.PassingScore,
 		"difficulty":        set.Difficulty,
-		"access_type":       set.AccessType,
-		"price_amount":      set.PriceAmount,
-		"currency":          set.Currency,
-		"sale_price_amount": set.SalePriceAmount,
+		"access_type":            set.AccessType,
+		"allow_single_purchase":  set.AllowSinglePurchase,
+		"price_amount":           set.PriceAmount,
+		"original_price_amount":  set.OriginalPriceAmount,
+		"currency":               set.Currency,
+		"sale_price_amount":      set.SalePriceAmount,
 		"mode":              set.Mode,
 		"is_official":       set.IsOfficial,
 		"is_featured":       set.IsFeatured,
 		"is_active":         set.IsActive,
+		"answer_sheet_block_columns":          set.AnswerSheetLayout.BlockColumns,
+		"answer_sheet_questions_per_block":    set.AnswerSheetLayout.QuestionsPerBlock,
+		"answer_sheet_choice_label_style":     set.AnswerSheetLayout.ChoiceLabelStyle,
+		"answer_sheet_show_header":            set.AnswerSheetLayout.ShowHeader,
+		"answer_sheet_show_instructions":      set.AnswerSheetLayout.ShowInstructions,
+		"answer_sheet_show_candidate_info":    set.AnswerSheetLayout.ShowCandidateInfo,
 		"updated_at":        set.UpdatedAt,
 	}).Error
 }

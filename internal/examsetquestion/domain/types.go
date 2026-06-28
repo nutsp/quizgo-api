@@ -9,11 +9,24 @@ import (
 type AvailableFilter struct {
 	Query           string
 	SubjectID       uuid.UUID
+	TagID           uuid.UUID
 	Difficulty      string
 	Status          string
 	ExcludeAssigned bool
 	Page            int
 	Limit           int
+	Sort            string
+	Order           string
+}
+
+type AssignedFilter struct {
+	Query     string
+	SubjectID uuid.UUID
+	TagID     uuid.UUID
+	Page      int
+	Limit     int
+	Sort      string
+	Order     string
 }
 
 type SubjectRef struct {
@@ -30,6 +43,14 @@ type AvailableQuestion struct {
 	CorrectChoiceKey string
 	CreatedAt        time.Time
 	AlreadyAssigned  bool
+	Tags             []TagRef
+}
+
+type TagRef struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Code  string `json:"code"`
+	Color string `json:"color,omitempty"`
 }
 
 type AssignedQuestion struct {

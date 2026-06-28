@@ -9,6 +9,10 @@ import (
 const (
 	RoleUser  = "user"
 	RoleAdmin = "admin"
+
+	StatusActive    = "active"
+	StatusSuspended = "suspended"
+	StatusDisabled  = "disabled"
 )
 
 type User struct {
@@ -17,9 +21,15 @@ type User struct {
 	Email        string
 	PasswordHash string
 	Role         string
+	Status       string
+	LastLoginAt  *time.Time
 	AvatarURL    *string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+}
+
+func (u *User) CanLogin() bool {
+	return u.Status == "" || u.Status == StatusActive
 }
 
 type UserProfile struct {

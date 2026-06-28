@@ -8,16 +8,29 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/question/domain"
+	tagdomain "virtual-exam-api/internal/questiontag/domain"
+	tagrepo "virtual-exam-api/internal/questiontag/repository"
 )
 
 type QuestionAdminFilter struct {
 	Query      string
 	SubjectID  uuid.UUID
+	TagID      uuid.UUID
 	Difficulty string
 	Status     string
 	Page       int
 	Limit      int
+	Sort       string
+	Order      string
+}
+
+var questionSortColumns = map[string]string{
+	"created_at": "created_at",
+	"updated_at": "updated_at",
+	"difficulty": "difficulty",
+	"status":     "status",
 }
 
 type QuestionAdminRepository interface {
@@ -34,15 +47,18 @@ type QuestionAdminRepository interface {
 }
 
 type questionAdminRepository struct {
-	db *gorm.DB
+	db   *gorm.DB
+	tags tagrepo.TagAdminRepository
 }
 
-func NewQuestionAdminRepository(db *gorm.DB) QuestionAdminRepository {
-	return &questionAdminRepository{db: db}
+func NewQuestionAdminRepository(db *gorm.DB, tags tagrepo.TagAdminRepository) QuestionAdminRepository {
+	return &questionAdminRepository{db: db, tags: tags}
 }
 
 func (r *questionAdminRepository) List(ctx context.Context, filter QuestionAdminFilter) ([]domain.Question, int64, error) {
-	page, limit := adminPagination(filter.Page, filter.Limit)
+	page, limit := pagination.Sanitize(filter.Page, filter.Limit)
+	sortCol := pagination.ResolveSort(filter.Sort, questionSortColumns, "updated_at")
+	orderDir := pagination.ResolveOrder(filter.Order, true)
 	q := r.db.WithContext(ctx).Model(&QuestionModel{}).Preload("Subject").Preload("Choices", func(db *gorm.DB) *gorm.DB {
 		return db.Order("choice_key ASC")
 	})
@@ -59,16 +75,23 @@ func (r *questionAdminRepository) List(ctx context.Context, filter QuestionAdmin
 	if filter.Status != "" {
 		q = q.Where("status = ?", filter.Status)
 	}
+	if filter.TagID != uuid.Nil {
+		q = q.Where(`id IN (SELECT question_id FROM question_tag_mappings WHERE tag_id = ?)`, filter.TagID)
+	}
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 	var models []QuestionModel
-	err := q.Order("updated_at DESC").Offset((page - 1) * limit).Limit(limit).Find(&models).Error
+	err := q.Order(pagination.OrderClause(sortCol, orderDir)).Offset(pagination.Offset(page, limit)).Limit(limit).Find(&models).Error
 	if err != nil {
 		return nil, 0, err
 	}
-	return mapQuestions(models), total, nil
+	out := mapQuestions(models)
+	if err := r.attachTags(ctx, out); err != nil {
+		return nil, 0, err
+	}
+	return out, total, nil
 }
 
 func (r *questionAdminRepository) FindByID(ctx context.Context, id uuid.UUID) (*domain.Question, error) {
@@ -84,17 +107,38 @@ func (r *questionAdminRepository) FindByID(ctx context.Context, id uuid.UUID) (*
 		return nil, err
 	}
 	q := mapQuestion(model)
+	if r.tags != nil {
+		tagMap, err := r.tags.LoadTagsForQuestions(ctx, []uuid.UUID{model.ID})
+		if err != nil {
+			return nil, err
+		}
+		q.Tags = mapTagRefs(tagMap[model.ID])
+	}
 	return &q, nil
 }
 
 func (r *questionAdminRepository) CreateWithChoices(ctx context.Context, question *domain.Question) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return r.createWithChoicesTx(tx, question)
+		if err := r.createWithChoicesTx(tx, question); err != nil {
+			return err
+		}
+		if r.tags != nil {
+			tagIDs := extractTagIDs(question.Tags)
+			return r.tags.ReplaceQuestionTagMappingsTx(tx, question.ID, tagIDs)
+		}
+		return nil
 	})
 }
 
 func (r *questionAdminRepository) CreateWithChoicesTx(ctx context.Context, tx *gorm.DB, question *domain.Question) error {
-	return r.createWithChoicesTx(tx, question)
+	if err := r.createWithChoicesTx(tx, question); err != nil {
+		return err
+	}
+	if r.tags != nil {
+		tagIDs := extractTagIDs(question.Tags)
+		return r.tags.ReplaceQuestionTagMappingsTx(tx, question.ID, tagIDs)
+	}
+	return nil
 }
 
 func (r *questionAdminRepository) createWithChoicesTx(tx *gorm.DB, question *domain.Question) error {
@@ -176,6 +220,12 @@ func (r *questionAdminRepository) UpdateWithChoices(ctx context.Context, questio
 				UpdatedAt:   now,
 			}
 			if err := tx.Create(&cModel).Error; err != nil {
+				return err
+			}
+		}
+		if r.tags != nil {
+			tagIDs := extractTagIDs(question.Tags)
+			if err := r.tags.ReplaceQuestionTagMappingsTx(tx, question.ID, tagIDs); err != nil {
 				return err
 			}
 		}
@@ -423,6 +473,48 @@ func mapQuestion(m QuestionModel) domain.Question {
 		})
 	}
 	return q
+}
+
+func (r *questionAdminRepository) attachTags(ctx context.Context, questions []domain.Question) error {
+	if r.tags == nil || len(questions) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, len(questions))
+	for i, q := range questions {
+		ids[i] = q.ID
+	}
+	tagMap, err := r.tags.LoadTagsForQuestions(ctx, ids)
+	if err != nil {
+		return err
+	}
+	for i := range questions {
+		questions[i].Tags = mapTagRefs(tagMap[questions[i].ID])
+	}
+	return nil
+}
+
+func mapTagRefs(refs []tagdomain.TagRef) []domain.TagRef {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]domain.TagRef, len(refs))
+	for i, r := range refs {
+		out[i] = domain.TagRef{ID: r.ID, Name: r.Name, Code: r.Code, Color: r.Color}
+	}
+	return out
+}
+
+func extractTagIDs(tags []domain.TagRef) []uuid.UUID {
+	if len(tags) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, 0, len(tags))
+	for _, t := range tags {
+		if t.ID != uuid.Nil {
+			ids = append(ids, t.ID)
+		}
+	}
+	return ids
 }
 
 func adminPagination(page, limit int) (int, int) {

@@ -3,6 +3,7 @@ package http
 import (
 	"strconv"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	attemptuc "virtual-exam-api/internal/examattempt/usecase"
 	"virtual-exam-api/internal/examset/domain"
@@ -12,24 +13,29 @@ import (
 )
 
 type Handler struct {
-	examSetUC  *usecase.ExamSetUseCase
-	attemptUC  *attemptuc.ExamAttemptUseCase
+	examSetUC *usecase.ExamSetUseCase
+	attemptUC *attemptuc.ExamAttemptUseCase
 }
 
 func NewHandler(examSetUC *usecase.ExamSetUseCase, attemptUC *attemptuc.ExamAttemptUseCase) *Handler {
 	return &Handler{examSetUC: examSetUC, attemptUC: attemptUC}
 }
 
-func (h *Handler) RegisterRoutes(g *echo.Group, authMiddleware echo.MiddlewareFunc) {
-	g.GET("/exam-sets", h.List)
-	g.GET("/exam-sets/:examSetCode", h.GetByCode)
-	g.GET("/exam-sets/:examSetCode/questions-preview", h.QuestionsPreview)
+func (h *Handler) RegisterRoutes(g *echo.Group, authMiddleware echo.MiddlewareFunc, optionalAuth echo.MiddlewareFunc) {
+	g.GET("/exam-sets", h.List, optionalAuth)
+	g.GET("/exam-sets/:examSetCode", h.GetByCode, optionalAuth)
+	g.GET("/exam-sets/:examSetCode/questions-preview", h.QuestionsPreview, optionalAuth)
 	g.POST("/exam-sets/:examSetCode/attempts", h.StartAttempt, authMiddleware)
 }
 
 func (h *Handler) List(c echo.Context) error {
 	filter := parseListFilter(c)
-	result, err := h.examSetUC.List(c.Request().Context(), filter)
+	userID, _ := middleware.GetUserID(c)
+	var uid *uuid.UUID
+	if userID != uuid.Nil {
+		uid = &userID
+	}
+	result, err := h.examSetUC.List(c.Request().Context(), filter, uid)
 	if err != nil {
 		return response.Error(c, err)
 	}
@@ -38,7 +44,12 @@ func (h *Handler) List(c echo.Context) error {
 
 func (h *Handler) GetByCode(c echo.Context) error {
 	code := c.Param("examSetCode")
-	result, err := h.examSetUC.GetByCode(c.Request().Context(), code)
+	userID, _ := middleware.GetUserID(c)
+	var uid *uuid.UUID
+	if userID != uuid.Nil {
+		uid = &userID
+	}
+	result, err := h.examSetUC.GetByCode(c.Request().Context(), code, uid)
 	if err != nil {
 		return response.Error(c, err)
 	}
@@ -47,7 +58,12 @@ func (h *Handler) GetByCode(c echo.Context) error {
 
 func (h *Handler) QuestionsPreview(c echo.Context) error {
 	code := c.Param("examSetCode")
-	result, err := h.examSetUC.QuestionsPreview(c.Request().Context(), code)
+	userID, _ := middleware.GetUserID(c)
+	var uid *uuid.UUID
+	if userID != uuid.Nil {
+		uid = &userID
+	}
+	result, err := h.examSetUC.QuestionsPreview(c.Request().Context(), code, uid)
 	if err != nil {
 		return response.Error(c, err)
 	}

@@ -25,6 +25,7 @@ var RequiredColumns = []string{
 }
 
 var OptionalColumns = []string{
+	"tags",
 	"explanation",
 	"difficulty",
 	"status",
@@ -33,6 +34,7 @@ var OptionalColumns = []string{
 type ImportQuestionRow struct {
 	RowNumber     int    `json:"row_number"`
 	SubjectCode   string `json:"subject_code"`
+	Tags          string `json:"tags,omitempty"`
 	QuestionText  string `json:"question_text"`
 	ChoiceA       string `json:"choice_a"`
 	ChoiceB       string `json:"choice_b"`
@@ -94,6 +96,7 @@ type ImportJobRow struct {
 	ImportJobID   uuid.UUID
 	RowNumber     int
 	SubjectCode   string
+	Tags          string
 	QuestionText  string
 	ChoiceA       string
 	ChoiceB       string

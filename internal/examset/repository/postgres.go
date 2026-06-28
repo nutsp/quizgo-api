@@ -22,15 +22,23 @@ type ExamSetModel struct {
 	TotalQuestions  int       `gorm:"not null"`
 	PassingScore    int       `gorm:"not null"`
 	Difficulty      string    `gorm:"not null"`
-	AccessType      string    `gorm:"not null"`
-	PriceAmount     float64   `gorm:"type:numeric;not null;default:0"`
-	Currency        string    `gorm:"type:varchar(10);not null;default:THB"`
-	SalePriceAmount *float64  `gorm:"type:numeric"`
+	AccessType               string    `gorm:"not null"`
+	AllowSinglePurchase      bool      `gorm:"not null;default:false"`
+	PriceAmount              float64   `gorm:"type:numeric;not null;default:0"`
+	OriginalPriceAmount      *float64  `gorm:"type:numeric"`
+	Currency                 string    `gorm:"type:varchar(10);not null;default:THB"`
+	SalePriceAmount          *float64  `gorm:"type:numeric"`
 	Mode            string    `gorm:"not null"`
 	IsOfficial      bool      `gorm:"default:false"`
 	IsFeatured      bool      `gorm:"not null;default:false"`
 	IsActive        bool      `gorm:"default:true"`
 	Status          string    `gorm:"type:varchar(50);not null;default:draft"`
+	AnswerSheetBlockColumns          int    `gorm:"not null;default:2"`
+	AnswerSheetQuestionsPerBlock     int    `gorm:"not null;default:10"`
+	AnswerSheetChoiceLabelStyle      string `gorm:"type:varchar(20);not null;default:thai"`
+	AnswerSheetShowHeader            bool   `gorm:"not null;default:true"`
+	AnswerSheetShowInstructions      bool   `gorm:"not null;default:true"`
+	AnswerSheetShowCandidateInfo     bool   `gorm:"not null;default:true"`
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 
@@ -77,7 +85,8 @@ func (r *postgresRepository) List(ctx context.Context, filter domain.ListFilter)
 
 	q := r.db.WithContext(ctx).Model(&ExamSetModel{}).Preload("ExamTrack")
 	if filter.OnlyPublished {
-		q = q.Where("exam_sets.status = ? AND exam_sets.is_active = ?", domain.StatusPublished, true)
+		q = q.Where("exam_sets.status = ? AND exam_sets.is_active = ? AND exam_sets.access_type <> ?",
+			domain.StatusPublished, true, domain.AccessPrivate)
 	} else if filter.OnlyActive {
 		q = q.Where("exam_sets.is_active = ?", true)
 	}
@@ -159,7 +168,7 @@ func (r *postgresRepository) ListPopular(ctx context.Context, limit int) ([]doma
 	var models []ExamSetModel
 	err := r.db.WithContext(ctx).
 		Preload("ExamTrack").
-		Where("status = ? AND is_active = ?", domain.StatusPublished, true).
+		Where("status = ? AND is_active = ? AND access_type <> ?", domain.StatusPublished, true, domain.AccessPrivate).
 		Order("is_featured DESC, created_at DESC").
 		Limit(limit).
 		Find(&models).Error
@@ -185,15 +194,25 @@ func toDomain(m *ExamSetModel) domain.ExamSet {
 		TotalQuestions:  m.TotalQuestions,
 		PassingScore:    m.PassingScore,
 		Difficulty:      m.Difficulty,
-		AccessType:      m.AccessType,
-		PriceAmount:     m.PriceAmount,
-		Currency:        m.Currency,
-		SalePriceAmount: m.SalePriceAmount,
+		AccessType:          m.AccessType,
+		AllowSinglePurchase: m.AllowSinglePurchase,
+		PriceAmount:         m.PriceAmount,
+		OriginalPriceAmount: m.OriginalPriceAmount,
+		Currency:            m.Currency,
+		SalePriceAmount:     m.SalePriceAmount,
 		Mode:            m.Mode,
 		IsOfficial:      m.IsOfficial,
 		IsFeatured:      m.IsFeatured,
 		IsActive:        m.IsActive,
 		Status:          m.Status,
+		AnswerSheetLayout: domain.LayoutFromModel(
+			m.AnswerSheetBlockColumns,
+			m.AnswerSheetQuestionsPerBlock,
+			m.AnswerSheetChoiceLabelStyle,
+			m.AnswerSheetShowHeader,
+			m.AnswerSheetShowInstructions,
+			m.AnswerSheetShowCandidateInfo,
+		),
 		CreatedAt:       m.CreatedAt,
 		UpdatedAt:       m.UpdatedAt,
 	}

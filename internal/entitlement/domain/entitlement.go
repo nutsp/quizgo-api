@@ -21,9 +21,12 @@ const (
 	StatusRevoked = "revoked"
 	StatusPending = "pending"
 
-	ReasonLoginRequired   = "LOGIN_REQUIRED"
-	ReasonAccessRequired  = "ACCESS_REQUIRED"
-	ReasonPremiumRequired = "PREMIUM_REQUIRED"
+	ReasonLoginRequired              = "LOGIN_REQUIRED"
+	ReasonAccessRequired             = "ACCESS_REQUIRED"
+	ReasonPremiumRequired            = "PREMIUM_REQUIRED"
+	ReasonAccessRequiredOrPremium    = "ACCESS_REQUIRED_OR_PREMIUM"
+	ReasonPrivateExamAccessRequired  = "PRIVATE_EXAM_ACCESS_REQUIRED"
+	ReasonExamNotAvailable           = "EXAM_NOT_AVAILABLE"
 )
 
 type Entitlement struct {
@@ -61,13 +64,21 @@ func (e Entitlement) IsCurrentlyActive(now time.Time) bool {
 	return e.Status(now) == StatusActive
 }
 
-type AccessResult struct {
-	Allowed          bool
-	Reason           string
-	HasExamSetAccess bool
-	HasPremium       bool
-	UnlockURL        string
+type ExamSetAccessResult struct {
+	CanStart            bool     `json:"can_start"`
+	Reason              *string  `json:"reason,omitempty"`
+	HasExamSetAccess    bool     `json:"has_exam_set_access"`
+	HasPremium          bool     `json:"has_premium"`
+	AvailableOptions    []string `json:"available_options,omitempty"`
+	AccessType          string   `json:"access_type"`
+	AllowSinglePurchase bool     `json:"allow_single_purchase"`
+	PriceAmount         int      `json:"price_amount"`
+	PriceCurrency       string   `json:"price_currency"`
+	UnlockURL           string   `json:"-"`
 }
+
+// AccessResult is kept as an alias for internal backward compatibility.
+type AccessResult = ExamSetAccessResult
 
 type GrantExamSetAccessInput struct {
 	UserID     uuid.UUID

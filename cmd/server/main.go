@@ -20,6 +20,9 @@ import (
 	attempthttp "virtual-exam-api/internal/examattempt/transport/http"
 	attemptrepo "virtual-exam-api/internal/examattempt/repository"
 	attemptuc "virtual-exam-api/internal/examattempt/usecase"
+	entrepo "virtual-exam-api/internal/entitlement/repository"
+	enthttp "virtual-exam-api/internal/entitlement/transport/http"
+	entuc "virtual-exam-api/internal/entitlement/usecase"
 	examsethttp "virtual-exam-api/internal/examset/transport/http"
 	examsetrepo "virtual-exam-api/internal/examset/repository"
 	examsetuc "virtual-exam-api/internal/examset/usecase"
@@ -35,6 +38,12 @@ import (
 	subjectuc "virtual-exam-api/internal/subject/usecase"
 	adminhttp "virtual-exam-api/internal/admin/transport/http"
 	dashboarduc "virtual-exam-api/internal/admin/dashboard/usecase"
+	accessrepo "virtual-exam-api/internal/accesslog/repository"
+	accesshttp "virtual-exam-api/internal/accesslog/transport/http"
+	accessuc "virtual-exam-api/internal/accesslog/usecase"
+	auditrepo "virtual-exam-api/internal/auditlog/repository"
+	audithttp "virtual-exam-api/internal/auditlog/transport/http"
+	audituc "virtual-exam-api/internal/auditlog/usecase"
 	esqrepo "virtual-exam-api/internal/examsetquestion/repository"
 	esquc "virtual-exam-api/internal/examsetquestion/usecase"
 	esqhttp "virtual-exam-api/internal/examsetquestion/transport/http"
@@ -42,6 +51,9 @@ import (
 	importhttp "virtual-exam-api/internal/questionimport/transport/http"
 	importrepo "virtual-exam-api/internal/questionimport/repository"
 	importuc "virtual-exam-api/internal/questionimport/usecase"
+	tagrepo "virtual-exam-api/internal/questiontag/repository"
+	taguc "virtual-exam-api/internal/questiontag/usecase"
+	taghttp "virtual-exam-api/internal/questiontag/transport/http"
 	leaderboardrepo "virtual-exam-api/internal/leaderboard/repository"
 	leaderboardhttp "virtual-exam-api/internal/leaderboard/transport/http"
 	leaderboarduc "virtual-exam-api/internal/leaderboard/usecase"
@@ -53,6 +65,9 @@ import (
 	redisclient "virtual-exam-api/internal/redis"
 	scoringuc "virtual-exam-api/internal/scoring/usecase"
 	userrepo "virtual-exam-api/internal/user/repository"
+	useradminrepo "virtual-exam-api/internal/useradmin/repository"
+	useradminhttp "virtual-exam-api/internal/useradmin/transport/http"
+	useradminuc "virtual-exam-api/internal/useradmin/usecase"
 	"virtual-exam-api/seed"
 )
 
@@ -71,6 +86,8 @@ func main() {
 		database.MustMigrate(db,
 			&userrepo.UserModel{},
 			&oauthrepo.OAuthAccountModel{},
+			&accessrepo.AccessLogModel{},
+			&auditrepo.AuditLogModel{},
 			&trackrepo.ExamTrackModel{},
 			&examsetrepo.ExamSetModel{},
 			&questionrepo.SubjectModel{},
@@ -81,6 +98,9 @@ func main() {
 			&attemptrepo.ExamAnswerModel{},
 			&importrepo.ImportJobModel{},
 			&importrepo.ImportRowModel{},
+			&tagrepo.QuestionTagModel{},
+			&tagrepo.QuestionTagMappingModel{},
+			&entrepo.EntitlementModel{},
 		)
 	}
 
@@ -107,7 +127,9 @@ func main() {
 	oauthRepository := oauthrepo.NewPostgresRepository(db)
 	oauthService := oauthpkg.NewService(userRepository, oauthRepository, authUseCase, cfg)
 	trackUseCase := trackuc.NewExamTrackUseCase(trackRepository, examSetRepository)
-	examSetUseCase := examsetuc.NewExamSetUseCase(examSetRepository, questionRepository)
+	entitlementRepository := entrepo.NewPostgresRepository(db)
+	entitlementUseCase := entuc.NewUseCase(entitlementRepository, examSetRepository, userRepository)
+	examSetUseCase := examsetuc.NewExamSetUseCase(examSetRepository, questionRepository, entitlementUseCase)
 	scoringUseCase := scoringuc.NewScoringUseCase()
 	attemptUseCase := attemptuc.NewExamAttemptUseCase(
 		attemptRepository,
@@ -115,8 +137,9 @@ func main() {
 		examSetRepository,
 		questionRepository,
 		scoringUseCase,
+		entitlementUseCase,
 	)
-	homeUseCase := homeuc.NewHomeUseCase(trackRepository, examSetRepository, attemptRepository)
+	homeUseCase := homeuc.NewHomeUseCase(trackRepository, examSetRepository, attemptRepository, entitlementUseCase)
 
 	e := echo.New()
 	e.HideBanner = true
@@ -128,10 +151,9 @@ func main() {
 	optionalAuth := middleware.OptionalJWTAuth(authUseCase)
 
 	api := e.Group("/api/v1")
-	authhttp.NewHandler(authUseCase, oauthService).RegisterRoutes(api, authMiddleware)
 	homehttp.NewHandler(homeUseCase).RegisterRoutes(api, optionalAuth)
 	trackhttp.NewHandler(trackUseCase).RegisterRoutes(api)
-	examsethttp.NewHandler(examSetUseCase, attemptUseCase).RegisterRoutes(api, authMiddleware)
+	examsethttp.NewHandler(examSetUseCase, attemptUseCase).RegisterRoutes(api, authMiddleware, optionalAuth)
 	attempthttp.NewHandler(attemptUseCase).RegisterRoutes(api, authMiddleware)
 	resultRepository := resultrepo.NewPostgresRepository(db)
 	resultUseCase := resultuc.NewResultUseCase(resultRepository)
@@ -147,13 +169,15 @@ func main() {
 	trackAdminRepo := trackrepo.NewAdminRepository(db)
 	examSetAdminRepo := examsetrepo.NewAdminRepository(db)
 	subjectAdminRepo := subjectrepo.NewSubjectAdminRepository(db)
-	questionAdminRepo := questionrepo.NewQuestionAdminRepository(db)
+	tagAdminRepo := tagrepo.NewTagAdminRepository(db)
+	questionAdminRepo := questionrepo.NewQuestionAdminRepository(db, tagAdminRepo)
 	setQuestionAdminRepo := questionrepo.NewExamSetQuestionAdminRepository(db)
 
 	trackAdminUC := trackadminuc.NewAdminUseCase(trackAdminRepo, trackRepository)
 	examSetAdminUC := examsetuc.NewAdminUseCase(examSetAdminRepo, examSetRepository, trackRepository, trackAdminRepo, setQuestionAdminRepo)
 	subjectAdminUC := subjectuc.NewSubjectUseCase(subjectAdminRepo)
-	questionAdminUC := questionuc.NewAdminUseCase(questionAdminRepo, setQuestionAdminRepo, subjectAdminRepo, examSetRepository, examSetAdminRepo, trackAdminRepo)
+	tagAdminUC := taguc.NewTagUseCase(tagAdminRepo)
+	questionAdminUC := questionuc.NewAdminUseCase(questionAdminRepo, setQuestionAdminRepo, subjectAdminRepo, tagAdminUC, examSetRepository, examSetAdminRepo, trackAdminRepo)
 	dashboardUC := dashboarduc.NewDashboardUseCase(db)
 
 	examSetQuestionRepo := esqrepo.NewPostgresRepository(db)
@@ -161,11 +185,32 @@ func main() {
 	examSetQuestionHandler := esqhttp.NewHandler(examSetQuestionUC)
 
 	importRepository := importrepo.NewRepository(db)
-	importUseCase := importuc.NewUseCase(importRepository, subjectAdminRepo, questionAdminRepo)
+	importUseCase := importuc.NewUseCase(importRepository, subjectAdminRepo, questionAdminRepo, tagAdminRepo)
 
-	importhttp.NewHandler(importUseCase).
+	accessLogRepo := accessrepo.NewPostgresRepository(db)
+	accessLogger := accessuc.NewLogger(accessLogRepo)
+	accessLogAdminUC := accessuc.NewAdminUseCase(accessLogRepo)
+
+	auditLogRepo := auditrepo.NewPostgresRepository(db)
+	auditLogger := audituc.NewLogger(auditLogRepo)
+	auditLogAdminUC := audituc.NewAdminUseCase(auditLogRepo)
+
+	userAdminRepo := useradminrepo.NewUserAdminRepository(db)
+	userAdminUC := useradminuc.NewUseCase(userAdminRepo, entitlementRepository, accessLogRepo, auditLogRepo, auditLogger)
+
+	adminRoute := api.Group("/admin", authMiddleware, middleware.AdminOnly())
+	taghttp.NewHandler(tagAdminUC, auditLogger, userRepository).RegisterRoutes(adminRoute)
+	accesshttp.NewHandler(accessLogAdminUC).RegisterRoutes(adminRoute)
+	audithttp.NewHandler(auditLogAdminUC).RegisterRoutes(adminRoute)
+	useradminhttp.NewHandler(userAdminUC, userRepository).RegisterRoutes(adminRoute)
+	enthttp.NewHandler(entitlementUseCase, auditLogger, userRepository).RegisterRoutes(adminRoute)
+	enthttp.NewHandler(entitlementUseCase, auditLogger, userRepository).RegisterUserRoutes(api, authMiddleware)
+
+	authhttp.NewHandler(authUseCase, oauthService, accessLogger, userRepository).RegisterRoutes(api, authMiddleware)
+
+	importhttp.NewHandler(importUseCase, auditLogger, userRepository).
 		RegisterRoutes(api, authMiddleware, middleware.AdminOnly())
-	adminhttp.NewHandler(dashboardUC, trackAdminUC, examSetAdminUC, subjectAdminUC, questionAdminUC, examSetQuestionHandler).
+	adminhttp.NewHandler(dashboardUC, trackAdminUC, examSetAdminUC, subjectAdminUC, questionAdminUC, examSetQuestionHandler, auditLogger, userRepository).
 		RegisterRoutes(api, authMiddleware, middleware.AdminOnly())
 
 	e.GET("/health", func(c echo.Context) error {

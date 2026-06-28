@@ -7,6 +7,7 @@ import (
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
 	"virtual-exam-api/internal/apperrors"
+	entitlementuc "virtual-exam-api/internal/entitlement/usecase"
 	"virtual-exam-api/internal/examattempt/domain"
 	attemptrepo "virtual-exam-api/internal/examattempt/repository"
 	examsetdomain "virtual-exam-api/internal/examset/domain"
@@ -18,12 +19,13 @@ import (
 )
 
 type ExamAttemptUseCase struct {
-	attempts  attemptrepo.Repository
-	cache     attemptrepo.AttemptCacheRepository
-	examSets  examsetrepo.Repository
-	questions questionrepo.Repository
-	scoring   *scoringuc.ScoringUseCase
-	validator *validator.Validate
+	attempts     attemptrepo.Repository
+	cache        attemptrepo.AttemptCacheRepository
+	examSets     examsetrepo.Repository
+	questions    questionrepo.Repository
+	scoring      *scoringuc.ScoringUseCase
+	entitlements *entitlementuc.UseCase
+	validator    *validator.Validate
 }
 
 func NewExamAttemptUseCase(
@@ -32,14 +34,16 @@ func NewExamAttemptUseCase(
 	examSets examsetrepo.Repository,
 	questions questionrepo.Repository,
 	scoring *scoringuc.ScoringUseCase,
+	entitlements *entitlementuc.UseCase,
 ) *ExamAttemptUseCase {
 	return &ExamAttemptUseCase{
-		attempts:  attempts,
-		cache:     cache,
-		examSets:  examSets,
-		questions: questions,
-		scoring:   scoring,
-		validator: validator.New(),
+		attempts:     attempts,
+		cache:        cache,
+		examSets:     examSets,
+		questions:    questions,
+		scoring:      scoring,
+		entitlements: entitlements,
+		validator:    validator.New(),
 	}
 }
 
@@ -51,18 +55,20 @@ func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examS
 	if set == nil {
 		return nil, apperrors.ErrExamSetNotFound
 	}
-	if set.Status != examsetdomain.StatusPublished || !set.IsActive {
-		return nil, apperrors.ErrExamSetNotPublished
-	}
-	// Premium access is stubbed: payment is not implemented yet, so authenticated
-	// users may start any exam set. UI still shows premium pricing.
 
 	setQuestions, err := uc.questions.ListByExamSetID(ctx, set.ID)
 	if err != nil {
 		return nil, err
 	}
-	if len(setQuestions) == 0 {
-		return nil, apperrors.ErrExamSetHasNoQuestions
+
+	if uc.entitlements != nil {
+		userIDPtr := &userID
+		check := uc.entitlements.CheckExamSetAccessWithQuestionCount(ctx, userIDPtr, set, len(setQuestions))
+		if !check.CanStart {
+			return nil, uc.entitlements.AccessDeniedError(set, check)
+		}
+	} else if set.Status != examsetdomain.StatusPublished || !set.IsActive || len(setQuestions) == 0 {
+		return nil, apperrors.ErrExamNotAvailable
 	}
 
 	now := time.Now().UTC()
@@ -99,12 +105,7 @@ func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examS
 
 	return &domain.StartAttemptResponse{
 		AttemptID: attemptID.String(),
-		ExamSet: domain.ExamSetRef{
-			Code:            set.Code,
-			Title:           set.Title,
-			DurationMinutes: set.DurationMinutes,
-			TotalQuestions:  set.TotalQuestions,
-		},
+		ExamSet:   buildExamSetRef(set),
 		StartedAt: now,
 		ExpiresAt: expiresAt,
 		Questions: buildQuestionsForExam(setQuestions),
@@ -464,6 +465,10 @@ func (uc *ExamAttemptUseCase) GetReview(ctx context.Context, userID, attemptID u
 		if row.Answer.IsCorrect != nil {
 			isCorrect = *row.Answer.IsCorrect
 		}
+		reviewTags := make([]domain.ReviewTagRef, len(row.Question.Tags))
+		for i, t := range row.Question.Tags {
+			reviewTags[i] = domain.ReviewTagRef{Name: t.Name, Code: t.Code}
+		}
 		questions = append(questions, domain.QuestionForReview{
 			QuestionNo:        row.Answer.QuestionNo,
 			QuestionID:        row.Answer.QuestionID.String(),
@@ -475,6 +480,7 @@ func (uc *ExamAttemptUseCase) GetReview(ctx context.Context, userID, attemptID u
 			IsUnanswered:      isUnanswered,
 			Explanation:       row.Question.Explanation,
 			Subject:           row.Question.SubjectName,
+			Tags:              reviewTags,
 		})
 	}
 
@@ -652,4 +658,19 @@ func mapWeaknessAnalysis(items []scoringdomain.SubjectScore) []domain.WeaknessAn
 		}
 	}
 	return out
+}
+
+func buildExamSetRef(set *examsetdomain.ExamSet) domain.ExamSetRef {
+	layout := set.AnswerSheetLayout
+	if err := layout.Validate(); err != nil {
+		layout = examsetdomain.DefaultAnswerSheetLayout()
+	}
+	return domain.ExamSetRef{
+		Code:              set.Code,
+		Title:             set.Title,
+		DurationMinutes:   set.DurationMinutes,
+		TotalQuestions:    set.TotalQuestions,
+		PassingScore:      set.PassingScore,
+		AnswerSheetLayout: layout,
+	}
 }

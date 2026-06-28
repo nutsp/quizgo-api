@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"virtual-exam-api/internal/common/pagination"
 	questionrepo "virtual-exam-api/internal/question/repository"
 	"virtual-exam-api/internal/question/domain"
 )
@@ -16,6 +17,15 @@ type SubjectAdminFilter struct {
 	Query string
 	Page  int
 	Limit int
+	Sort  string
+	Order string
+}
+
+var subjectSortColumns = map[string]string{
+	"created_at": "created_at",
+	"updated_at": "updated_at",
+	"name":       "name",
+	"code":       "code",
 }
 
 type SubjectAdminRepository interface {
@@ -37,7 +47,9 @@ func NewSubjectAdminRepository(db *gorm.DB) SubjectAdminRepository {
 }
 
 func (r *subjectAdminRepository) List(ctx context.Context, filter SubjectAdminFilter) ([]domain.Subject, int64, error) {
-	page, limit := adminPagination(filter.Page, filter.Limit)
+	page, limit := pagination.Sanitize(filter.Page, filter.Limit)
+	sortCol := pagination.ResolveSort(filter.Sort, subjectSortColumns, "updated_at")
+	orderDir := pagination.ResolveOrder(filter.Order, true)
 	q := r.db.WithContext(ctx).Model(&questionrepo.SubjectModel{})
 	if filter.Query != "" {
 		like := "%" + filter.Query + "%"
@@ -48,7 +60,7 @@ func (r *subjectAdminRepository) List(ctx context.Context, filter SubjectAdminFi
 		return nil, 0, err
 	}
 	var models []questionrepo.SubjectModel
-	err := q.Order("updated_at DESC").Offset((page - 1) * limit).Limit(limit).Find(&models).Error
+	err := q.Order(pagination.OrderClause(sortCol, orderDir)).Offset(pagination.Offset(page, limit)).Limit(limit).Find(&models).Error
 	if err != nil {
 		return nil, 0, err
 	}

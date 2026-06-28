@@ -16,6 +16,8 @@ type UserModel struct {
 	Email        string    `gorm:"uniqueIndex:uq_users_email;not null"`
 	PasswordHash *string
 	Role         string    `gorm:"not null;default:user"`
+	Status       string    `gorm:"type:varchar(30);not null;default:active"`
+	LastLoginAt  *time.Time
 	AvatarURL    *string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
@@ -30,6 +32,7 @@ type Repository interface {
 	FindByID(ctx context.Context, id uuid.UUID) (*domain.User, error)
 	UpdateDisplayName(ctx context.Context, id uuid.UUID, displayName string) error
 	UpdateDisplayNameIfEmpty(ctx context.Context, id uuid.UUID, displayName string) error
+	UpdateLastLoginAt(ctx context.Context, id uuid.UUID, at time.Time) error
 }
 
 type postgresRepository struct {
@@ -97,10 +100,20 @@ func (r *postgresRepository) UpdateDisplayNameIfEmpty(ctx context.Context, id uu
 		Update("display_name", displayName).Error
 }
 
+func (r *postgresRepository) UpdateLastLoginAt(ctx context.Context, id uuid.UUID, at time.Time) error {
+	return r.db.WithContext(ctx).Model(&UserModel{}).
+		Where("id = ?", id).
+		Update("last_login_at", at).Error
+}
+
 func toModel(u *domain.User) UserModel {
 	var passwordHash *string
 	if u.PasswordHash != "" {
 		passwordHash = &u.PasswordHash
+	}
+	status := u.Status
+	if status == "" {
+		status = domain.StatusActive
 	}
 	return UserModel{
 		ID:           u.ID,
@@ -108,6 +121,8 @@ func toModel(u *domain.User) UserModel {
 		Email:        u.Email,
 		PasswordHash: passwordHash,
 		Role:         u.Role,
+		Status:       status,
+		LastLoginAt:  u.LastLoginAt,
 		AvatarURL:    u.AvatarURL,
 	}
 }
@@ -117,12 +132,18 @@ func toDomain(m *UserModel) domain.User {
 	if m.PasswordHash != nil {
 		passwordHash = *m.PasswordHash
 	}
+	status := m.Status
+	if status == "" {
+		status = domain.StatusActive
+	}
 	return domain.User{
 		ID:           m.ID,
 		DisplayName:  m.DisplayName,
 		Email:        m.Email,
 		PasswordHash: passwordHash,
 		Role:         m.Role,
+		Status:       status,
+		LastLoginAt:  m.LastLoginAt,
 		AvatarURL:    m.AvatarURL,
 		CreatedAt:    m.CreatedAt,
 		UpdatedAt:    m.UpdatedAt,

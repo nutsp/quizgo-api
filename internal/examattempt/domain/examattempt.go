@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	examsetdomain "virtual-exam-api/internal/examset/domain"
 )
 
 const (
@@ -36,11 +37,12 @@ type ExamAttempt struct {
 }
 
 type ExamSetRef struct {
-	Code            string `json:"code"`
-	Title           string `json:"title"`
-	DurationMinutes int    `json:"duration_minutes"`
-	TotalQuestions  int    `json:"total_questions"`
-	PassingScore    int    `json:"passing_score,omitempty"`
+	Code              string                            `json:"code"`
+	Title             string                            `json:"title"`
+	DurationMinutes   int                               `json:"duration_minutes"`
+	TotalQuestions    int                               `json:"total_questions"`
+	PassingScore      int                               `json:"passing_score,omitempty"`
+	AnswerSheetLayout examsetdomain.AnswerSheetLayoutConfig `json:"answer_sheet_layout"`
 }
 
 type ExamTrackRef struct {
@@ -181,6 +183,12 @@ type QuestionForReview struct {
 	IsUnanswered      bool           `json:"is_unanswered"`
 	Explanation       string         `json:"explanation"`
 	Subject           string         `json:"subject"`
+	Tags              []ReviewTagRef `json:"tags,omitempty"`
+}
+
+type ReviewTagRef struct {
+	Name string `json:"name"`
+	Code string `json:"code"`
 }
 
 type ContinueAttempt struct {

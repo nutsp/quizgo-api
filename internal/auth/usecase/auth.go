@@ -58,6 +58,7 @@ func (uc *AuthUseCase) Register(ctx context.Context, req authdomain.RegisterRequ
 		Email:        strings.ToLower(req.Email),
 		PasswordHash: string(hash),
 		Role:         userdomain.RoleUser,
+		Status:       userdomain.StatusActive,
 	}
 
 	if err := uc.users.Create(ctx, user); err != nil {
@@ -83,12 +84,20 @@ func (uc *AuthUseCase) Login(ctx context.Context, req authdomain.LoginRequest) (
 		return nil, apperrors.ErrInvalidCredentials
 	}
 
+	if !user.CanLogin() {
+		return nil, apperrors.ErrAccountSuspended
+	}
+
 	if user.PasswordHash == "" {
 		return nil, apperrors.ErrInvalidCredentials
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
 		return nil, apperrors.ErrInvalidCredentials
+	}
+
+	if err := uc.users.UpdateLastLoginAt(ctx, user.ID, time.Now().UTC()); err != nil {
+		return nil, err
 	}
 
 	return uc.buildLoginResponse(user)

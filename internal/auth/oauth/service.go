@@ -5,10 +5,12 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	authdomain "virtual-exam-api/internal/auth/domain"
+	"virtual-exam-api/internal/apperrors"
 	oauthdomain "virtual-exam-api/internal/auth/oauth/domain"
 	oauthrepo "virtual-exam-api/internal/auth/oauth/repository"
 	"virtual-exam-api/internal/config"
@@ -56,22 +58,21 @@ func (s *Service) BeginGoogleLogin(w http.ResponseWriter, redirect string) (stri
 	return s.google.AuthURL(state), nil
 }
 
-func (s *Service) HandleGoogleCallback(w http.ResponseWriter, r *http.Request, code, state string) (string, error) {
+func (s *Service) HandleGoogleCallback(w http.ResponseWriter, r *http.Request, code, state string) (string, *authdomain.LoginResponse, error) {
 	redirect, err := s.state.Validate(w, r, state)
 	if err != nil {
-		return BuildFrontendErrorURL(s.frontendURL), nil
+		return BuildFrontendErrorURL(s.frontendURL), nil, err
 	}
 	if code == "" {
-		return BuildFrontendErrorURL(s.frontendURL), nil
+		return BuildFrontendErrorURL(s.frontendURL), nil, errors.New("missing code")
 	}
 
 	loginResp, err := s.authenticateGoogle(r.Context(), code)
 	if err != nil {
-		return BuildFrontendErrorURL(s.frontendURL), nil
+		return BuildFrontendErrorURL(s.frontendURL), nil, err
 	}
 
-	// TODO: For production, prefer setting httpOnly secure cookie instead of passing JWT in URL.
-	return BuildFrontendCallbackURL(s.frontendURL, loginResp.AccessToken, redirect), nil
+	return BuildFrontendCallbackURL(s.frontendURL, loginResp.AccessToken, redirect), loginResp, nil
 }
 
 func (s *Service) authenticateGoogle(ctx context.Context, code string) (*authdomain.LoginResponse, error) {
@@ -111,6 +112,12 @@ func (s *Service) authenticateGoogle(ctx context.Context, code string) (*authdom
 		if user == nil {
 			return nil, errors.New("linked user not found")
 		}
+		if !user.CanLogin() {
+			return nil, apperrors.ErrAccountSuspended
+		}
+		if err := s.users.UpdateLastLoginAt(ctx, user.ID, time.Now().UTC()); err != nil {
+			return nil, err
+		}
 		return s.tokenIssuer.IssueTokenForUser(user)
 	}
 
@@ -139,6 +146,12 @@ func (s *Service) authenticateGoogle(ctx context.Context, code string) (*authdom
 		if err := s.oauth.Create(ctx, newAccount); err != nil {
 			return nil, err
 		}
+		if !user.CanLogin() {
+			return nil, apperrors.ErrAccountSuspended
+		}
+		if err := s.users.UpdateLastLoginAt(ctx, user.ID, time.Now().UTC()); err != nil {
+			return nil, err
+		}
 		return s.tokenIssuer.IssueTokenForUser(user)
 	}
 
@@ -152,6 +165,7 @@ func (s *Service) authenticateGoogle(ctx context.Context, code string) (*authdom
 		DisplayName: displayName,
 		Email:       email,
 		Role:        userdomain.RoleUser,
+		Status:      userdomain.StatusActive,
 	}
 
 	if err := s.users.CreateOAuthUser(ctx, newUser); err != nil {
@@ -181,6 +195,12 @@ func (s *Service) authenticateGoogle(ctx context.Context, code string) (*authdom
 		return nil, err
 	}
 
+	if !user.CanLogin() {
+		return nil, apperrors.ErrAccountSuspended
+	}
+	if err := s.users.UpdateLastLoginAt(ctx, user.ID, time.Now().UTC()); err != nil {
+		return nil, err
+	}
 	return s.tokenIssuer.IssueTokenForUser(user)
 }
 

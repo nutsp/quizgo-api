@@ -7,13 +7,14 @@ import (
 
 	qdomain "virtual-exam-api/internal/question/domain"
 	"virtual-exam-api/internal/questionimport/domain"
+	tagrepo "virtual-exam-api/internal/questiontag/repository"
 )
 
 type subjectLookup interface {
 	FindByCode(ctx context.Context, code string) (*qdomain.Subject, error)
 }
 
-func validateRows(ctx context.Context, rows []domain.ImportQuestionRow, subjects subjectLookup, existsFn func(ctx context.Context, text string) (bool, error)) []domain.ImportPreviewRow {
+func validateRows(ctx context.Context, rows []domain.ImportQuestionRow, subjects subjectLookup, tags tagrepo.TagAdminRepository, existsFn func(ctx context.Context, text string) (bool, error)) []domain.ImportPreviewRow {
 	textCounts := make(map[string]int)
 	for _, row := range rows {
 		key := strings.TrimSpace(row.QuestionText)
@@ -24,7 +25,7 @@ func validateRows(ctx context.Context, rows []domain.ImportQuestionRow, subjects
 
 	preview := make([]domain.ImportPreviewRow, len(rows))
 	for i, row := range rows {
-		preview[i] = validateRow(ctx, row, subjects, existsFn, textCounts)
+		preview[i] = validateRow(ctx, row, subjects, tags, existsFn, textCounts)
 	}
 	return preview
 }
@@ -33,6 +34,7 @@ func validateRow(
 	ctx context.Context,
 	row domain.ImportQuestionRow,
 	subjects subjectLookup,
+	tags tagrepo.TagAdminRepository,
 	existsFn func(ctx context.Context, text string) (bool, error),
 	textCounts map[string]int,
 ) domain.ImportPreviewRow {
@@ -49,6 +51,7 @@ func validateRow(
 	data.Explanation = strings.TrimSpace(row.Explanation)
 	data.Difficulty = strings.ToLower(strings.TrimSpace(row.Difficulty))
 	data.Status = strings.ToLower(strings.TrimSpace(row.Status))
+	data.Tags = strings.TrimSpace(row.Tags)
 
 	if data.SubjectCode == "" {
 		errs = append(errs, "กรุณาระบุหมวดวิชา (subject_code)")
@@ -105,6 +108,29 @@ func validateRow(
 		warns = append(warns, "ยังไม่มีคำอธิบายเฉลย")
 	}
 
+	if data.Tags != "" && tags != nil {
+		codes := parseTagCodes(data.Tags)
+		if len(codes) == 0 {
+			errs = append(errs, "รูปแบบกลุ่มคำถาม (tags) ไม่ถูกต้อง")
+		} else {
+			found, err := tags.FindActiveByCodes(ctx, codes)
+			if err != nil {
+				errs = append(errs, "ไม่สามารถตรวจสอบกลุ่มคำถามได้")
+			} else {
+				foundCodes := make(map[string]bool, len(found))
+				for _, t := range found {
+					foundCodes[t.Code] = true
+				}
+				for _, code := range codes {
+					if !foundCodes[code] {
+						errs = append(errs, "ไม่พบกลุ่มคำถาม: "+code)
+					}
+				}
+			}
+		}
+		data.Tags = strings.Join(parseTagCodes(data.Tags), "|")
+	}
+
 	if data.QuestionText != "" {
 		if textCounts[data.QuestionText] > 1 {
 			warns = append(warns, "พบคำถามซ้ำในไฟล์นี้")
@@ -144,4 +170,19 @@ func isValidDifficulty(d string) bool {
 
 func isValidStatus(s string) bool {
 	return s == qdomain.StatusDraft || s == qdomain.StatusPublished || s == qdomain.StatusArchived
+}
+
+func parseTagCodes(raw string) []string {
+	parts := strings.Split(raw, "|")
+	seen := make(map[string]bool)
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		code := strings.ToLower(strings.TrimSpace(p))
+		if code == "" || seen[code] {
+			continue
+		}
+		seen[code] = true
+		out = append(out, code)
+	}
+	return out
 }

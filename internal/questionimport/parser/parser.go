@@ -52,6 +52,7 @@ func rowFromMap(rowNum int, colIndex map[string]int, record []string) domain.Imp
 	return domain.ImportQuestionRow{
 		RowNumber:     rowNum,
 		SubjectCode:   get("subject_code"),
+		Tags:          get("tags"),
 		QuestionText:  get("question_text"),
 		ChoiceA:       get("choice_a"),
 		ChoiceB:       get("choice_b"),

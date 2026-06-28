@@ -63,7 +63,7 @@ func (uc *DashboardUseCase) Get(ctx context.Context) (*DashboardResponse, error)
 	if err != nil {
 		return nil, err
 	}
-	qAdmin := questionrepo.NewQuestionAdminRepository(uc.db)
+	qAdmin := questionrepo.NewQuestionAdminRepository(uc.db, nil)
 	totalQuestions, err := qAdmin.CountAll(ctx)
 	if err != nil {
 		return nil, err

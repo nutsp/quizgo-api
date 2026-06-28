@@ -6,10 +6,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	dashboarduc "virtual-exam-api/internal/admin/dashboard/usecase"
+	audituc "virtual-exam-api/internal/auditlog/usecase"
 	"virtual-exam-api/internal/apperrors"
+	"virtual-exam-api/internal/common/pagination"
 	examsetuc "virtual-exam-api/internal/examset/usecase"
 	trackrepo "virtual-exam-api/internal/examtrack/repository"
 	trackuc "virtual-exam-api/internal/examtrack/usecase"
+	"virtual-exam-api/internal/middleware"
 	questionrepo "virtual-exam-api/internal/question/repository"
 	questionuc "virtual-exam-api/internal/question/usecase"
 	"virtual-exam-api/internal/response"
@@ -17,6 +20,7 @@ import (
 	subjectuc "virtual-exam-api/internal/subject/usecase"
 	examsetrepo "virtual-exam-api/internal/examset/repository"
 	esqhttp "virtual-exam-api/internal/examsetquestion/transport/http"
+	userrepo "virtual-exam-api/internal/user/repository"
 )
 
 type Handler struct {
@@ -26,6 +30,8 @@ type Handler struct {
 	subjects         *subjectuc.SubjectUseCase
 	questions        *questionuc.AdminUseCase
 	examSetQuestions *esqhttp.Handler
+	audit            *audituc.Logger
+	users            userrepo.Repository
 }
 
 func NewHandler(
@@ -35,6 +41,8 @@ func NewHandler(
 	subjects *subjectuc.SubjectUseCase,
 	questions *questionuc.AdminUseCase,
 	examSetQuestions *esqhttp.Handler,
+	audit *audituc.Logger,
+	users userrepo.Repository,
 ) *Handler {
 	return &Handler{
 		dashboard:        dashboard,
@@ -43,6 +51,8 @@ func NewHandler(
 		subjects:         subjects,
 		questions:        questions,
 		examSetQuestions: examSetQuestions,
+		audit:            audit,
+		users:            users,
 	}
 }
 
@@ -93,10 +103,13 @@ func (h *Handler) Dashboard(c echo.Context) error {
 }
 
 func (h *Handler) ListTracks(c echo.Context) error {
+	pq := pagination.ParsePagination(c)
 	filter := trackrepo.AdminFilter{
-		Query: c.QueryParam("q"),
-		Page:  queryInt(c, "page"),
-		Limit: queryInt(c, "limit"),
+		Query: pq.Q,
+		Page:  pq.Page,
+		Limit: pq.Limit,
+		Sort:  pq.Sort,
+		Order: pq.Order,
 	}
 	if v := c.QueryParam("is_active"); v != "" {
 		active := v == "true"
@@ -162,13 +175,17 @@ func (h *Handler) DeleteTrack(c echo.Context) error {
 }
 
 func (h *Handler) ListSets(c echo.Context) error {
+	pq := pagination.ParsePagination(c)
 	filter := examsetrepo.AdminFilter{
-		Query:      c.QueryParam("q"),
+		Query:      pq.Q,
 		AccessType: c.QueryParam("access_type"),
 		Difficulty: c.QueryParam("difficulty"),
 		Mode:       c.QueryParam("mode"),
-		Page:       queryInt(c, "page"),
-		Limit:      queryInt(c, "limit"),
+		Status:     c.QueryParam("status"),
+		Page:       pq.Page,
+		Limit:      pq.Limit,
+		Sort:       pq.Sort,
+		Order:      pq.Order,
 	}
 	if trackID := c.QueryParam("exam_track_id"); trackID != "" {
 		id, err := uuid.Parse(trackID)
@@ -217,6 +234,10 @@ func (h *Handler) UpdateSet(c echo.Context) error {
 	if err != nil {
 		return response.Error(c, err)
 	}
+	before, err := h.sets.Get(c.Request().Context(), id)
+	if err != nil {
+		return response.Error(c, err)
+	}
 	var input examsetuc.UpdateSetInput
 	if err := c.Bind(&input); err != nil {
 		return response.Error(c, apperrors.ErrInvalidInput)
@@ -224,6 +245,12 @@ func (h *Handler) UpdateSet(c echo.Context) error {
 	result, err := h.sets.Update(c.Request().Context(), id, input)
 	if err != nil {
 		return response.Error(c, err)
+	}
+	if before != nil && (before.AccessType != result.AccessType || before.PriceAmount != result.PriceAmount) {
+		h.logAudit(c, "exam_set.access_config_update", "exam_set", &id, result.Title,
+			map[string]any{"access_type": before.AccessType, "price_amount": before.PriceAmount},
+			map[string]any{"access_type": result.AccessType, "price_amount": result.PriceAmount},
+		)
 	}
 	return response.JSON(c, 200, result)
 }
@@ -269,10 +296,18 @@ func (h *Handler) PublishSet(c echo.Context) error {
 	if err != nil {
 		return response.Error(c, err)
 	}
+	beforeSet, _ := h.sets.Get(c.Request().Context(), id)
 	result, err := h.sets.Publish(c.Request().Context(), id)
 	if err != nil {
 		return response.Error(c, err)
 	}
+	beforeStatus := "draft"
+	if beforeSet != nil {
+		beforeStatus = beforeSet.Status
+	}
+	h.logAudit(c, "exam_set.publish", "exam_set", &id, result.Title,
+		map[string]any{"status": beforeStatus},
+		map[string]any{"status": result.Status})
 	return response.JSON(c, 200, result)
 }
 
@@ -301,10 +336,13 @@ func (h *Handler) ArchiveSet(c echo.Context) error {
 }
 
 func (h *Handler) ListSubjects(c echo.Context) error {
+	pq := pagination.ParsePagination(c)
 	filter := subjectrepo.SubjectAdminFilter{
-		Query: c.QueryParam("q"),
-		Page:  queryInt(c, "page"),
-		Limit: queryInt(c, "limit"),
+		Query: pq.Q,
+		Page:  pq.Page,
+		Limit: pq.Limit,
+		Sort:  pq.Sort,
+		Order: pq.Order,
 	}
 	result, err := h.subjects.List(c.Request().Context(), filter)
 	if err != nil {
@@ -365,12 +403,15 @@ func (h *Handler) DeleteSubject(c echo.Context) error {
 }
 
 func (h *Handler) ListQuestions(c echo.Context) error {
+	pq := pagination.ParsePagination(c)
 	filter := questionrepo.QuestionAdminFilter{
-		Query:      c.QueryParam("q"),
+		Query:      pq.Q,
 		Difficulty: c.QueryParam("difficulty"),
 		Status:     c.QueryParam("status"),
-		Page:       queryInt(c, "page"),
-		Limit:      queryInt(c, "limit"),
+		Page:       pq.Page,
+		Limit:      pq.Limit,
+		Sort:       pq.Sort,
+		Order:      pq.Order,
 	}
 	if sid := c.QueryParam("subject_id"); sid != "" {
 		id, err := uuid.Parse(sid)
@@ -378,6 +419,13 @@ func (h *Handler) ListQuestions(c echo.Context) error {
 			return response.Error(c, apperrors.ErrInvalidUUID)
 		}
 		filter.SubjectID = id
+	}
+	if tid := c.QueryParam("tag_id"); tid != "" {
+		id, err := uuid.Parse(tid)
+		if err != nil {
+			return response.Error(c, apperrors.ErrInvalidUUID)
+		}
+		filter.TagID = id
 	}
 	result, err := h.questions.ListQuestions(c.Request().Context(), filter)
 	if err != nil {
@@ -415,6 +463,7 @@ func (h *Handler) UpdateQuestion(c echo.Context) error {
 	if err != nil {
 		return response.Error(c, err)
 	}
+	before, _ := h.questions.GetQuestion(c.Request().Context(), id)
 	var input questionuc.QuestionInput
 	if err := c.Bind(&input); err != nil {
 		return response.Error(c, apperrors.ErrInvalidInput)
@@ -423,6 +472,11 @@ func (h *Handler) UpdateQuestion(c echo.Context) error {
 	if err != nil {
 		return response.Error(c, err)
 	}
+	name := result.QuestionPreview
+	if name == "" {
+		name = result.QuestionText
+	}
+	h.logAudit(c, "question.update", "question", &id, name, before, result)
 	return response.JSON(c, 200, result)
 }
 
@@ -436,6 +490,32 @@ func (h *Handler) DeleteQuestion(c echo.Context) error {
 		return response.Error(c, err)
 	}
 	return response.JSON(c, 200, map[string]any{"archived": archived})
+}
+
+func (h *Handler) logAudit(c echo.Context, action, resourceType string, resourceID *uuid.UUID, resourceName string, before, after any) {
+	if h.audit == nil {
+		return
+	}
+	actorID, err := middleware.RequireUserID(c)
+	if err != nil {
+		return
+	}
+	email := ""
+	if actor, err := h.users.FindByID(c.Request().Context(), actorID); err == nil && actor != nil {
+		email = actor.Email
+	}
+	h.audit.Log(c.Request().Context(), audituc.LogInput{
+		ActorUserID:  &actorID,
+		ActorEmail:   email,
+		Action:       action,
+		ResourceType: resourceType,
+		ResourceID:   resourceID,
+		ResourceName: resourceName,
+		BeforeData:   before,
+		AfterData:    after,
+		IPAddress:    c.RealIP(),
+		UserAgent:    c.Request().UserAgent(),
+	})
 }
 
 func parseUUID(s string) (uuid.UUID, error) {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/questionimport/domain"
 )
 
@@ -61,6 +62,7 @@ type ImportRowModel struct {
 	ImportJobID   uuid.UUID  `gorm:"type:uuid;not null;index"`
 	RowNumber     int        `gorm:"not null"`
 	SubjectCode   string     `gorm:"type:varchar(100)"`
+	Tags          string     `gorm:"type:varchar(500)"`
 	QuestionText  string     `gorm:"type:text"`
 	ChoiceA       string     `gorm:"type:text"`
 	ChoiceB       string     `gorm:"type:text"`
@@ -78,10 +80,29 @@ type ImportRowModel struct {
 
 func (ImportRowModel) TableName() string { return "question_import_rows" }
 
+type JobListFilter struct {
+	Query    string
+	Status   string
+	DateFrom *time.Time
+	DateTo   *time.Time
+	Page     int
+	Limit    int
+	Sort     string
+	Order    string
+}
+
+var importJobSortColumns = map[string]string{
+	"created_at":   "created_at",
+	"confirmed_at": "confirmed_at",
+	"filename":     "filename",
+	"status":       "status",
+}
+
 type Repository interface {
 	CreatePreview(ctx context.Context, job *domain.ImportJob, rows []domain.ImportJobRow) error
 	FindJobByID(ctx context.Context, id uuid.UUID) (*domain.ImportJob, error)
 	FindRowsByJobID(ctx context.Context, jobID uuid.UUID) ([]domain.ImportJobRow, error)
+	ListJobs(ctx context.Context, filter JobListFilter) ([]domain.ImportJob, int64, error)
 	MarkImported(ctx context.Context, jobID uuid.UUID, imported, skipped, failed int) error
 	ExistsQuestionText(ctx context.Context, text string) (bool, error)
 	RunInTransaction(ctx context.Context, fn func(tx *gorm.DB) error) error
@@ -140,6 +161,46 @@ func (r *postgresRepository) FindRowsByJobID(ctx context.Context, jobID uuid.UUI
 		rows[i] = mapRowFromModel(m)
 	}
 	return rows, nil
+}
+
+func (r *postgresRepository) ListJobs(ctx context.Context, filter JobListFilter) ([]domain.ImportJob, int64, error) {
+	page, limit := pagination.Sanitize(filter.Page, filter.Limit)
+	sortCol := pagination.ResolveSort(filter.Sort, importJobSortColumns, "created_at")
+	orderDir := pagination.ResolveOrder(filter.Order, true)
+
+	q := r.db.WithContext(ctx).Model(&ImportJobModel{})
+	if filter.Query != "" {
+		q = q.Where("filename ILIKE ?", "%"+filter.Query+"%")
+	}
+	if filter.Status != "" {
+		q = q.Where("status = ?", filter.Status)
+	}
+	if filter.DateFrom != nil {
+		q = q.Where("created_at >= ?", *filter.DateFrom)
+	}
+	if filter.DateTo != nil {
+		q = q.Where("created_at < ?", filter.DateTo.Add(24*time.Hour))
+	}
+
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	var models []ImportJobModel
+	err := q.Order(pagination.OrderClause(sortCol, orderDir)).
+		Offset(pagination.Offset(page, limit)).
+		Limit(limit).
+		Find(&models).Error
+	if err != nil {
+		return nil, 0, err
+	}
+
+	jobs := make([]domain.ImportJob, len(models))
+	for i, m := range models {
+		jobs[i] = mapJobFromModel(m)
+	}
+	return jobs, total, nil
 }
 
 func (r *postgresRepository) MarkImported(ctx context.Context, jobID uuid.UUID, imported, skipped, failed int) error {
@@ -214,6 +275,7 @@ func mapRowToModel(row domain.ImportJobRow) ImportRowModel {
 		ImportJobID:   row.ImportJobID,
 		RowNumber:     row.RowNumber,
 		SubjectCode:   row.SubjectCode,
+		Tags:          row.Tags,
 		QuestionText:  row.QuestionText,
 		ChoiceA:       row.ChoiceA,
 		ChoiceB:       row.ChoiceB,
@@ -236,6 +298,7 @@ func mapRowFromModel(m ImportRowModel) domain.ImportJobRow {
 		ImportJobID:   m.ImportJobID,
 		RowNumber:     m.RowNumber,
 		SubjectCode:   m.SubjectCode,
+		Tags:          m.Tags,
 		QuestionText:  m.QuestionText,
 		ChoiceA:       m.ChoiceA,
 		ChoiceB:       m.ChoiceB,

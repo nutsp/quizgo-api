@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 	"virtual-exam-api/internal/examattempt/domain"
+	examsetdomain "virtual-exam-api/internal/examset/domain"
 	questionrepo "virtual-exam-api/internal/question/repository"
 )
 
@@ -42,6 +43,12 @@ type ExamSetJoin struct {
 	DurationMinutes int
 	TotalQuestions  int
 	PassingScore    int
+	AnswerSheetBlockColumns          int
+	AnswerSheetQuestionsPerBlock     int
+	AnswerSheetChoiceLabelStyle      string
+	AnswerSheetShowHeader            bool
+	AnswerSheetShowInstructions      bool
+	AnswerSheetShowCandidateInfo     bool
 }
 
 func (ExamSetJoin) TableName() string { return "exam_sets" }
@@ -94,7 +101,13 @@ type QuestionDetail struct {
 	QuestionText string
 	Explanation  string
 	SubjectName  string
+	Tags         []TagDetail
 	Choices      []ChoiceDetail
+}
+
+type TagDetail struct {
+	Name string
+	Code string
 }
 
 type ChoiceDetail struct {
@@ -291,6 +304,23 @@ func (r *postgresRepository) ListAnswersWithQuestions(ctx context.Context, attem
 				IsCorrect:   c.IsCorrect,
 			})
 		}
+		type tagRow struct {
+			Name string
+			Code string
+		}
+		var tagRows []tagRow
+		if err := r.db.WithContext(ctx).
+			Table("question_tag_mappings m").
+			Select("t.name, t.code").
+			Joins("JOIN question_tags t ON t.id = m.tag_id").
+			Where("m.question_id = ?", q.ID).
+			Order("t.name ASC").
+			Scan(&tagRows).Error; err != nil {
+			return nil, err
+		}
+		for _, t := range tagRows {
+			detail.Tags = append(detail.Tags, TagDetail{Name: t.Name, Code: t.Code})
+		}
 		result = append(result, AnswerWithQuestion{
 			Answer:   *toAnswerDomain(&a),
 			Question: detail,
@@ -346,6 +376,14 @@ func toAttemptDomain(m *ExamAttemptModel) domain.ExamAttempt {
 			DurationMinutes: m.ExamSet.DurationMinutes,
 			TotalQuestions:  m.ExamSet.TotalQuestions,
 			PassingScore:    m.ExamSet.PassingScore,
+			AnswerSheetLayout: examsetdomain.LayoutFromModel(
+				m.ExamSet.AnswerSheetBlockColumns,
+				m.ExamSet.AnswerSheetQuestionsPerBlock,
+				m.ExamSet.AnswerSheetChoiceLabelStyle,
+				m.ExamSet.AnswerSheetShowHeader,
+				m.ExamSet.AnswerSheetShowInstructions,
+				m.ExamSet.AnswerSheetShowCandidateInfo,
+			),
 		}
 	}
 	if m.ExamTrack.Code != "" {

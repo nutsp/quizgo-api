@@ -8,18 +8,21 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"virtual-exam-api/internal/apperrors"
+	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/examset/domain"
 	examsetrepo "virtual-exam-api/internal/examset/repository"
 	trackrepo "virtual-exam-api/internal/examtrack/repository"
 	qdomain "virtual-exam-api/internal/question/domain"
 	questionrepo "virtual-exam-api/internal/question/repository"
 	subjectrepo "virtual-exam-api/internal/subject/repository"
+	taguc "virtual-exam-api/internal/questiontag/usecase"
 )
 
 type AdminUseCase struct {
 	questions    questionrepo.QuestionAdminRepository
 	setQuestions questionrepo.ExamSetQuestionAdminRepository
 	subjects     subjectrepo.SubjectAdminRepository
+	tags         *taguc.TagUseCase
 	sets         examsetrepo.Repository
 	setAdmin     examsetrepo.AdminRepository
 	trackAdmin   trackrepo.AdminRepository
@@ -29,6 +32,7 @@ func NewAdminUseCase(
 	questions questionrepo.QuestionAdminRepository,
 	setQuestions questionrepo.ExamSetQuestionAdminRepository,
 	subjects subjectrepo.SubjectAdminRepository,
+	tags *taguc.TagUseCase,
 	sets examsetrepo.Repository,
 	setAdmin examsetrepo.AdminRepository,
 	trackAdmin trackrepo.AdminRepository,
@@ -37,6 +41,7 @@ func NewAdminUseCase(
 		questions:    questions,
 		setQuestions: setQuestions,
 		subjects:     subjects,
+		tags:         tags,
 		sets:         sets,
 		setAdmin:     setAdmin,
 		trackAdmin:   trackAdmin,
@@ -56,7 +61,15 @@ type QuestionInput struct {
 	Difficulty   string        `json:"difficulty"`
 	Explanation  string        `json:"explanation"`
 	Status       string        `json:"status"`
+	TagIDs       []string      `json:"tag_ids"`
 	Choices      []ChoiceInput `json:"choices"`
+}
+
+type TagSummaryResponse struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Code  string `json:"code"`
+	Color string `json:"color,omitempty"`
 }
 
 type ChoiceResponse struct {
@@ -77,18 +90,14 @@ type QuestionResponse struct {
 	Explanation     string           `json:"explanation,omitempty"`
 	Status          string           `json:"status"`
 	IsActive        bool             `json:"is_active"`
-	CorrectAnswer   string           `json:"correct_answer,omitempty"`
-	Choices         []ChoiceResponse `json:"choices,omitempty"`
-	CreatedAt       string           `json:"created_at"`
+	CorrectAnswer   string               `json:"correct_answer,omitempty"`
+	Choices         []ChoiceResponse     `json:"choices,omitempty"`
+	Tags            []TagSummaryResponse `json:"tags,omitempty"`
+	CreatedAt       string               `json:"created_at"`
 	UpdatedAt       string           `json:"updated_at"`
 }
 
-type QuestionListResponse struct {
-	Items      []QuestionResponse `json:"items"`
-	TotalItems int64              `json:"total_items"`
-	Page       int                `json:"page"`
-	Limit      int                `json:"limit"`
-}
+type QuestionListResponse = pagination.PaginatedList[QuestionResponse]
 
 type ExamSetQuestionResponse struct {
 	QuestionNo      int    `json:"question_no"`
@@ -122,14 +131,9 @@ func (uc *AdminUseCase) ListQuestions(ctx context.Context, filter questionrepo.Q
 	for i, q := range items {
 		resp[i] = toQuestionResponse(q)
 	}
-	page, limit := filter.Page, filter.Limit
-	if page < 1 {
-		page = 1
-	}
-	if limit < 1 {
-		limit = 20
-	}
-	return &QuestionListResponse{Items: resp, TotalItems: total, Page: page, Limit: limit}, nil
+	page, limit := pagination.Sanitize(filter.Page, filter.Limit)
+	result := pagination.NewList(resp, page, limit, total)
+	return &result, nil
 }
 
 func (uc *AdminUseCase) GetQuestion(ctx context.Context, id uuid.UUID) (*QuestionResponse, error) {
@@ -312,6 +316,10 @@ func (uc *AdminUseCase) buildQuestion(input QuestionInput) (*qdomain.Question, e
 	if err != nil {
 		return nil, err
 	}
+	tagRefs, err := uc.resolveTagRefs(context.Background(), input.TagIDs)
+	if err != nil {
+		return nil, err
+	}
 	return &qdomain.Question{
 		SubjectID:    subjectID,
 		QuestionText: input.QuestionText,
@@ -321,7 +329,37 @@ func (uc *AdminUseCase) buildQuestion(input QuestionInput) (*qdomain.Question, e
 		IsActive:     input.Status != qdomain.StatusArchived,
 		Subject:      &qdomain.SubjectRef{Code: subject.Code, Name: subject.Name},
 		Choices:      choices,
+		Tags:         tagRefs,
 	}, nil
+}
+
+func (uc *AdminUseCase) resolveTagRefs(ctx context.Context, tagIDs []string) ([]qdomain.TagRef, error) {
+	if len(tagIDs) == 0 {
+		return nil, nil
+	}
+	ids := make([]uuid.UUID, 0, len(tagIDs))
+	for _, s := range tagIDs {
+		id, err := uuid.Parse(s)
+		if err != nil {
+			return nil, apperrors.ErrInvalidUUID
+		}
+		ids = append(ids, id)
+	}
+	if uc.tags == nil {
+		return nil, apperrors.ErrTagNotFound
+	}
+	if err := uc.tags.ValidateTagIDs(ctx, ids); err != nil {
+		return nil, err
+	}
+	tags, err := uc.tags.Repository().FindActiveByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]qdomain.TagRef, len(tags))
+	for i, t := range tags {
+		refs[i] = qdomain.TagRef{ID: t.ID, Name: t.Name, Code: t.Code, Color: t.Color}
+	}
+	return refs, nil
 }
 
 func validateChoices(inputs []ChoiceInput) ([]qdomain.Choice, error) {
@@ -396,6 +434,14 @@ func toQuestionResponse(q qdomain.Question) QuestionResponse {
 			ChoiceLabel: c.ChoiceLabel,
 			ChoiceText:  c.ChoiceText,
 			IsCorrect:   c.IsCorrect,
+		})
+	}
+	for _, t := range q.Tags {
+		resp.Tags = append(resp.Tags, TagSummaryResponse{
+			ID:    t.ID.String(),
+			Name:  t.Name,
+			Code:  t.Code,
+			Color: t.Color,
 		})
 	}
 	return resp

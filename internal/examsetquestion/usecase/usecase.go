@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"virtual-exam-api/internal/apperrors"
+	"virtual-exam-api/internal/common/pagination"
 	esdomain "virtual-exam-api/internal/examset/domain"
 	examsetrepo "virtual-exam-api/internal/examset/repository"
 	trackrepo "virtual-exam-api/internal/examtrack/repository"
@@ -43,11 +44,31 @@ func NewUseCase(
 type AvailableFilterInput struct {
 	Query           string
 	SubjectID       string
+	TagID           string
 	Difficulty      string
 	Status          string
 	ExcludeAssigned bool
 	Page            int
 	Limit           int
+	Sort            string
+	Order           string
+}
+
+type AssignedFilterInput struct {
+	Query     string
+	SubjectID string
+	TagID     string
+	Page      int
+	Limit     int
+	Sort      string
+	Order     string
+}
+
+type TagSummaryDTO struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Code  string `json:"code"`
+	Color string `json:"color,omitempty"`
 }
 
 type AvailableQuestionResponse struct {
@@ -57,8 +78,9 @@ type AvailableQuestionResponse struct {
 	Difficulty       string      `json:"difficulty"`
 	Status           string      `json:"status"`
 	CorrectChoiceKey string      `json:"correct_choice_key,omitempty"`
-	CreatedAt        string      `json:"created_at"`
-	AlreadyAssigned  bool        `json:"already_assigned"`
+	CreatedAt        string          `json:"created_at"`
+	AlreadyAssigned  bool            `json:"already_assigned"`
+	Tags             []TagSummaryDTO `json:"tags,omitempty"`
 }
 
 type SubjectDTO struct {
@@ -66,16 +88,9 @@ type SubjectDTO struct {
 	Name string `json:"name"`
 }
 
-type PaginationDTO struct {
-	Page  int   `json:"page"`
-	Limit int   `json:"limit"`
-	Total int64 `json:"total"`
-}
+type PaginationDTO = pagination.PaginationMeta
 
-type AvailableQuestionsResponse struct {
-	Items      []AvailableQuestionResponse `json:"items"`
-	Pagination PaginationDTO               `json:"pagination"`
-}
+type AvailableQuestionsResponse = pagination.PaginatedList[AvailableQuestionResponse]
 
 type ExamSetDTO struct {
 	ID              string `json:"id"`
@@ -97,9 +112,10 @@ type AssignedQuestionResponse struct {
 }
 
 type ListAssignedResponse struct {
-	ExamSet              ExamSetDTO                 `json:"exam_set"`
-	Items                []AssignedQuestionResponse `json:"items"`
-	IsLockedByAttempts   bool                       `json:"is_locked_by_attempts"`
+	ExamSet              ExamSetDTO                              `json:"exam_set"`
+	Items                []AssignedQuestionResponse              `json:"items"`
+	Pagination           pagination.PaginationMeta               `json:"pagination"`
+	IsLockedByAttempts   bool                                    `json:"is_locked_by_attempts"`
 }
 
 type BulkAddInput struct {
@@ -158,6 +174,8 @@ func (uc *UseCase) ListAvailable(ctx context.Context, examSetID uuid.UUID, input
 		ExcludeAssigned: input.ExcludeAssigned,
 		Page:            input.Page,
 		Limit:           input.Limit,
+		Sort:            input.Sort,
+		Order:           input.Order,
 	}
 	if input.SubjectID != "" {
 		sid, err := uuid.Parse(input.SubjectID)
@@ -165,6 +183,13 @@ func (uc *UseCase) ListAvailable(ctx context.Context, examSetID uuid.UUID, input
 			return nil, apperrors.ErrInvalidUUID
 		}
 		filter.SubjectID = sid
+	}
+	if input.TagID != "" {
+		tid, err := uuid.Parse(input.TagID)
+		if err != nil {
+			return nil, apperrors.ErrInvalidUUID
+		}
+		filter.TagID = tid
 	}
 
 	items, total, err := uc.repo.ListAvailable(ctx, examSetID, filter)
@@ -176,29 +201,40 @@ func (uc *UseCase) ListAvailable(ctx context.Context, examSetID uuid.UUID, input
 	for i, item := range items {
 		resp[i] = toAvailableResponse(item)
 	}
-	page, limit := filter.Page, filter.Limit
-	if page < 1 {
-		page = 1
-	}
-	if limit < 1 {
-		limit = 20
-	}
-	return &AvailableQuestionsResponse{
-		Items: resp,
-		Pagination: PaginationDTO{
-			Page:  page,
-			Limit: limit,
-			Total: total,
-		},
-	}, nil
+	page, limit := pagination.Sanitize(filter.Page, filter.Limit)
+	result := pagination.NewList(resp, page, limit, total)
+	return &result, nil
 }
 
-func (uc *UseCase) ListAssigned(ctx context.Context, examSetID uuid.UUID) (*ListAssignedResponse, error) {
+func (uc *UseCase) ListAssigned(ctx context.Context, examSetID uuid.UUID, input AssignedFilterInput) (*ListAssignedResponse, error) {
 	set, err := uc.requireExamSet(ctx, examSetID)
 	if err != nil {
 		return nil, err
 	}
-	items, err := uc.repo.ListAssigned(ctx, examSetID)
+
+	filter := esqdomain.AssignedFilter{
+		Query: input.Query,
+		Page:  input.Page,
+		Limit: input.Limit,
+		Sort:  input.Sort,
+		Order: input.Order,
+	}
+	if input.SubjectID != "" {
+		sid, err := uuid.Parse(input.SubjectID)
+		if err != nil {
+			return nil, apperrors.ErrInvalidUUID
+		}
+		filter.SubjectID = sid
+	}
+	if input.TagID != "" {
+		tid, err := uuid.Parse(input.TagID)
+		if err != nil {
+			return nil, apperrors.ErrInvalidUUID
+		}
+		filter.TagID = tid
+	}
+
+	items, total, err := uc.repo.ListAssigned(ctx, examSetID, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -211,6 +247,7 @@ func (uc *UseCase) ListAssigned(ctx context.Context, examSetID uuid.UUID) (*List
 	for i, item := range items {
 		resp[i] = toAssignedResponse(item)
 	}
+	page, limit := pagination.Sanitize(filter.Page, filter.Limit)
 	return &ListAssignedResponse{
 		ExamSet: ExamSetDTO{
 			ID:              set.ID.String(),
@@ -221,6 +258,7 @@ func (uc *UseCase) ListAssigned(ctx context.Context, examSetID uuid.UUID) (*List
 			PassingScore:    set.PassingScore,
 		},
 		Items:              resp,
+		Pagination:         pagination.NewPaginationMeta(page, limit, total),
 		IsLockedByAttempts: locked,
 	}, nil
 }
@@ -284,7 +322,7 @@ func (uc *UseCase) Reorder(ctx context.Context, examSetID uuid.UUID, input Reord
 		return apperrors.ErrInvalidInput
 	}
 
-	assigned, err := uc.repo.ListAssigned(ctx, examSetID)
+	assigned, err := uc.repo.ListAllAssigned(ctx, examSetID)
 	if err != nil {
 		return err
 	}
@@ -419,6 +457,14 @@ func toAvailableResponse(item esqdomain.AvailableQuestion) AvailableQuestionResp
 	}
 	if item.Subject != nil {
 		resp.Subject = &SubjectDTO{ID: item.Subject.ID, Name: item.Subject.Name}
+	}
+	for _, t := range item.Tags {
+		resp.Tags = append(resp.Tags, TagSummaryDTO{
+			ID:    t.ID,
+			Name:  t.Name,
+			Code:  t.Code,
+			Color: t.Color,
+		})
 	}
 	return resp
 }

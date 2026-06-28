@@ -4,16 +4,19 @@ import (
 	"context"
 	"time"
 
-	"github.com/google/uuid"
-	"gorm.io/gorm"
+	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/examsetquestion/domain"
 	qdomain "virtual-exam-api/internal/question/domain"
 	questionrepo "virtual-exam-api/internal/question/repository"
+
+	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type Repository interface {
 	ListAvailable(ctx context.Context, examSetID uuid.UUID, filter domain.AvailableFilter) ([]domain.AvailableQuestion, int64, error)
-	ListAssigned(ctx context.Context, examSetID uuid.UUID) ([]domain.AssignedQuestion, error)
+	ListAssigned(ctx context.Context, examSetID uuid.UUID, filter domain.AssignedFilter) ([]domain.AssignedQuestion, int64, error)
+	ListAllAssigned(ctx context.Context, examSetID uuid.UUID) ([]domain.AssignedQuestion, error)
 	BulkAdd(ctx context.Context, examSetID uuid.UUID, questionIDs []uuid.UUID, score float64) (domain.BulkAddResult, error)
 	Remove(ctx context.Context, examSetID, questionID uuid.UUID) error
 	Reorder(ctx context.Context, examSetID uuid.UUID, items []domain.ReorderItem) error
@@ -33,7 +36,9 @@ func NewPostgresRepository(db *gorm.DB) Repository {
 }
 
 func (r *postgresRepository) ListAvailable(ctx context.Context, examSetID uuid.UUID, filter domain.AvailableFilter) ([]domain.AvailableQuestion, int64, error) {
-	page, limit := pagination(filter.Page, filter.Limit)
+	page, limit := pagination.Sanitize(filter.Page, filter.Limit)
+	sortCol := pagination.ResolveSort(filter.Sort, availableSortColumns, "created_at")
+	orderDir := pagination.ResolveOrder(filter.Order, true)
 	status := filter.Status
 	if status == "" {
 		status = qdomain.StatusPublished
@@ -55,6 +60,9 @@ func (r *postgresRepository) ListAvailable(ctx context.Context, examSetID uuid.U
 	if filter.Status != "" {
 		q = q.Where("status = ?", filter.Status)
 	}
+	if filter.TagID != uuid.Nil {
+		q = q.Where(`id IN (SELECT question_id FROM question_tag_mappings WHERE tag_id = ?)`, filter.TagID)
+	}
 
 	assignedIDs, err := r.assignedQuestionIDsTx(r.db.WithContext(ctx), examSetID)
 	if err != nil {
@@ -75,7 +83,7 @@ func (r *postgresRepository) ListAvailable(ctx context.Context, examSetID uuid.U
 	}
 
 	var models []questionrepo.QuestionModel
-	if err := q.Order("updated_at DESC").Offset((page - 1) * limit).Limit(limit).Find(&models).Error; err != nil {
+	if err := q.Order(pagination.OrderClause(sortCol, orderDir)).Offset(pagination.Offset(page, limit)).Limit(limit).Find(&models).Error; err != nil {
 		return nil, 0, err
 	}
 
@@ -83,10 +91,72 @@ func (r *postgresRepository) ListAvailable(ctx context.Context, examSetID uuid.U
 	for i, m := range models {
 		items[i] = mapAvailableQuestion(m, assignedIDs[m.ID])
 	}
+	if err := r.attachTagsToAvailable(ctx, items); err != nil {
+		return nil, 0, err
+	}
 	return items, total, nil
 }
 
-func (r *postgresRepository) ListAssigned(ctx context.Context, examSetID uuid.UUID) ([]domain.AssignedQuestion, error) {
+func (r *postgresRepository) ListAssigned(ctx context.Context, examSetID uuid.UUID, filter domain.AssignedFilter) ([]domain.AssignedQuestion, int64, error) {
+	page, limit := pagination.Sanitize(filter.Page, filter.Limit)
+	sortCol := pagination.ResolveSort(filter.Sort, assignedSortColumns, "question_no")
+	orderDir := pagination.ResolveOrder(filter.Order, false)
+
+	base := r.db.WithContext(ctx).Model(&questionrepo.ExamSetQuestionModel{}).
+		Where("exam_set_id = ?", examSetID)
+	needsQuestionJoin := filter.Query != "" || filter.SubjectID != uuid.Nil
+	if needsQuestionJoin {
+		base = base.Joins("JOIN questions ON questions.id = exam_set_questions.question_id")
+	}
+	if filter.Query != "" {
+		base = base.Where("questions.question_text ILIKE ?", "%"+filter.Query+"%")
+	}
+	if filter.SubjectID != uuid.Nil {
+		base = base.Where("questions.subject_id = ?", filter.SubjectID)
+	}
+	if filter.TagID != uuid.Nil {
+		base = base.Where(`exam_set_questions.question_id IN (SELECT question_id FROM question_tag_mappings WHERE tag_id = ?)`, filter.TagID)
+	}
+
+	var total int64
+	if err := base.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	findQ := r.db.WithContext(ctx).
+		Preload("Question.Subject").
+		Where("exam_set_id = ?", examSetID)
+	if needsQuestionJoin {
+		findQ = findQ.Joins("JOIN questions ON questions.id = exam_set_questions.question_id")
+	}
+	if filter.Query != "" {
+		findQ = findQ.Where("questions.question_text ILIKE ?", "%"+filter.Query+"%")
+	}
+	if filter.SubjectID != uuid.Nil {
+		findQ = findQ.Where("questions.subject_id = ?", filter.SubjectID)
+	}
+	if filter.TagID != uuid.Nil {
+		findQ = findQ.Where(`exam_set_questions.question_id IN (SELECT question_id FROM question_tag_mappings WHERE tag_id = ?)`, filter.TagID)
+	}
+
+	var models []questionrepo.ExamSetQuestionModel
+	err := findQ.
+		Order(pagination.OrderClause(sortCol, orderDir)).
+		Offset(pagination.Offset(page, limit)).
+		Limit(limit).
+		Find(&models).Error
+	if err != nil {
+		return nil, 0, err
+	}
+
+	items := make([]domain.AssignedQuestion, len(models))
+	for i, m := range models {
+		items[i] = mapAssignedQuestion(m)
+	}
+	return items, total, nil
+}
+
+func (r *postgresRepository) ListAllAssigned(ctx context.Context, examSetID uuid.UUID) ([]domain.AssignedQuestion, error) {
 	var models []questionrepo.ExamSetQuestionModel
 	err := r.db.WithContext(ctx).
 		Preload("Question.Subject").
@@ -96,12 +166,23 @@ func (r *postgresRepository) ListAssigned(ctx context.Context, examSetID uuid.UU
 	if err != nil {
 		return nil, err
 	}
-
 	items := make([]domain.AssignedQuestion, len(models))
 	for i, m := range models {
 		items[i] = mapAssignedQuestion(m)
 	}
 	return items, nil
+}
+
+var availableSortColumns = map[string]string{
+	"created_at": "created_at",
+	"updated_at": "updated_at",
+	"difficulty": "difficulty",
+	"status":     "status",
+}
+
+var assignedSortColumns = map[string]string{
+	"question_no": "question_no",
+	"created_at":  "created_at",
 }
 
 func (r *postgresRepository) BulkAdd(ctx context.Context, examSetID uuid.UUID, questionIDs []uuid.UUID, score float64) (domain.BulkAddResult, error) {
@@ -331,15 +412,43 @@ func mapAssignedQuestion(m questionrepo.ExamSetQuestionModel) domain.AssignedQue
 	return item
 }
 
-func pagination(page, limit int) (int, int) {
-	if page < 1 {
-		page = 1
+func (r *postgresRepository) attachTagsToAvailable(ctx context.Context, items []domain.AvailableQuestion) error {
+	if len(items) == 0 {
+		return nil
 	}
-	if limit < 1 {
-		limit = 20
+	ids := make([]uuid.UUID, len(items))
+	for i, item := range items {
+		ids[i] = item.ID
 	}
-	if limit > 100 {
-		limit = 100
+	type row struct {
+		QuestionID uuid.UUID
+		TagID      uuid.UUID
+		Name       string
+		Code       string
+		Color      string
 	}
-	return page, limit
+	var rows []row
+	err := r.db.WithContext(ctx).
+		Table("question_tag_mappings m").
+		Select("m.question_id, t.id as tag_id, t.name, t.code, t.color").
+		Joins("JOIN question_tags t ON t.id = m.tag_id").
+		Where("m.question_id IN ?", ids).
+		Order("t.name ASC").
+		Scan(&rows).Error
+	if err != nil {
+		return err
+	}
+	tagMap := make(map[uuid.UUID][]domain.TagRef)
+	for _, row := range rows {
+		tagMap[row.QuestionID] = append(tagMap[row.QuestionID], domain.TagRef{
+			ID:    row.TagID.String(),
+			Name:  row.Name,
+			Code:  row.Code,
+			Color: row.Color,
+		})
+	}
+	for i := range items {
+		items[i].Tags = tagMap[items[i].ID]
+	}
+	return nil
 }

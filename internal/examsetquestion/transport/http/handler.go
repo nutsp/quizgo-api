@@ -7,6 +7,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"virtual-exam-api/internal/apperrors"
 	esquc "virtual-exam-api/internal/examsetquestion/usecase"
+	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/response"
 )
 
@@ -34,14 +35,18 @@ func (h *Handler) ListAvailable(c echo.Context) error {
 		return response.Error(c, err)
 	}
 	excludeAssigned := c.QueryParam("exclude_assigned") != "false"
+	pq := pagination.ParsePagination(c)
 	input := esquc.AvailableFilterInput{
-		Query:           c.QueryParam("q"),
+		Query:           pq.Q,
 		SubjectID:       c.QueryParam("subject_id"),
+		TagID:           c.QueryParam("tag_id"),
 		Difficulty:      c.QueryParam("difficulty"),
 		Status:          c.QueryParam("status"),
 		ExcludeAssigned: excludeAssigned,
-		Page:            queryInt(c, "page"),
-		Limit:           queryInt(c, "limit"),
+		Page:            pq.Page,
+		Limit:           pq.Limit,
+		Sort:            pq.Sort,
+		Order:           pq.Order,
 	}
 	result, err := h.uc.ListAvailable(c.Request().Context(), examSetID, input)
 	if err != nil {
@@ -55,7 +60,17 @@ func (h *Handler) ListAssigned(c echo.Context) error {
 	if err != nil {
 		return response.Error(c, err)
 	}
-	result, err := h.uc.ListAssigned(c.Request().Context(), examSetID)
+	pq := pagination.ParsePagination(c)
+	input := esquc.AssignedFilterInput{
+		Query:     pq.Q,
+		SubjectID: c.QueryParam("subject_id"),
+		TagID:     c.QueryParam("tag_id"),
+		Page:      pq.Page,
+		Limit:     pq.Limit,
+		Sort:      pq.Sort,
+		Order:     pq.Order,
+	}
+	result, err := h.uc.ListAssigned(c.Request().Context(), examSetID, input)
 	if err != nil {
 		return response.Error(c, err)
 	}

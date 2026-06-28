@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"virtual-exam-api/internal/apperrors"
+	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/question/domain"
 	subjectrepo "virtual-exam-api/internal/subject/repository"
 )
@@ -35,12 +36,7 @@ type SubjectResponse struct {
 	UpdatedAt     string `json:"updated_at"`
 }
 
-type SubjectListResponse struct {
-	Items      []SubjectResponse `json:"items"`
-	TotalItems int64             `json:"total_items"`
-	Page       int               `json:"page"`
-	Limit      int               `json:"limit"`
-}
+type SubjectListResponse = pagination.PaginatedList[SubjectResponse]
 
 func (uc *SubjectUseCase) List(ctx context.Context, filter subjectrepo.SubjectAdminFilter) (*SubjectListResponse, error) {
 	items, total, err := uc.subjects.List(ctx, filter)
@@ -52,14 +48,9 @@ func (uc *SubjectUseCase) List(ctx context.Context, filter subjectrepo.SubjectAd
 		count, _ := uc.subjects.CountQuestions(ctx, s.ID)
 		resp[i] = toSubjectResponse(s, count)
 	}
-	page, limit := filter.Page, filter.Limit
-	if page < 1 {
-		page = 1
-	}
-	if limit < 1 {
-		limit = 20
-	}
-	return &SubjectListResponse{Items: resp, TotalItems: total, Page: page, Limit: limit}, nil
+	page, limit := pagination.Sanitize(filter.Page, filter.Limit)
+	result := pagination.NewList(resp, page, limit, total)
+	return &result, nil
 }
 
 func (uc *SubjectUseCase) Get(ctx context.Context, id uuid.UUID) (*SubjectResponse, error) {
