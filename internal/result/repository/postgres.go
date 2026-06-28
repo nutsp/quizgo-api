@@ -66,10 +66,28 @@ type WeakSubjectRow struct {
 	AverageScorePercent float64
 }
 
+type ScoreTrendRow struct {
+	AttemptID    uuid.UUID
+	SubmittedAt  time.Time
+	ExamSetTitle string
+	ScorePercent float64
+	PassingScore int
+}
+
+type SubjectPerformanceRow struct {
+	SubjectCode         string
+	SubjectName         string
+	AverageScorePercent float64
+	TotalAttempts       int64
+	TotalQuestions      int64
+}
+
 type Repository interface {
 	GetOverallStats(ctx context.Context, userID uuid.UUID) (*OverallStatsRow, error)
 	GetMostPracticedTrack(ctx context.Context, userID uuid.UUID) (*TrackPracticeRow, error)
 	ListWeakSubjects(ctx context.Context, userID uuid.UUID, trackID *uuid.UUID, limit int) ([]WeakSubjectRow, error)
+	ListScoreTrend(ctx context.Context, userID uuid.UUID, limit int) ([]ScoreTrendRow, error)
+	ListSubjectPerformance(ctx context.Context, userID uuid.UUID, limit int) ([]SubjectPerformanceRow, error)
 	ListTracksWithAttempts(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error)
 	CountActiveExamSetsByTrack(ctx context.Context, trackID uuid.UUID) (int64, error)
 	GetTrackBestAttempts(ctx context.Context, userID, trackID uuid.UUID) ([]BestAttemptRow, error)
@@ -154,6 +172,69 @@ func (r *postgresRepository) GetMostPracticedTrack(ctx context.Context, userID u
 		return nil, nil
 	}
 	return &row, nil
+}
+
+func (r *postgresRepository) ListScoreTrend(ctx context.Context, userID uuid.UUID, limit int) ([]ScoreTrendRow, error) {
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 20 {
+		limit = 20
+	}
+
+	var rows []ScoreTrendRow
+	err := r.db.WithContext(ctx).Raw(`
+		SELECT
+			ea.id AS attempt_id,
+			ea.submitted_at,
+			es.title AS exam_set_title,
+			ea.score_percent,
+			es.passing_score
+		FROM exam_attempts ea
+		JOIN exam_sets es ON es.id = ea.exam_set_id
+		WHERE ea.user_id = ?
+			AND ea.status IN ('submitted', 'timeout')
+			AND ea.submitted_at IS NOT NULL
+		ORDER BY ea.submitted_at DESC
+		LIMIT ?
+	`, userID, limit).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+
+	for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+		rows[i], rows[j] = rows[j], rows[i]
+	}
+	return rows, nil
+}
+
+func (r *postgresRepository) ListSubjectPerformance(ctx context.Context, userID uuid.UUID, limit int) ([]SubjectPerformanceRow, error) {
+	if limit < 1 {
+		limit = 8
+	}
+	if limit > 8 {
+		limit = 8
+	}
+
+	var rows []SubjectPerformanceRow
+	err := r.db.WithContext(ctx).Raw(`
+		SELECT
+			s.code AS subject_code,
+			s.name AS subject_name,
+			AVG(CASE WHEN ea_ans.is_correct = true THEN 100.0 ELSE 0.0 END) AS average_score_percent,
+			COUNT(DISTINCT att.id) AS total_attempts,
+			COUNT(*) AS total_questions
+		FROM exam_attempts att
+		JOIN exam_answers ea_ans ON ea_ans.attempt_id = att.id
+		JOIN questions q ON q.id = ea_ans.question_id
+		JOIN subjects s ON s.id = q.subject_id
+		WHERE att.user_id = ? AND att.status IN ('submitted', 'timeout')
+		GROUP BY s.code, s.name
+		HAVING COUNT(*) > 0
+		ORDER BY average_score_percent ASC
+		LIMIT ?
+	`, userID, limit).Scan(&rows).Error
+	return rows, err
 }
 
 func (r *postgresRepository) ListWeakSubjects(ctx context.Context, userID uuid.UUID, trackID *uuid.UUID, limit int) ([]WeakSubjectRow, error) {

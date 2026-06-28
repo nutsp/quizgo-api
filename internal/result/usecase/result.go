@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"math"
+	"time"
 
 	"github.com/google/uuid"
 	"virtual-exam-api/internal/apperrors"
@@ -35,6 +36,8 @@ func (uc *ResultUseCase) GetMyResultsSummary(ctx context.Context, userID uuid.UU
 		FailedAttempts:         stats.FailedAttempts,
 		AverageDurationSeconds: round1(derefFloat(stats.AverageDurationSeconds)),
 		WeakSubjects:           []domain.WeakSubject{},
+		ScoreTrend:             []domain.ScoreTrendPoint{},
+		SubjectPerformance:     []domain.SubjectPerformanceItem{},
 	}
 
 	if summary.TotalAttempts > 0 {
@@ -61,6 +64,34 @@ func (uc *ResultUseCase) GetMyResultsSummary(ctx context.Context, userID uuid.UU
 			SubjectCode:         w.SubjectCode,
 			SubjectName:         w.SubjectName,
 			AverageScorePercent: round1(w.AverageScorePercent),
+		})
+	}
+
+	trendRows, err := uc.repo.ListScoreTrend(ctx, userID, 20)
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range trendRows {
+		summary.ScoreTrend = append(summary.ScoreTrend, domain.ScoreTrendPoint{
+			AttemptID:    row.AttemptID.String(),
+			SubmittedAt:  row.SubmittedAt.UTC().Format(time.RFC3339),
+			ExamSetTitle: row.ExamSetTitle,
+			ScorePercent: round1(row.ScorePercent),
+			Passed:       row.ScorePercent >= float64(row.PassingScore),
+		})
+	}
+
+	subjectRows, err := uc.repo.ListSubjectPerformance(ctx, userID, 8)
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range subjectRows {
+		summary.SubjectPerformance = append(summary.SubjectPerformance, domain.SubjectPerformanceItem{
+			SubjectCode:    row.SubjectCode,
+			SubjectName:    row.SubjectName,
+			ScorePercent:   round1(row.AverageScorePercent),
+			TotalAttempts:  row.TotalAttempts,
+			TotalQuestions: row.TotalQuestions,
 		})
 	}
 

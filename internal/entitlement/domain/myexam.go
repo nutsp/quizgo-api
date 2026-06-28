@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"virtual-exam-api/internal/common/pagination"
 	examsetdomain "virtual-exam-api/internal/examset/domain"
 )
 
@@ -14,9 +15,24 @@ const (
 	MyExamSourcePremiumActivity = "premium_activity"
 	MyExamSourceFreeActivity    = "free_activity"
 
+	MyExamTabAll          = "all"
+	MyExamTabInProgress   = "in_progress"
+	MyExamTabCompleted    = "completed"
+	MyExamTabUnlocked     = "unlocked"
+	MyExamTabSpecialGrant = "special_grant"
+
+	MyExamsDefaultLimit = 12
+	MyExamsMaxLimit     = 50
+
 	// Legacy alias kept for backward compatibility in tests/clients.
 	AccessSourceGranted = "granted"
 )
+
+type MyExamsListParams struct {
+	Page  int
+	Limit int
+	Tab   string
+}
 
 type MyExamSummary struct {
 	HasPremium            bool    `json:"has_premium"`
@@ -70,8 +86,67 @@ type MyExamItem struct {
 }
 
 type MyExamsResponse struct {
-	Summary MyExamSummary `json:"summary"`
-	Items   []MyExamItem  `json:"items"`
+	Summary    MyExamSummary            `json:"summary"`
+	Items      []MyExamItem               `json:"items"`
+	Pagination pagination.PaginationMeta  `json:"pagination"`
+}
+
+func NormalizeMyExamTab(tab string) string {
+	switch tab {
+	case MyExamTabInProgress, MyExamTabCompleted, MyExamTabUnlocked, MyExamTabSpecialGrant:
+		return tab
+	default:
+		return MyExamTabAll
+	}
+}
+
+func SanitizeMyExamsPage(page int) int {
+	if page < 1 {
+		return pagination.DefaultPage
+	}
+	return page
+}
+
+func SanitizeMyExamsLimit(limit int) int {
+	if limit < 1 {
+		return MyExamsDefaultLimit
+	}
+	if limit > MyExamsMaxLimit {
+		return MyExamsMaxLimit
+	}
+	return limit
+}
+
+func MatchesMyExamTab(item MyExamItem, tab string) bool {
+	switch NormalizeMyExamTab(tab) {
+	case MyExamTabInProgress:
+		return item.LatestAttempt != nil && item.LatestAttempt.Status == "in_progress"
+	case MyExamTabCompleted:
+		return item.LatestAttempt != nil &&
+			(item.LatestAttempt.Status == "submitted" || item.LatestAttempt.Status == "timeout")
+	case MyExamTabUnlocked:
+		return item.AccessSource == MyExamSourceSinglePurchase ||
+			item.AccessSource == MyExamSourceManualGrant
+	case MyExamTabSpecialGrant:
+		return item.AccessSource == MyExamSourcePrivateGrant ||
+			item.AccessSource == MyExamSourceManualGrant
+	default:
+		return true
+	}
+}
+
+func FilterMyExamItemsByTab(items []MyExamItem, tab string) []MyExamItem {
+	tab = NormalizeMyExamTab(tab)
+	if tab == MyExamTabAll {
+		return items
+	}
+	filtered := make([]MyExamItem, 0, len(items))
+	for _, item := range items {
+		if MatchesMyExamTab(item, tab) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
 }
 
 type AccessibleExamSetRow struct {

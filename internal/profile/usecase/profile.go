@@ -41,7 +41,7 @@ func (uc *ProfileUseCase) GetProfile(ctx context.Context, userID uuid.UUID) (*pr
 	if err != nil {
 		return nil, err
 	}
-	if stats != nil && stats.TotalAttempts > 0 {
+	if stats != nil {
 		resp.Stats = &profiledomain.ProfileStats{
 			TotalAttempts:       stats.TotalAttempts,
 			CompletedExamSets:   stats.CompletedExamSets,

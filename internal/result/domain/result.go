@@ -9,6 +9,22 @@ type WeakSubject struct {
 	Recommendation      string  `json:"recommendation,omitempty"`
 }
 
+type ScoreTrendPoint struct {
+	AttemptID    string  `json:"attempt_id"`
+	SubmittedAt  string  `json:"submitted_at"`
+	ExamSetTitle string  `json:"exam_set_title"`
+	ScorePercent float64 `json:"score_percent"`
+	Passed       bool    `json:"passed"`
+}
+
+type SubjectPerformanceItem struct {
+	SubjectCode    string  `json:"subject_code,omitempty"`
+	SubjectName    string  `json:"subject_name"`
+	ScorePercent   float64 `json:"score_percent"`
+	TotalAttempts  int64   `json:"total_attempts,omitempty"`
+	TotalQuestions int64   `json:"total_questions,omitempty"`
+}
+
 type ExamTrackRef struct {
 	ID            string  `json:"id,omitempty"`
 	Code          string  `json:"code"`
@@ -38,8 +54,10 @@ type OverallSummary struct {
 	FailedAttempts          int64        `json:"failed_attempts"`
 	PassRatePercent         float64      `json:"pass_rate_percent"`
 	AverageDurationSeconds  float64      `json:"average_duration_seconds"`
-	MostPracticedExamTrack  *ExamTrackRef `json:"most_practiced_exam_track,omitempty"`
-	WeakSubjects            []WeakSubject `json:"weak_subjects"`
+	MostPracticedExamTrack  *ExamTrackRef            `json:"most_practiced_exam_track,omitempty"`
+	WeakSubjects            []WeakSubject            `json:"weak_subjects"`
+	ScoreTrend              []ScoreTrendPoint        `json:"score_trend"`
+	SubjectPerformance      []SubjectPerformanceItem `json:"subject_performance"`
 }
 
 type ExamTrackSummaryItem struct {

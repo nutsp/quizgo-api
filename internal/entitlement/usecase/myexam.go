@@ -2,10 +2,13 @@ package usecase
 
 import (
 	"context"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"virtual-exam-api/internal/cache"
+	"virtual-exam-api/internal/common/pagination"
 	attemptdomain "virtual-exam-api/internal/examattempt/domain"
 	"virtual-exam-api/internal/entitlement/domain"
 	examsetdomain "virtual-exam-api/internal/examset/domain"
@@ -19,9 +22,43 @@ type mergedItem struct {
 	canStart      bool
 }
 
-func (uc *UseCase) ListMyExams(ctx context.Context, userID uuid.UUID) (*domain.MyExamsResponse, error) {
+type myExamsCacheData struct {
+	Summary domain.MyExamSummary `json:"summary"`
+	Items   []domain.MyExamItem  `json:"items"`
+}
+
+func (uc *UseCase) ListMyExams(ctx context.Context, userID uuid.UUID, params domain.MyExamsListParams) (*domain.MyExamsResponse, error) {
+	page := domain.SanitizeMyExamsPage(params.Page)
+	limit := domain.SanitizeMyExamsLimit(params.Limit)
+	tab := domain.NormalizeMyExamTab(params.Tab)
+
+	all, err := uc.loadAllMyExams(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	filtered := domain.FilterMyExamItemsByTab(all.Items, tab)
+	total := int64(len(filtered))
+
+	start := pagination.Offset(page, limit)
+	if start > len(filtered) {
+		start = len(filtered)
+	}
+	end := start + limit
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+
+	return &domain.MyExamsResponse{
+		Summary:    all.Summary,
+		Items:      filtered[start:end],
+		Pagination: pagination.NewPaginationMeta(page, limit, total),
+	}, nil
+}
+
+func (uc *UseCase) loadAllMyExams(ctx context.Context, userID uuid.UUID) (*myExamsCacheData, error) {
 	key := cache.MyExams(userID.String())
-	var cached domain.MyExamsResponse
+	var cached myExamsCacheData
 	if ok, _ := uc.userCache.GetJSON(ctx, key, &cached); ok {
 		return &cached, nil
 	}
@@ -99,13 +136,19 @@ func (uc *UseCase) ListMyExams(ctx context.Context, userID uuid.UUID) (*domain.M
 		}
 	}
 
-	items := make([]domain.MyExamItem, 0, len(merged))
+	mergedSlice := make([]mergedItem, 0, len(merged))
+	for _, item := range merged {
+		mergedSlice = append(mergedSlice, item)
+	}
+	sortMergedItems(mergedSlice)
+
+	items := make([]domain.MyExamItem, 0, len(mergedSlice))
 	summary := domain.MyExamSummary{
 		HasPremium:       hasPremium,
 		PremiumExpiresAt: premiumExpiresAt,
 	}
 
-	for _, item := range merged {
+	for _, item := range mergedSlice {
 		myItem := buildMyExamItem(item, hasPremium, now)
 		items = append(items, myItem)
 		switch myItem.AccessSource {
@@ -123,7 +166,7 @@ func (uc *UseCase) ListMyExams(ctx context.Context, userID uuid.UUID) (*domain.M
 
 	summary.UnlockedExamSetCount = summary.SinglePurchaseCount + summary.PrivateExamSetCount + summary.GrantCount
 
-	resp := &domain.MyExamsResponse{
+	resp := &myExamsCacheData{
 		Summary: summary,
 		Items:   items,
 	}
@@ -132,6 +175,57 @@ func (uc *UseCase) ListMyExams(ctx context.Context, userID uuid.UUID) (*domain.M
 	_ = uc.userCache.AddIndex(ctx, cache.IndexUserMyExams(userID.String()), key, cache.TTLMyExams+cache.TTLIndexBuffer)
 
 	return resp, nil
+}
+
+func sortMergedItems(items []mergedItem) {
+	sort.SliceStable(items, func(i, j int) bool {
+		iHas := hasMergedItemActivity(items[i])
+		jHas := hasMergedItemActivity(items[j])
+		if iHas != jHas {
+			return iHas && !jHas
+		}
+
+		ai := latestActivityAt(items[i])
+		aj := latestActivityAt(items[j])
+		if !ai.Equal(aj) {
+			return ai.After(aj)
+		}
+		if !items[i].set.CreatedAt.Equal(items[j].set.CreatedAt) {
+			return items[i].set.CreatedAt.After(items[j].set.CreatedAt)
+		}
+		if items[i].set.Title != items[j].set.Title {
+			return strings.ToLower(items[i].set.Title) < strings.ToLower(items[j].set.Title)
+		}
+		return items[i].set.ID.String() < items[j].set.ID.String()
+	})
+}
+
+func hasMergedItemActivity(item mergedItem) bool {
+	if item.latestAttempt != nil {
+		if item.latestAttempt.SubmittedAt != nil || !item.latestAttempt.StartedAt.IsZero() {
+			return true
+		}
+	}
+	if item.entitlement != nil {
+		return true
+	}
+	return false
+}
+
+func latestActivityAt(item mergedItem) time.Time {
+	if item.latestAttempt != nil {
+		attempt := item.latestAttempt
+		if attempt.SubmittedAt != nil {
+			return attempt.SubmittedAt.UTC()
+		}
+		if !attempt.StartedAt.IsZero() {
+			return attempt.StartedAt.UTC()
+		}
+	}
+	if item.entitlement != nil {
+		return item.entitlement.StartsAt.UTC()
+	}
+	return item.set.UpdatedAt.UTC()
 }
 
 func (uc *UseCase) canStartExamSet(ctx context.Context, userID uuid.UUID, set *examsetdomain.ExamSet) bool {
