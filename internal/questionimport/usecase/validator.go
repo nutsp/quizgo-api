@@ -7,6 +7,8 @@ import (
 
 	qdomain "virtual-exam-api/internal/question/domain"
 	"virtual-exam-api/internal/questionimport/domain"
+	"virtual-exam-api/internal/questionimport/mathconvert"
+	"virtual-exam-api/internal/questionimport/zipimages"
 	tagrepo "virtual-exam-api/internal/questiontag/repository"
 )
 
@@ -14,7 +16,14 @@ type subjectLookup interface {
 	FindByCode(ctx context.Context, code string) (*qdomain.Subject, error)
 }
 
-func validateRows(ctx context.Context, rows []domain.ImportQuestionRow, subjects subjectLookup, tags tagrepo.TagAdminRepository, existsFn func(ctx context.Context, text string) (bool, error)) []domain.ImportPreviewRow {
+func validateRows(
+	ctx context.Context,
+	rows []domain.ImportQuestionRow,
+	subjects subjectLookup,
+	tags tagrepo.TagAdminRepository,
+	existsFn func(ctx context.Context, text string) (bool, error),
+	images map[string][]byte,
+) []domain.ImportPreviewRow {
 	textCounts := make(map[string]int)
 	for _, row := range rows {
 		key := strings.TrimSpace(row.QuestionText)
@@ -25,7 +34,7 @@ func validateRows(ctx context.Context, rows []domain.ImportQuestionRow, subjects
 
 	preview := make([]domain.ImportPreviewRow, len(rows))
 	for i, row := range rows {
-		preview[i] = validateRow(ctx, row, subjects, tags, existsFn, textCounts)
+		preview[i] = validateRow(ctx, row, subjects, tags, existsFn, textCounts, images)
 	}
 	return preview
 }
@@ -37,59 +46,74 @@ func validateRow(
 	tags tagrepo.TagAdminRepository,
 	existsFn func(ctx context.Context, text string) (bool, error),
 	textCounts map[string]int,
+	images map[string][]byte,
 ) domain.ImportPreviewRow {
 	errs := []string{}
 	warns := []string{}
 
-	data := row
-	data.SubjectCode = strings.ToLower(strings.TrimSpace(row.SubjectCode))
-	data.QuestionText = strings.TrimSpace(row.QuestionText)
-	data.ChoiceA = strings.TrimSpace(row.ChoiceA)
-	data.ChoiceB = strings.TrimSpace(row.ChoiceB)
-	data.ChoiceC = strings.TrimSpace(row.ChoiceC)
-	data.ChoiceD = strings.TrimSpace(row.ChoiceD)
-	data.Explanation = strings.TrimSpace(row.Explanation)
-	data.Difficulty = strings.ToLower(strings.TrimSpace(row.Difficulty))
-	data.Status = strings.ToLower(strings.TrimSpace(row.Status))
-	data.Tags = strings.TrimSpace(row.Tags)
+	data := normalizeImportRow(row)
 
 	if data.SubjectCode == "" {
-		errs = append(errs, "กรุณาระบุหมวดวิชา (subject_code)")
+		errs = append(errs, "กรุณาระบุ subject_code")
 	} else {
 		subject, err := subjects.FindByCode(ctx, data.SubjectCode)
 		if err != nil {
-			errs = append(errs, "ไม่พบหมวดวิชานี้ในระบบ")
+			errs = append(errs, "ไม่พบ subject_code นี้")
 		} else if subject == nil {
-			errs = append(errs, "ไม่พบหมวดวิชานี้ในระบบ")
+			errs = append(errs, "ไม่พบ subject_code นี้")
 		}
 	}
 
-	if data.QuestionText == "" {
-		errs = append(errs, "กรุณาระบุคำถาม")
-	} else if utf8.RuneCountInString(data.QuestionText) < 5 {
-		errs = append(errs, "คำถามสั้นเกินไป (อย่างน้อย 5 ตัวอักษร)")
-	} else if utf8.RuneCountInString(data.QuestionText) < 10 {
-		warns = append(warns, "คำถามสั้นมาก กรุณาตรวจสอบความถูกต้อง")
+	if data.QuestionText == "" && data.QuestionImage == "" {
+		errs = append(errs, "กรุณาระบุข้อความคำถามหรือรูปภาพคำถาม")
+	} else if data.QuestionText != "" {
+		if utf8.RuneCountInString(data.QuestionText) < 5 {
+			errs = append(errs, "คำถามสั้นเกินไป (อย่างน้อย 5 ตัวอักษร)")
+		} else if utf8.RuneCountInString(data.QuestionText) < 10 {
+			warns = append(warns, "คำถามสั้นมาก กรุณาตรวจสอบความถูกต้อง")
+		}
 	}
 
-	if data.ChoiceA == "" {
-		errs = append(errs, "กรุณาระบุตัวเลือก ก")
+	validateChoiceContent := func(label, text, imageFile string) {
+		if text == "" && imageFile == "" {
+			errs = append(errs, "ตัวเลือก "+label+" ต้องมีข้อความหรือรูปภาพ")
+		}
+		if imageFile != "" {
+			if _, ok := zipimages.LookupImage(images, imageFile); !ok {
+				errs = append(errs, "ไม่พบไฟล์รูปภาพ: "+filepathBase(imageFile))
+			}
+		}
 	}
-	if data.ChoiceB == "" {
-		errs = append(errs, "กรุณาระบุตัวเลือก ข")
+	validateChoiceContent("ก", data.ChoiceA, data.ChoiceAImage)
+	validateChoiceContent("ข", data.ChoiceB, data.ChoiceBImage)
+	validateChoiceContent("ค", data.ChoiceC, data.ChoiceCImage)
+	validateChoiceContent("ง", data.ChoiceD, data.ChoiceDImage)
+
+	if data.QuestionImage != "" {
+		if _, ok := zipimages.LookupImage(images, data.QuestionImage); !ok {
+			errs = append(errs, "ไม่พบไฟล์รูปภาพ: "+filepathBase(data.QuestionImage))
+		}
 	}
-	if data.ChoiceC == "" {
-		errs = append(errs, "กรุณาระบุตัวเลือก ค")
-	}
-	if data.ChoiceD == "" {
-		errs = append(errs, "กรุณาระบุตัวเลือก ง")
+	if data.ExplanationImage != "" {
+		if _, ok := zipimages.LookupImage(images, data.ExplanationImage); !ok {
+			errs = append(errs, "ไม่พบไฟล์รูปภาพ: "+filepathBase(data.ExplanationImage))
+		}
 	}
 
 	normalized, ok := normalizeCorrectChoice(strings.TrimSpace(row.CorrectChoice))
 	if !ok {
-		errs = append(errs, "เฉลยต้องเป็น A, B, C, D หรือ ก, ข, ค, ง")
+		errs = append(errs, "correct_choice ต้องเป็น A, B, C หรือ D")
 	} else {
 		data.CorrectChoice = normalized
+	}
+
+	if data.ContentFormat != "" && !qdomain.IsValidContentFormat(data.ContentFormat) {
+		errs = append(errs, "content_format ไม่ถูกต้อง")
+	}
+
+	qt := strings.ToLower(strings.TrimSpace(data.QuestionType))
+	if qt != "" && qt != "normal" && qt != "math" && qt != "image" {
+		errs = append(errs, "question_type ไม่ถูกต้อง")
 	}
 
 	if data.Difficulty == "" {
@@ -140,6 +164,15 @@ func validateRow(
 		}
 	}
 
+	if mathconvert.ShouldConvert(data.QuestionType, data.ContentFormat) {
+		data.QuestionText = mathconvert.ConvertSimpleMath(data.QuestionText)
+		data.Explanation = mathconvert.ConvertSimpleMath(data.Explanation)
+		data.ChoiceA = mathconvert.ConvertSimpleMath(data.ChoiceA)
+		data.ChoiceB = mathconvert.ConvertSimpleMath(data.ChoiceB)
+		data.ChoiceC = mathconvert.ConvertSimpleMath(data.ChoiceC)
+		data.ChoiceD = mathconvert.ConvertSimpleMath(data.ChoiceD)
+	}
+
 	return domain.ImportPreviewRow{
 		RowNumber: row.RowNumber,
 		Data:      data,
@@ -147,6 +180,46 @@ func validateRow(
 		Errors:    errs,
 		Warnings:  warns,
 	}
+}
+
+func normalizeImportRow(row domain.ImportQuestionRow) domain.ImportQuestionRow {
+	data := row
+	data.SubjectCode = strings.ToLower(strings.TrimSpace(row.SubjectCode))
+	data.QuestionType = strings.ToLower(strings.TrimSpace(row.QuestionType))
+	data.ContentFormat = strings.ToLower(strings.TrimSpace(row.ContentFormat))
+	data.QuestionText = strings.TrimSpace(row.QuestionText)
+	data.QuestionImage = strings.TrimSpace(row.QuestionImage)
+	data.ChoiceA = strings.TrimSpace(row.ChoiceA)
+	data.ChoiceAImage = strings.TrimSpace(row.ChoiceAImage)
+	data.ChoiceB = strings.TrimSpace(row.ChoiceB)
+	data.ChoiceBImage = strings.TrimSpace(row.ChoiceBImage)
+	data.ChoiceC = strings.TrimSpace(row.ChoiceC)
+	data.ChoiceCImage = strings.TrimSpace(row.ChoiceCImage)
+	data.ChoiceD = strings.TrimSpace(row.ChoiceD)
+	data.ChoiceDImage = strings.TrimSpace(row.ChoiceDImage)
+	data.Explanation = strings.TrimSpace(row.Explanation)
+	data.ExplanationImage = strings.TrimSpace(row.ExplanationImage)
+	data.Difficulty = strings.ToLower(strings.TrimSpace(row.Difficulty))
+	data.Status = strings.ToLower(strings.TrimSpace(row.Status))
+	data.Tags = strings.TrimSpace(row.Tags)
+
+	if data.ContentFormat == "" {
+		switch data.QuestionType {
+		case "math":
+			data.ContentFormat = qdomain.ContentFormatMarkdownMath
+		default:
+			data.ContentFormat = qdomain.ContentFormatPlain
+		}
+	}
+	return data
+}
+
+func filepathBase(name string) string {
+	name = strings.ReplaceAll(name, "\\", "/")
+	if idx := strings.LastIndex(name, "/"); idx >= 0 {
+		return name[idx+1:]
+	}
+	return name
 }
 
 func normalizeCorrectChoice(raw string) (string, bool) {

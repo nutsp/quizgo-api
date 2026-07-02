@@ -11,6 +11,7 @@ import (
 	"virtual-exam-api/internal/middleware"
 	"virtual-exam-api/internal/questionimport/domain"
 	importuc "virtual-exam-api/internal/questionimport/usecase"
+	"virtual-exam-api/internal/questionimport/zipimages"
 	"virtual-exam-api/internal/response"
 	userrepo "virtual-exam-api/internal/user/repository"
 )
@@ -80,7 +81,20 @@ func (h *Handler) Preview(c echo.Context) error {
 		return response.Error(c, apperrors.ErrInvalidInput)
 	}
 
-	result, err := h.uc.Preview(c.Request().Context(), adminUserID, file.Filename, data)
+	var zipData []byte
+	if zipFile, err := c.FormFile("images_zip"); err == nil && zipFile != nil {
+		zipSrc, err := zipFile.Open()
+		if err != nil {
+			return response.Error(c, apperrors.ErrInvalidInput)
+		}
+		zipData, err = io.ReadAll(io.LimitReader(zipSrc, zipimages.MaxZipSize+1))
+		zipSrc.Close()
+		if err != nil {
+			return response.Error(c, apperrors.ErrInvalidInput)
+		}
+	}
+
+	result, err := h.uc.Preview(c.Request().Context(), adminUserID, file.Filename, data, zipData)
 	if err != nil {
 		return response.Error(c, err)
 	}

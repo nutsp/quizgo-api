@@ -11,11 +11,13 @@ import (
 	"gorm.io/gorm"
 	"virtual-exam-api/internal/apperrors"
 	"virtual-exam-api/internal/common/pagination"
+	"virtual-exam-api/internal/media/storage"
 	qdomain "virtual-exam-api/internal/question/domain"
 	questionrepo "virtual-exam-api/internal/question/repository"
 	"virtual-exam-api/internal/questionimport/domain"
-	importrepo "virtual-exam-api/internal/questionimport/repository"
 	"virtual-exam-api/internal/questionimport/parser"
+	importrepo "virtual-exam-api/internal/questionimport/repository"
+	"virtual-exam-api/internal/questionimport/zipimages"
 	subjectrepo "virtual-exam-api/internal/subject/repository"
 	tagrepo "virtual-exam-api/internal/questiontag/repository"
 )
@@ -30,6 +32,7 @@ type UseCase struct {
 	subjects  subjectrepo.SubjectAdminRepository
 	questions questionrepo.QuestionAdminRepository
 	tags      tagrepo.TagAdminRepository
+	storage   *storage.LocalStorage
 }
 
 func NewUseCase(
@@ -37,12 +40,14 @@ func NewUseCase(
 	subjects subjectrepo.SubjectAdminRepository,
 	questions questionrepo.QuestionAdminRepository,
 	tags tagrepo.TagAdminRepository,
+	store *storage.LocalStorage,
 ) *UseCase {
 	return &UseCase{
 		imports:   imports,
 		subjects:  subjects,
 		questions: questions,
 		tags:      tags,
+		storage:   store,
 	}
 }
 
@@ -50,7 +55,7 @@ func (uc *UseCase) TemplateCSV() []byte {
 	return []byte(templateCSV)
 }
 
-func (uc *UseCase) Preview(ctx context.Context, adminUserID uuid.UUID, filename string, data []byte) (*domain.ImportPreviewResult, error) {
+func (uc *UseCase) Preview(ctx context.Context, adminUserID uuid.UUID, filename string, data []byte, zipData []byte) (*domain.ImportPreviewResult, error) {
 	if len(data) == 0 {
 		return nil, apperrors.New("EMPTY_FILE", "ไฟล์ว่างเปล่า", 400)
 	}
@@ -68,7 +73,26 @@ func (uc *UseCase) Preview(ctx context.Context, adminUserID uuid.UUID, filename 
 		return nil, apperrors.New("PARSE_ERROR", err.Error(), 400)
 	}
 
-	previewRows := validateRows(ctx, parsed.Rows, uc.subjects, uc.tags, uc.imports.ExistsQuestionText)
+	images, err := zipimages.ExtractImages(zipData)
+	if err != nil {
+		return nil, apperrors.New("INVALID_ZIP", err.Error(), 400)
+	}
+
+	jobID := uuid.New()
+	previewRows := validateRows(ctx, parsed.Rows, uc.subjects, uc.tags, uc.imports.ExistsQuestionText, images)
+
+	for i := range previewRows {
+		if !previewRows[i].Valid || uc.storage == nil {
+			continue
+		}
+		resolved, err := resolveImportImageURLs(uc.storage, jobID.String(), previewRows[i].Data, images)
+		if err != nil {
+			previewRows[i].Valid = false
+			previewRows[i].Errors = append(previewRows[i].Errors, err.Error())
+		} else {
+			previewRows[i].Data = resolved
+		}
+	}
 
 	validCount := 0
 	invalidCount := 0
@@ -80,7 +104,6 @@ func (uc *UseCase) Preview(ctx context.Context, adminUserID uuid.UUID, filename 
 		}
 	}
 
-	jobID := uuid.New()
 	now := time.Now().UTC()
 	job := &domain.ImportJob{
 		ID:          jobID,
@@ -95,26 +118,7 @@ func (uc *UseCase) Preview(ctx context.Context, adminUserID uuid.UUID, filename 
 
 	dbRows := make([]domain.ImportJobRow, len(previewRows))
 	for i, row := range previewRows {
-		dbRows[i] = domain.ImportJobRow{
-			ID:            uuid.New(),
-			ImportJobID:   jobID,
-			RowNumber:     row.RowNumber,
-			SubjectCode:   row.Data.SubjectCode,
-			Tags:          row.Data.Tags,
-			QuestionText:  row.Data.QuestionText,
-			ChoiceA:       row.Data.ChoiceA,
-			ChoiceB:       row.Data.ChoiceB,
-			ChoiceC:       row.Data.ChoiceC,
-			ChoiceD:       row.Data.ChoiceD,
-			CorrectChoice: row.Data.CorrectChoice,
-			Explanation:   row.Data.Explanation,
-			Difficulty:    row.Data.Difficulty,
-			Status:        row.Data.Status,
-			Valid:         row.Valid,
-			Errors:        row.Errors,
-			Warnings:      row.Warnings,
-			CreatedAt:     now,
-		}
+		dbRows[i] = previewRowToJobRow(jobID, row, now)
 	}
 
 	if err := uc.imports.CreatePreview(ctx, job, dbRows); err != nil {
@@ -215,23 +219,84 @@ func (uc *UseCase) Confirm(ctx context.Context, adminUserID uuid.UUID, input dom
 }
 
 func buildQuestion(subjectID uuid.UUID, row domain.ImportJobRow) *qdomain.Question {
+	contentFormat := qdomain.NormalizeContentFormat(row.ContentFormat)
 	choices := []qdomain.Choice{
-		{ChoiceKey: qdomain.ChoiceA, ChoiceLabel: qdomain.ValidChoiceKeys[qdomain.ChoiceA], ChoiceText: row.ChoiceA, IsCorrect: row.CorrectChoice == qdomain.ChoiceA},
-		{ChoiceKey: qdomain.ChoiceB, ChoiceLabel: qdomain.ValidChoiceKeys[qdomain.ChoiceB], ChoiceText: row.ChoiceB, IsCorrect: row.CorrectChoice == qdomain.ChoiceB},
-		{ChoiceKey: qdomain.ChoiceC, ChoiceLabel: qdomain.ValidChoiceKeys[qdomain.ChoiceC], ChoiceText: row.ChoiceC, IsCorrect: row.CorrectChoice == qdomain.ChoiceC},
-		{ChoiceKey: qdomain.ChoiceD, ChoiceLabel: qdomain.ValidChoiceKeys[qdomain.ChoiceD], ChoiceText: row.ChoiceD, IsCorrect: row.CorrectChoice == qdomain.ChoiceD},
+		buildImportChoice(qdomain.ChoiceA, row.ChoiceA, row.ChoiceAImageURL, row.CorrectChoice, contentFormat),
+		buildImportChoice(qdomain.ChoiceB, row.ChoiceB, row.ChoiceBImageURL, row.CorrectChoice, contentFormat),
+		buildImportChoice(qdomain.ChoiceC, row.ChoiceC, row.ChoiceCImageURL, row.CorrectChoice, contentFormat),
+		buildImportChoice(qdomain.ChoiceD, row.ChoiceD, row.ChoiceDImageURL, row.CorrectChoice, contentFormat),
 	}
 
 	isActive := row.Status != qdomain.StatusArchived
 
 	return &qdomain.Question{
-		SubjectID:    subjectID,
-		QuestionText: row.QuestionText,
-		Explanation:  row.Explanation,
-		Difficulty:   row.Difficulty,
-		Status:       row.Status,
-		IsActive:     isActive,
-		Choices:      choices,
+		SubjectID:           subjectID,
+		QuestionText:        row.QuestionText,
+		ContentFormat:       contentFormat,
+		QuestionImageURL:    strPtrIf(row.QuestionImageURL),
+		Explanation:         row.Explanation,
+		ExplanationImageURL: strPtrIf(row.ExplanationImageURL),
+		Difficulty:          row.Difficulty,
+		Status:              row.Status,
+		IsActive:            isActive,
+		Choices:             choices,
+	}
+}
+
+func buildImportChoice(key, text, imageURL, correctChoice, contentFormat string) qdomain.Choice {
+	return qdomain.Choice{
+		ChoiceKey:      key,
+		ChoiceLabel:    qdomain.ValidChoiceKeys[key],
+		ChoiceText:     text,
+		ContentFormat:  contentFormat,
+		ChoiceImageURL: strPtrIf(imageURL),
+		IsCorrect:      correctChoice == key,
+	}
+}
+
+func strPtrIf(s string) *string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+func previewRowToJobRow(jobID uuid.UUID, row domain.ImportPreviewRow, now time.Time) domain.ImportJobRow {
+	d := row.Data
+	return domain.ImportJobRow{
+		ID:                  uuid.New(),
+		ImportJobID:         jobID,
+		RowNumber:           row.RowNumber,
+		SubjectCode:         d.SubjectCode,
+		Tags:                d.Tags,
+		QuestionType:        d.QuestionType,
+		ContentFormat:       d.ContentFormat,
+		QuestionText:        d.QuestionText,
+		QuestionImage:       d.QuestionImage,
+		QuestionImageURL:    d.QuestionImageURL,
+		ChoiceA:             d.ChoiceA,
+		ChoiceAImage:        d.ChoiceAImage,
+		ChoiceAImageURL:     d.ChoiceAImageURL,
+		ChoiceB:             d.ChoiceB,
+		ChoiceBImage:        d.ChoiceBImage,
+		ChoiceBImageURL:     d.ChoiceBImageURL,
+		ChoiceC:             d.ChoiceC,
+		ChoiceCImage:        d.ChoiceCImage,
+		ChoiceCImageURL:     d.ChoiceCImageURL,
+		ChoiceD:             d.ChoiceD,
+		ChoiceDImage:        d.ChoiceDImage,
+		ChoiceDImageURL:     d.ChoiceDImageURL,
+		CorrectChoice:       d.CorrectChoice,
+		Explanation:         d.Explanation,
+		ExplanationImage:    d.ExplanationImage,
+		ExplanationImageURL: d.ExplanationImageURL,
+		Difficulty:          d.Difficulty,
+		Status:              d.Status,
+		Valid:               row.Valid,
+		Errors:              row.Errors,
+		Warnings:            row.Warnings,
+		CreatedAt:           now,
 	}
 }
 

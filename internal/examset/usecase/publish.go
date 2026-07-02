@@ -36,17 +36,21 @@ type ReadinessResult struct {
 }
 
 type PreviewChoice struct {
-	ChoiceKey   string `json:"choice_key"`
-	ChoiceLabel string `json:"choice_label"`
-	ChoiceText  string `json:"choice_text"`
+	ChoiceKey      string  `json:"choice_key"`
+	ChoiceLabel    string  `json:"choice_label"`
+	ChoiceText     string  `json:"choice_text"`
+	ContentFormat  string  `json:"content_format,omitempty"`
+	ChoiceImageURL *string `json:"choice_image_url,omitempty"`
 }
 
 type PreviewQuestion struct {
-	QuestionNo   int             `json:"question_no"`
-	QuestionText string          `json:"question_text"`
-	SubjectName  string          `json:"subject_name,omitempty"`
-	Difficulty   string          `json:"difficulty,omitempty"`
-	Choices      []PreviewChoice `json:"choices"`
+	QuestionNo       int             `json:"question_no"`
+	QuestionText     string          `json:"question_text"`
+	ContentFormat    string          `json:"content_format,omitempty"`
+	QuestionImageURL *string         `json:"question_image_url,omitempty"`
+	SubjectName      string          `json:"subject_name,omitempty"`
+	Difficulty       string          `json:"difficulty,omitempty"`
+	Choices          []PreviewChoice `json:"choices"`
 }
 
 type PreviewExamSet struct {
@@ -111,15 +115,19 @@ func (uc *AdminUseCase) GetPreview(ctx context.Context, id uuid.UUID) (*PreviewR
 		pq := PreviewQuestion{QuestionNo: sq.QuestionNo}
 		if sq.Question != nil {
 			pq.QuestionText = sq.Question.QuestionText
+			pq.ContentFormat = sq.Question.ContentFormat
+			pq.QuestionImageURL = sq.Question.QuestionImageURL
 			pq.Difficulty = sq.Question.Difficulty
 			if sq.Question.Subject != nil {
 				pq.SubjectName = sq.Question.Subject.Name
 			}
 			for _, ch := range sq.Question.Choices {
 				pq.Choices = append(pq.Choices, PreviewChoice{
-					ChoiceKey:   ch.ChoiceKey,
-					ChoiceLabel: ch.ChoiceLabel,
-					ChoiceText:  ch.ChoiceText,
+					ChoiceKey:      ch.ChoiceKey,
+					ChoiceLabel:    ch.ChoiceLabel,
+					ChoiceText:     ch.ChoiceText,
+					ContentFormat:  ch.ContentFormat,
+					ChoiceImageURL: ch.ChoiceImageURL,
 				})
 			}
 		}

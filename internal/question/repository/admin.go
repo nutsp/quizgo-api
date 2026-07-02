@@ -149,15 +149,18 @@ func (r *questionAdminRepository) createWithChoicesTx(tx *gorm.DB, question *dom
 	question.CreatedAt = now
 	question.UpdatedAt = now
 	qModel := QuestionModel{
-		ID:           question.ID,
-		SubjectID:    question.SubjectID,
-		QuestionText: question.QuestionText,
-		Explanation:  question.Explanation,
-		Difficulty:   question.Difficulty,
-		Status:       question.Status,
-		IsActive:     question.IsActive,
-		CreatedAt:    question.CreatedAt,
-		UpdatedAt:    question.UpdatedAt,
+		ID:                  question.ID,
+		SubjectID:           question.SubjectID,
+		QuestionText:        question.QuestionText,
+		ContentFormat:       domain.NormalizeContentFormat(question.ContentFormat),
+		QuestionImageURL:    question.QuestionImageURL,
+		Explanation:         question.Explanation,
+		ExplanationImageURL: question.ExplanationImageURL,
+		Difficulty:          question.Difficulty,
+		Status:              question.Status,
+		IsActive:            question.IsActive,
+		CreatedAt:           question.CreatedAt,
+		UpdatedAt:           question.UpdatedAt,
 	}
 	if err := tx.Create(&qModel).Error; err != nil {
 		return err
@@ -169,14 +172,16 @@ func (r *questionAdminRepository) createWithChoicesTx(tx *gorm.DB, question *dom
 		}
 		c.QuestionID = question.ID
 		cModel := ChoiceModel{
-			ID:          c.ID,
-			QuestionID:  c.QuestionID,
-			ChoiceKey:   c.ChoiceKey,
-			ChoiceLabel: c.ChoiceLabel,
-			ChoiceText:  c.ChoiceText,
-			IsCorrect:   c.IsCorrect,
-			CreatedAt:   now,
-			UpdatedAt:   now,
+			ID:             c.ID,
+			QuestionID:     c.QuestionID,
+			ChoiceKey:      c.ChoiceKey,
+			ChoiceLabel:    c.ChoiceLabel,
+			ChoiceText:     c.ChoiceText,
+			ContentFormat:  domain.NormalizeContentFormat(c.ContentFormat),
+			ChoiceImageURL: c.ChoiceImageURL,
+			IsCorrect:      c.IsCorrect,
+			CreatedAt:      now,
+			UpdatedAt:      now,
 		}
 		if err := tx.Create(&cModel).Error; err != nil {
 			return err
@@ -189,13 +194,16 @@ func (r *questionAdminRepository) UpdateWithChoices(ctx context.Context, questio
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		question.UpdatedAt = time.Now().UTC()
 		if err := tx.Model(&QuestionModel{}).Where("id = ?", question.ID).Updates(map[string]any{
-			"subject_id":    question.SubjectID,
-			"question_text": question.QuestionText,
-			"explanation":   question.Explanation,
-			"difficulty":    question.Difficulty,
-			"status":        question.Status,
-			"is_active":     question.IsActive,
-			"updated_at":    question.UpdatedAt,
+			"subject_id":            question.SubjectID,
+			"question_text":         question.QuestionText,
+			"content_format":        domain.NormalizeContentFormat(question.ContentFormat),
+			"question_image_url":    question.QuestionImageURL,
+			"explanation":           question.Explanation,
+			"explanation_image_url": question.ExplanationImageURL,
+			"difficulty":            question.Difficulty,
+			"status":                question.Status,
+			"is_active":             question.IsActive,
+			"updated_at":            question.UpdatedAt,
 		}).Error; err != nil {
 			return err
 		}
@@ -210,14 +218,16 @@ func (r *questionAdminRepository) UpdateWithChoices(ctx context.Context, questio
 			c.QuestionID = question.ID
 			now := time.Now().UTC()
 			cModel := ChoiceModel{
-				ID:          c.ID,
-				QuestionID:  c.QuestionID,
-				ChoiceKey:   c.ChoiceKey,
-				ChoiceLabel: c.ChoiceLabel,
-				ChoiceText:  c.ChoiceText,
-				IsCorrect:   c.IsCorrect,
-				CreatedAt:   now,
-				UpdatedAt:   now,
+				ID:             c.ID,
+				QuestionID:     c.QuestionID,
+				ChoiceKey:      c.ChoiceKey,
+				ChoiceLabel:    c.ChoiceLabel,
+				ChoiceText:     c.ChoiceText,
+				ContentFormat:  domain.NormalizeContentFormat(c.ContentFormat),
+				ChoiceImageURL: c.ChoiceImageURL,
+				IsCorrect:      c.IsCorrect,
+				CreatedAt:      now,
+				UpdatedAt:      now,
 			}
 			if err := tx.Create(&cModel).Error; err != nil {
 				return err
@@ -449,27 +459,32 @@ func mapQuestions(models []QuestionModel) []domain.Question {
 
 func mapQuestion(m QuestionModel) domain.Question {
 	q := domain.Question{
-		ID:           m.ID,
-		SubjectID:    m.SubjectID,
-		QuestionText: m.QuestionText,
-		Explanation:  m.Explanation,
-		Difficulty:   m.Difficulty,
-		Status:       m.Status,
-		IsActive:     m.IsActive,
-		CreatedAt:    m.CreatedAt,
-		UpdatedAt:    m.UpdatedAt,
+		ID:                  m.ID,
+		SubjectID:           m.SubjectID,
+		QuestionText:        m.QuestionText,
+		ContentFormat:       m.ContentFormat,
+		QuestionImageURL:    m.QuestionImageURL,
+		Explanation:         m.Explanation,
+		ExplanationImageURL: m.ExplanationImageURL,
+		Difficulty:          m.Difficulty,
+		Status:              m.Status,
+		IsActive:            m.IsActive,
+		CreatedAt:           m.CreatedAt,
+		UpdatedAt:           m.UpdatedAt,
 	}
 	if m.Subject.ID != uuid.Nil {
 		q.Subject = &domain.SubjectRef{Code: m.Subject.Code, Name: m.Subject.Name}
 	}
 	for _, c := range m.Choices {
 		q.Choices = append(q.Choices, domain.Choice{
-			ID:          c.ID,
-			QuestionID:  c.QuestionID,
-			ChoiceKey:   c.ChoiceKey,
-			ChoiceLabel: c.ChoiceLabel,
-			ChoiceText:  c.ChoiceText,
-			IsCorrect:   c.IsCorrect,
+			ID:             c.ID,
+			QuestionID:     c.QuestionID,
+			ChoiceKey:      c.ChoiceKey,
+			ChoiceLabel:    c.ChoiceLabel,
+			ChoiceText:     c.ChoiceText,
+			ContentFormat:  c.ContentFormat,
+			ChoiceImageURL: c.ChoiceImageURL,
+			IsCorrect:      c.IsCorrect,
 		})
 	}
 	return q

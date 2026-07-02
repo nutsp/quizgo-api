@@ -21,15 +21,18 @@ type SubjectModel struct {
 func (SubjectModel) TableName() string { return "subjects" }
 
 type QuestionModel struct {
-	ID           uuid.UUID `gorm:"type:uuid;primaryKey"`
-	SubjectID    uuid.UUID `gorm:"type:uuid;not null;index"`
-	QuestionText string    `gorm:"type:text;not null"`
-	Explanation  string    `gorm:"type:text"`
-	Difficulty   string
-	Status       string    `gorm:"type:varchar(50);not null;default:draft"`
-	IsActive     bool      `gorm:"not null;default:true"`
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID                  uuid.UUID `gorm:"type:uuid;primaryKey"`
+	SubjectID           uuid.UUID `gorm:"type:uuid;not null;index"`
+	QuestionText        string    `gorm:"type:text;not null"`
+	ContentFormat       string    `gorm:"type:varchar(30);not null;default:plain"`
+	QuestionImageURL    *string   `gorm:"type:text"`
+	Explanation         string    `gorm:"type:text"`
+	ExplanationImageURL *string   `gorm:"type:text"`
+	Difficulty          string
+	Status              string    `gorm:"type:varchar(50);not null;default:draft"`
+	IsActive            bool      `gorm:"not null;default:true"`
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
 
 	Subject SubjectModel  `gorm:"foreignKey:SubjectID;references:ID"`
 	Choices []ChoiceModel `gorm:"foreignKey:QuestionID;references:ID"`
@@ -38,14 +41,16 @@ type QuestionModel struct {
 func (QuestionModel) TableName() string { return "questions" }
 
 type ChoiceModel struct {
-	ID          uuid.UUID `gorm:"type:uuid;primaryKey"`
-	QuestionID  uuid.UUID `gorm:"type:uuid;not null;index"`
-	ChoiceKey   string    `gorm:"not null"`
-	ChoiceLabel string    `gorm:"not null"`
-	ChoiceText  string    `gorm:"type:text;not null"`
-	IsCorrect   bool      `gorm:"not null;default:false"`
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID             uuid.UUID `gorm:"type:uuid;primaryKey"`
+	QuestionID     uuid.UUID `gorm:"type:uuid;not null;index"`
+	ChoiceKey      string    `gorm:"not null"`
+	ChoiceLabel    string    `gorm:"not null"`
+	ChoiceText     string    `gorm:"type:text;not null"`
+	ContentFormat  string    `gorm:"type:varchar(30);not null;default:plain"`
+	ChoiceImageURL *string   `gorm:"type:text"`
+	IsCorrect      bool      `gorm:"not null;default:false"`
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 func (ChoiceModel) TableName() string { return "choices" }
@@ -140,13 +145,16 @@ func mapExamSetQuestions(models []ExamSetQuestionModel) []domain.ExamSetQuestion
 		}
 		if m.Question.ID != uuid.Nil {
 			question := domain.Question{
-				ID:           m.Question.ID,
-				SubjectID:    m.Question.SubjectID,
-				QuestionText: m.Question.QuestionText,
-				Explanation:  m.Question.Explanation,
-				Difficulty:   m.Question.Difficulty,
-				Status:       m.Question.Status,
-				IsActive:     m.Question.IsActive,
+				ID:                  m.Question.ID,
+				SubjectID:           m.Question.SubjectID,
+				QuestionText:        m.Question.QuestionText,
+				ContentFormat:       m.Question.ContentFormat,
+				QuestionImageURL:    m.Question.QuestionImageURL,
+				Explanation:         m.Question.Explanation,
+				ExplanationImageURL: m.Question.ExplanationImageURL,
+				Difficulty:          m.Question.Difficulty,
+				Status:              m.Question.Status,
+				IsActive:            m.Question.IsActive,
 			}
 			if m.Question.Subject.ID != uuid.Nil {
 				question.Subject = &domain.SubjectRef{
@@ -156,12 +164,14 @@ func mapExamSetQuestions(models []ExamSetQuestionModel) []domain.ExamSetQuestion
 			}
 			for _, c := range m.Question.Choices {
 				question.Choices = append(question.Choices, domain.Choice{
-					ID:          c.ID,
-					QuestionID:  c.QuestionID,
-					ChoiceKey:   c.ChoiceKey,
-					ChoiceLabel: c.ChoiceLabel,
-					ChoiceText:  c.ChoiceText,
-					IsCorrect:   c.IsCorrect,
+					ID:             c.ID,
+					QuestionID:     c.QuestionID,
+					ChoiceKey:      c.ChoiceKey,
+					ChoiceLabel:    c.ChoiceLabel,
+					ChoiceText:     c.ChoiceText,
+					ContentFormat:  c.ContentFormat,
+					ChoiceImageURL: c.ChoiceImageURL,
+					IsCorrect:      c.IsCorrect,
 				})
 			}
 			q.Question = &question

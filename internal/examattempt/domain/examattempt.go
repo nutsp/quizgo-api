@@ -74,16 +74,20 @@ type StartAttemptResponse struct {
 }
 
 type QuestionForExam struct {
-	QuestionNo   int            `json:"question_no"`
-	QuestionID   string         `json:"question_id"`
-	QuestionText string         `json:"question_text"`
-	Choices      []ChoicePublic `json:"choices"`
+	QuestionNo        int            `json:"question_no"`
+	QuestionID        string         `json:"question_id"`
+	QuestionText      string         `json:"question_text"`
+	ContentFormat     string         `json:"content_format,omitempty"`
+	QuestionImageURL  *string        `json:"question_image_url,omitempty"`
+	Choices           []ChoicePublic `json:"choices"`
 }
 
 type ChoicePublic struct {
-	ChoiceKey   string `json:"choice_key"`
-	ChoiceLabel string `json:"choice_label"`
-	ChoiceText  string `json:"choice_text"`
+	ChoiceKey      string  `json:"choice_key"`
+	ChoiceLabel    string  `json:"choice_label"`
+	ChoiceText     string  `json:"choice_text"`
+	ContentFormat  string  `json:"content_format,omitempty"`
+	ChoiceImageURL *string `json:"choice_image_url,omitempty"`
 }
 
 type GetAttemptResponse struct {
@@ -169,25 +173,30 @@ type ReviewResponse struct {
 }
 
 type ReviewChoice struct {
-	ChoiceKey   string `json:"choice_key"`
-	ChoiceLabel string `json:"choice_label"`
-	ChoiceText  string `json:"choice_text"`
-	IsSelected  bool   `json:"is_selected"`
-	IsCorrect   bool   `json:"is_correct"`
+	ChoiceKey      string  `json:"choice_key"`
+	ChoiceLabel    string  `json:"choice_label"`
+	ChoiceText     string  `json:"choice_text"`
+	ContentFormat  string  `json:"content_format,omitempty"`
+	ChoiceImageURL *string `json:"choice_image_url,omitempty"`
+	IsSelected     bool    `json:"is_selected"`
+	IsCorrect      bool    `json:"is_correct"`
 }
 
 type QuestionForReview struct {
-	QuestionNo        int            `json:"question_no"`
-	QuestionID        string         `json:"question_id"`
-	QuestionText      string         `json:"question_text"`
-	Choices           []ReviewChoice `json:"choices"`
-	SelectedChoiceKey *string        `json:"selected_choice_key"`
-	CorrectChoiceKey  string         `json:"correct_choice_key"`
-	IsCorrect         bool           `json:"is_correct"`
-	IsUnanswered      bool           `json:"is_unanswered"`
-	Explanation       string         `json:"explanation"`
-	Subject           string         `json:"subject"`
-	Tags              []ReviewTagRef `json:"tags,omitempty"`
+	QuestionNo          int            `json:"question_no"`
+	QuestionID          string         `json:"question_id"`
+	QuestionText        string         `json:"question_text"`
+	ContentFormat       string         `json:"content_format,omitempty"`
+	QuestionImageURL    *string        `json:"question_image_url,omitempty"`
+	Choices             []ReviewChoice `json:"choices"`
+	SelectedChoiceKey   *string        `json:"selected_choice_key"`
+	CorrectChoiceKey    string         `json:"correct_choice_key"`
+	IsCorrect           bool           `json:"is_correct"`
+	IsUnanswered        bool           `json:"is_unanswered"`
+	Explanation         string         `json:"explanation"`
+	ExplanationImageURL *string        `json:"explanation_image_url,omitempty"`
+	Subject             string         `json:"subject"`
+	Tags                []ReviewTagRef `json:"tags,omitempty"`
 }
 
 type ReviewTagRef struct {

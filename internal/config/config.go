@@ -37,6 +37,8 @@ type Config struct {
 	GoogleRedirectURL  string
 	FrontendURL        string
 	OAuthStateSecret   string
+	UploadDir          string
+	UploadURLPath      string
 }
 
 func Load() (*Config, error) {
@@ -95,6 +97,8 @@ func Load() (*Config, error) {
 		GoogleRedirectURL:  getEnv("GOOGLE_REDIRECT_URL", "http://localhost:8080/api/v1/auth/oauth/google/callback"),
 		FrontendURL:        getEnv("FRONTEND_URL", "http://localhost:3000"),
 		OAuthStateSecret:   getEnv("OAUTH_STATE_SECRET", "change-me"),
+		UploadDir:          getEnv("UPLOAD_DIR", "uploads"),
+		UploadURLPath:      getEnv("UPLOAD_URL_PATH", "/uploads"),
 	}
 
 	return cfg, nil

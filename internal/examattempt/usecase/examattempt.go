@@ -587,11 +587,13 @@ func (uc *ExamAttemptUseCase) buildReviewResponse(ctx context.Context, attempt *
 			}
 			isSelected := selectedKey != nil && *selectedKey == c.ChoiceKey
 			reviewChoices = append(reviewChoices, domain.ReviewChoice{
-				ChoiceKey:   c.ChoiceKey,
-				ChoiceLabel: c.ChoiceLabel,
-				ChoiceText:  c.ChoiceText,
-				IsSelected:  isSelected,
-				IsCorrect:   c.IsCorrect,
+				ChoiceKey:      c.ChoiceKey,
+				ChoiceLabel:    c.ChoiceLabel,
+				ChoiceText:     c.ChoiceText,
+				ContentFormat:  c.ContentFormat,
+				ChoiceImageURL: c.ChoiceImageURL,
+				IsSelected:     isSelected,
+				IsCorrect:      c.IsCorrect,
 			})
 		}
 		isCorrect := false
@@ -603,17 +605,20 @@ func (uc *ExamAttemptUseCase) buildReviewResponse(ctx context.Context, attempt *
 			reviewTags[i] = domain.ReviewTagRef{Name: t.Name, Code: t.Code}
 		}
 		questions = append(questions, domain.QuestionForReview{
-			QuestionNo:        row.Answer.QuestionNo,
-			QuestionID:        row.Answer.QuestionID.String(),
-			QuestionText:      row.Question.QuestionText,
-			Choices:           reviewChoices,
-			SelectedChoiceKey: selectedKey,
-			CorrectChoiceKey:  correctKey,
-			IsCorrect:         isCorrect,
-			IsUnanswered:      isUnanswered,
-			Explanation:       row.Question.Explanation,
-			Subject:           row.Question.SubjectName,
-			Tags:              reviewTags,
+			QuestionNo:          row.Answer.QuestionNo,
+			QuestionID:          row.Answer.QuestionID.String(),
+			QuestionText:        row.Question.QuestionText,
+			ContentFormat:       row.Question.ContentFormat,
+			QuestionImageURL:    row.Question.QuestionImageURL,
+			Choices:             reviewChoices,
+			SelectedChoiceKey:   selectedKey,
+			CorrectChoiceKey:    correctKey,
+			IsCorrect:           isCorrect,
+			IsUnanswered:        isUnanswered,
+			Explanation:         row.Question.Explanation,
+			ExplanationImageURL: row.Question.ExplanationImageURL,
+			Subject:             row.Question.SubjectName,
+			Tags:                reviewTags,
 		})
 	}
 
@@ -733,10 +738,12 @@ func buildQuestionsForExam(setQuestions []qdomain.ExamSetQuestion) []domain.Ques
 			continue
 		}
 		out = append(out, domain.QuestionForExam{
-			QuestionNo:   sq.QuestionNo,
-			QuestionID:   sq.QuestionID.String(),
-			QuestionText: sq.Question.QuestionText,
-			Choices:      mapChoices(sq.Question.Choices),
+			QuestionNo:       sq.QuestionNo,
+			QuestionID:       sq.QuestionID.String(),
+			QuestionText:     sq.Question.QuestionText,
+			ContentFormat:    qdomain.NormalizeContentFormat(sq.Question.ContentFormat),
+			QuestionImageURL: sq.Question.QuestionImageURL,
+			Choices:          mapChoices(sq.Question.Choices),
 		})
 	}
 	return out
@@ -746,9 +753,11 @@ func mapChoices(choices []qdomain.Choice) []domain.ChoicePublic {
 	out := make([]domain.ChoicePublic, len(choices))
 	for i, c := range choices {
 		out[i] = domain.ChoicePublic{
-			ChoiceKey:   c.ChoiceKey,
-			ChoiceLabel: c.ChoiceLabel,
-			ChoiceText:  c.ChoiceText,
+			ChoiceKey:      c.ChoiceKey,
+			ChoiceLabel:    c.ChoiceLabel,
+			ChoiceText:     c.ChoiceText,
+			ContentFormat:  qdomain.NormalizeContentFormat(c.ContentFormat),
+			ChoiceImageURL: c.ChoiceImageURL,
 		}
 	}
 	return out

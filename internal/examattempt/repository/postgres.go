@@ -105,12 +105,15 @@ type AnswerWithQuestion struct {
 }
 
 type QuestionDetail struct {
-	ID           uuid.UUID
-	QuestionText string
-	Explanation  string
-	SubjectName  string
-	Tags         []TagDetail
-	Choices      []ChoiceDetail
+	ID                  uuid.UUID
+	QuestionText        string
+	ContentFormat       string
+	QuestionImageURL    *string
+	Explanation         string
+	ExplanationImageURL *string
+	SubjectName         string
+	Tags                []TagDetail
+	Choices             []ChoiceDetail
 }
 
 type TagDetail struct {
@@ -119,10 +122,12 @@ type TagDetail struct {
 }
 
 type ChoiceDetail struct {
-	ChoiceKey   string
-	ChoiceLabel string
-	ChoiceText  string
-	IsCorrect   bool
+	ChoiceKey      string
+	ChoiceLabel    string
+	ChoiceText     string
+	ContentFormat  string
+	ChoiceImageURL *string
+	IsCorrect      bool
 }
 
 type postgresRepository struct {
@@ -410,19 +415,24 @@ func (r *postgresRepository) ListAnswersWithQuestions(ctx context.Context, attem
 			return nil, err
 		}
 		detail := QuestionDetail{
-			ID:           q.ID,
-			QuestionText: q.QuestionText,
-			Explanation:  q.Explanation,
+			ID:                  q.ID,
+			QuestionText:        q.QuestionText,
+			ContentFormat:       q.ContentFormat,
+			QuestionImageURL:    q.QuestionImageURL,
+			Explanation:         q.Explanation,
+			ExplanationImageURL: q.ExplanationImageURL,
 		}
 		if q.Subject.ID != uuid.Nil {
 			detail.SubjectName = q.Subject.Name
 		}
 		for _, c := range q.Choices {
 			detail.Choices = append(detail.Choices, ChoiceDetail{
-				ChoiceKey:   c.ChoiceKey,
-				ChoiceLabel: c.ChoiceLabel,
-				ChoiceText:  c.ChoiceText,
-				IsCorrect:   c.IsCorrect,
+				ChoiceKey:      c.ChoiceKey,
+				ChoiceLabel:    c.ChoiceLabel,
+				ChoiceText:     c.ChoiceText,
+				ContentFormat:  c.ContentFormat,
+				ChoiceImageURL: c.ChoiceImageURL,
+				IsCorrect:      c.IsCorrect,
 			})
 		}
 		type tagRow struct {

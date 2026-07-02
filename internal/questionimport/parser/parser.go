@@ -50,18 +50,26 @@ func rowFromMap(rowNum int, colIndex map[string]int, record []string) domain.Imp
 		return strings.TrimSpace(record[idx])
 	}
 	return domain.ImportQuestionRow{
-		RowNumber:     rowNum,
-		SubjectCode:   get("subject_code"),
-		Tags:          get("tags"),
-		QuestionText:  get("question_text"),
-		ChoiceA:       get("choice_a"),
-		ChoiceB:       get("choice_b"),
-		ChoiceC:       get("choice_c"),
-		ChoiceD:       get("choice_d"),
-		CorrectChoice: get("correct_choice"),
-		Explanation:   get("explanation"),
-		Difficulty:    get("difficulty"),
-		Status:        get("status"),
+		RowNumber:        rowNum,
+		SubjectCode:      get("subject_code"),
+		Tags:             get("tags"),
+		QuestionType:     get("question_type"),
+		ContentFormat:    get("content_format"),
+		QuestionText:     get("question_text"),
+		QuestionImage:    get("question_image"),
+		ChoiceA:          get("choice_a"),
+		ChoiceAImage:     get("choice_a_image"),
+		ChoiceB:          get("choice_b"),
+		ChoiceBImage:     get("choice_b_image"),
+		ChoiceC:          get("choice_c"),
+		ChoiceCImage:     get("choice_c_image"),
+		ChoiceD:          get("choice_d"),
+		ChoiceDImage:     get("choice_d_image"),
+		CorrectChoice:    get("correct_choice"),
+		Explanation:      get("explanation"),
+		ExplanationImage: get("explanation_image"),
+		Difficulty:       get("difficulty"),
+		Status:           get("status"),
 	}
 }
 

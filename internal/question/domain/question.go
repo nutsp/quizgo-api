@@ -16,18 +16,21 @@ type Subject struct {
 }
 
 type Question struct {
-	ID           uuid.UUID
-	SubjectID    uuid.UUID
-	QuestionText string
-	Explanation  string
-	Difficulty   string
-	Status       string
-	IsActive     bool
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
-	Subject      *SubjectRef
-	Choices      []Choice
-	Tags         []TagRef
+	ID                  uuid.UUID
+	SubjectID           uuid.UUID
+	QuestionText        string
+	ContentFormat       string
+	QuestionImageURL    *string
+	Explanation         string
+	ExplanationImageURL *string
+	Difficulty          string
+	Status              string
+	IsActive            bool
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	Subject             *SubjectRef
+	Choices             []Choice
+	Tags                []TagRef
 }
 
 type TagRef struct {
@@ -43,18 +46,22 @@ type SubjectRef struct {
 }
 
 type Choice struct {
-	ID          uuid.UUID
-	QuestionID  uuid.UUID
-	ChoiceKey   string
-	ChoiceLabel string
-	ChoiceText  string
-	IsCorrect   bool
+	ID             uuid.UUID
+	QuestionID     uuid.UUID
+	ChoiceKey      string
+	ChoiceLabel    string
+	ChoiceText     string
+	ContentFormat  string
+	ChoiceImageURL *string
+	IsCorrect      bool
 }
 
 type ChoicePublic struct {
-	ChoiceKey   string `json:"choice_key"`
-	ChoiceLabel string `json:"choice_label"`
-	ChoiceText  string `json:"choice_text"`
+	ChoiceKey      string  `json:"choice_key"`
+	ChoiceLabel    string  `json:"choice_label"`
+	ChoiceText     string  `json:"choice_text"`
+	ContentFormat  string  `json:"content_format,omitempty"`
+	ChoiceImageURL *string `json:"choice_image_url,omitempty"`
 }
 
 type ExamSetQuestion struct {

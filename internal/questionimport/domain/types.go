@@ -29,21 +29,43 @@ var OptionalColumns = []string{
 	"explanation",
 	"difficulty",
 	"status",
+	"question_type",
+	"content_format",
+	"question_image",
+	"choice_a_image",
+	"choice_b_image",
+	"choice_c_image",
+	"choice_d_image",
+	"explanation_image",
 }
 
 type ImportQuestionRow struct {
-	RowNumber     int    `json:"row_number"`
-	SubjectCode   string `json:"subject_code"`
-	Tags          string `json:"tags,omitempty"`
-	QuestionText  string `json:"question_text"`
-	ChoiceA       string `json:"choice_a"`
-	ChoiceB       string `json:"choice_b"`
-	ChoiceC       string `json:"choice_c"`
-	ChoiceD       string `json:"choice_d"`
-	CorrectChoice string `json:"correct_choice"`
-	Explanation   string `json:"explanation,omitempty"`
-	Difficulty    string `json:"difficulty,omitempty"`
-	Status        string `json:"status,omitempty"`
+	RowNumber           int    `json:"row_number"`
+	SubjectCode         string `json:"subject_code"`
+	Tags                string `json:"tags,omitempty"`
+	QuestionType        string `json:"question_type,omitempty"`
+	ContentFormat       string `json:"content_format,omitempty"`
+	QuestionText        string `json:"question_text"`
+	QuestionImage       string `json:"question_image,omitempty"`
+	QuestionImageURL    string `json:"question_image_url,omitempty"`
+	ChoiceA             string `json:"choice_a"`
+	ChoiceAImage        string `json:"choice_a_image,omitempty"`
+	ChoiceAImageURL     string `json:"choice_a_image_url,omitempty"`
+	ChoiceB             string `json:"choice_b"`
+	ChoiceBImage        string `json:"choice_b_image,omitempty"`
+	ChoiceBImageURL     string `json:"choice_b_image_url,omitempty"`
+	ChoiceC             string `json:"choice_c"`
+	ChoiceCImage        string `json:"choice_c_image,omitempty"`
+	ChoiceCImageURL     string `json:"choice_c_image_url,omitempty"`
+	ChoiceD             string `json:"choice_d"`
+	ChoiceDImage        string `json:"choice_d_image,omitempty"`
+	ChoiceDImageURL     string `json:"choice_d_image_url,omitempty"`
+	CorrectChoice       string `json:"correct_choice"`
+	Explanation         string `json:"explanation,omitempty"`
+	ExplanationImage    string `json:"explanation_image,omitempty"`
+	ExplanationImageURL string `json:"explanation_image_url,omitempty"`
+	Difficulty          string `json:"difficulty,omitempty"`
+	Status              string `json:"status,omitempty"`
 }
 
 type ImportPreviewRow struct {
@@ -92,22 +114,36 @@ type ImportJob struct {
 }
 
 type ImportJobRow struct {
-	ID            uuid.UUID
-	ImportJobID   uuid.UUID
-	RowNumber     int
-	SubjectCode   string
-	Tags          string
-	QuestionText  string
-	ChoiceA       string
-	ChoiceB       string
-	ChoiceC       string
-	ChoiceD       string
-	CorrectChoice string
-	Explanation   string
-	Difficulty    string
-	Status        string
-	Valid         bool
-	Errors        []string
-	Warnings      []string
-	CreatedAt     time.Time
+	ID                  uuid.UUID
+	ImportJobID         uuid.UUID
+	RowNumber           int
+	SubjectCode         string
+	Tags                string
+	QuestionType        string
+	ContentFormat       string
+	QuestionText        string
+	QuestionImage       string
+	QuestionImageURL    string
+	ChoiceA             string
+	ChoiceAImage        string
+	ChoiceAImageURL     string
+	ChoiceB             string
+	ChoiceBImage        string
+	ChoiceBImageURL     string
+	ChoiceC             string
+	ChoiceCImage        string
+	ChoiceCImageURL     string
+	ChoiceD             string
+	ChoiceDImage        string
+	ChoiceDImageURL     string
+	CorrectChoice       string
+	Explanation         string
+	ExplanationImage    string
+	ExplanationImageURL string
+	Difficulty          string
+	Status              string
+	Valid               bool
+	Errors              []string
+	Warnings            []string
+	CreatedAt           time.Time
 }

@@ -58,6 +58,8 @@ import (
 	leaderboardrepo "virtual-exam-api/internal/leaderboard/repository"
 	leaderboardhttp "virtual-exam-api/internal/leaderboard/transport/http"
 	leaderboarduc "virtual-exam-api/internal/leaderboard/usecase"
+	mediahttp "virtual-exam-api/internal/media/transport/http"
+	"virtual-exam-api/internal/media/storage"
 	profilehttp "virtual-exam-api/internal/profile/transport/http"
 	profileuc "virtual-exam-api/internal/profile/usecase"
 	resultrepo "virtual-exam-api/internal/result/repository"
@@ -195,7 +197,11 @@ func main() {
 	examSetQuestionHandler := esqhttp.NewHandler(examSetQuestionUC)
 
 	importRepository := importrepo.NewRepository(db)
-	importUseCase := importuc.NewUseCase(importRepository, subjectAdminRepo, questionAdminRepo, tagAdminRepo)
+	uploadStore, err := storage.NewLocalStorage(cfg.UploadDir, cfg.UploadURLPath)
+	if err != nil {
+		log.Fatalf("upload storage: %v", err)
+	}
+	importUseCase := importuc.NewUseCase(importRepository, subjectAdminRepo, questionAdminRepo, tagAdminRepo, uploadStore)
 
 	accessLogRepo := accessrepo.NewPostgresRepository(db)
 	accessLogger := accessuc.NewLogger(accessLogRepo)
@@ -222,6 +228,9 @@ func main() {
 		RegisterRoutes(api, authMiddleware, middleware.AdminOnly())
 	adminhttp.NewHandler(dashboardUC, trackAdminUC, examSetAdminUC, subjectAdminUC, questionAdminUC, examSetQuestionHandler, auditLogger, userRepository).
 		RegisterRoutes(api, authMiddleware, middleware.AdminOnly())
+	mediahttp.NewMediaHandler(uploadStore).RegisterRoutes(adminRoute)
+
+	e.Static(cfg.UploadURLPath, cfg.UploadDir)
 
 	e.GET("/health", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{"status": "ok"})

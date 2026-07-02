@@ -49,20 +49,25 @@ func NewAdminUseCase(
 }
 
 type ChoiceInput struct {
-	ChoiceKey   string `json:"choice_key"`
-	ChoiceLabel string `json:"choice_label"`
-	ChoiceText  string `json:"choice_text"`
-	IsCorrect   bool   `json:"is_correct"`
+	ChoiceKey      string  `json:"choice_key"`
+	ChoiceLabel    string  `json:"choice_label"`
+	ChoiceText     string  `json:"choice_text"`
+	ContentFormat  string  `json:"content_format"`
+	ChoiceImageURL *string `json:"choice_image_url"`
+	IsCorrect      bool    `json:"is_correct"`
 }
 
 type QuestionInput struct {
-	SubjectID    string        `json:"subject_id"`
-	QuestionText string        `json:"question_text"`
-	Difficulty   string        `json:"difficulty"`
-	Explanation  string        `json:"explanation"`
-	Status       string        `json:"status"`
-	TagIDs       []string      `json:"tag_ids"`
-	Choices      []ChoiceInput `json:"choices"`
+	SubjectID           string        `json:"subject_id"`
+	QuestionText        string        `json:"question_text"`
+	ContentFormat       string        `json:"content_format"`
+	QuestionImageURL    *string       `json:"question_image_url"`
+	Explanation         string        `json:"explanation"`
+	ExplanationImageURL *string       `json:"explanation_image_url"`
+	Difficulty          string        `json:"difficulty"`
+	Status              string        `json:"status"`
+	TagIDs              []string      `json:"tag_ids"`
+	Choices             []ChoiceInput `json:"choices"`
 }
 
 type TagSummaryResponse struct {
@@ -73,28 +78,33 @@ type TagSummaryResponse struct {
 }
 
 type ChoiceResponse struct {
-	ID          string `json:"id,omitempty"`
-	ChoiceKey   string `json:"choice_key"`
-	ChoiceLabel string `json:"choice_label"`
-	ChoiceText  string `json:"choice_text"`
-	IsCorrect   bool   `json:"is_correct"`
+	ID             string  `json:"id,omitempty"`
+	ChoiceKey      string  `json:"choice_key"`
+	ChoiceLabel    string  `json:"choice_label"`
+	ChoiceText     string  `json:"choice_text"`
+	ContentFormat  string  `json:"content_format"`
+	ChoiceImageURL *string `json:"choice_image_url,omitempty"`
+	IsCorrect      bool    `json:"is_correct"`
 }
 
 type QuestionResponse struct {
-	ID              string           `json:"id"`
-	SubjectID       string           `json:"subject_id"`
-	SubjectName     string           `json:"subject_name,omitempty"`
-	QuestionText    string           `json:"question_text"`
-	QuestionPreview string           `json:"question_preview,omitempty"`
-	Difficulty      string           `json:"difficulty"`
-	Explanation     string           `json:"explanation,omitempty"`
-	Status          string           `json:"status"`
-	IsActive        bool             `json:"is_active"`
-	CorrectAnswer   string               `json:"correct_answer,omitempty"`
-	Choices         []ChoiceResponse     `json:"choices,omitempty"`
-	Tags            []TagSummaryResponse `json:"tags,omitempty"`
-	CreatedAt       string               `json:"created_at"`
-	UpdatedAt       string           `json:"updated_at"`
+	ID                  string               `json:"id"`
+	SubjectID           string               `json:"subject_id"`
+	SubjectName         string               `json:"subject_name,omitempty"`
+	QuestionText        string               `json:"question_text"`
+	ContentFormat       string               `json:"content_format"`
+	QuestionImageURL    *string              `json:"question_image_url,omitempty"`
+	QuestionPreview     string               `json:"question_preview,omitempty"`
+	Difficulty          string               `json:"difficulty"`
+	Explanation         string               `json:"explanation,omitempty"`
+	ExplanationImageURL *string              `json:"explanation_image_url,omitempty"`
+	Status              string               `json:"status"`
+	IsActive            bool                 `json:"is_active"`
+	CorrectAnswer       string               `json:"correct_answer,omitempty"`
+	Choices             []ChoiceResponse     `json:"choices,omitempty"`
+	Tags                []TagSummaryResponse `json:"tags,omitempty"`
+	CreatedAt           string               `json:"created_at"`
+	UpdatedAt           string               `json:"updated_at"`
 }
 
 type QuestionListResponse = pagination.PaginatedList[QuestionResponse]
@@ -295,8 +305,20 @@ func (uc *AdminUseCase) syncExamSetQuestionCount(ctx context.Context, set *domai
 }
 
 func (uc *AdminUseCase) buildQuestion(input QuestionInput) (*qdomain.Question, error) {
-	if input.SubjectID == "" || input.QuestionText == "" {
+	if input.SubjectID == "" {
 		return nil, apperrors.ErrInvalidInput
+	}
+	questionText := strings.TrimSpace(input.QuestionText)
+	questionImageURL, err := qdomain.NormalizeImageURL(ptrStr(input.QuestionImageURL))
+	if err != nil {
+		return nil, apperrors.ValidationError(qdomain.ImageURLValidationMessage(err))
+	}
+	explanationImageURL, err := qdomain.NormalizeImageURL(ptrStr(input.ExplanationImageURL))
+	if err != nil {
+		return nil, apperrors.ValidationError(qdomain.ImageURLValidationMessage(err))
+	}
+	if questionText == "" && questionImageURL == nil {
+		return nil, apperrors.ValidationError("กรุณาระบุข้อความคำถามหรือรูปภาพคำถาม")
 	}
 	subjectID, err := uuid.Parse(input.SubjectID)
 	if err != nil {
@@ -312,7 +334,8 @@ func (uc *AdminUseCase) buildQuestion(input QuestionInput) (*qdomain.Question, e
 	if !isValidQuestionDifficulty(input.Difficulty) || !isValidQuestionStatus(input.Status) {
 		return nil, apperrors.ErrInvalidInput
 	}
-	choices, err := validateChoices(input.Choices)
+	contentFormat := qdomain.NormalizeContentFormat(input.ContentFormat)
+	choices, err := validateChoices(input.Choices, contentFormat)
 	if err != nil {
 		return nil, err
 	}
@@ -321,15 +344,18 @@ func (uc *AdminUseCase) buildQuestion(input QuestionInput) (*qdomain.Question, e
 		return nil, err
 	}
 	return &qdomain.Question{
-		SubjectID:    subjectID,
-		QuestionText: input.QuestionText,
-		Explanation:  input.Explanation,
-		Difficulty:   input.Difficulty,
-		Status:       input.Status,
-		IsActive:     input.Status != qdomain.StatusArchived,
-		Subject:      &qdomain.SubjectRef{Code: subject.Code, Name: subject.Name},
-		Choices:      choices,
-		Tags:         tagRefs,
+		SubjectID:           subjectID,
+		QuestionText:        questionText,
+		ContentFormat:       contentFormat,
+		QuestionImageURL:    questionImageURL,
+		Explanation:         strings.TrimSpace(input.Explanation),
+		ExplanationImageURL: explanationImageURL,
+		Difficulty:          input.Difficulty,
+		Status:              input.Status,
+		IsActive:            input.Status != qdomain.StatusArchived,
+		Subject:             &qdomain.SubjectRef{Code: subject.Code, Name: subject.Name},
+		Choices:             choices,
+		Tags:                tagRefs,
 	}, nil
 }
 
@@ -362,7 +388,7 @@ func (uc *AdminUseCase) resolveTagRefs(ctx context.Context, tagIDs []string) ([]
 	return refs, nil
 }
 
-func validateChoices(inputs []ChoiceInput) ([]qdomain.Choice, error) {
+func validateChoices(inputs []ChoiceInput, defaultFormat string) ([]qdomain.Choice, error) {
 	if len(inputs) != 4 {
 		return nil, apperrors.ErrInvalidChoices
 	}
@@ -370,8 +396,13 @@ func validateChoices(inputs []ChoiceInput) ([]qdomain.Choice, error) {
 	choices := make([]qdomain.Choice, 0, 4)
 	seen := map[string]bool{}
 	for _, in := range inputs {
-		if in.ChoiceText == "" {
-			return nil, apperrors.ErrInvalidChoices
+		choiceText := strings.TrimSpace(in.ChoiceText)
+		choiceImageURL, err := qdomain.NormalizeImageURL(ptrStr(in.ChoiceImageURL))
+		if err != nil {
+			return nil, apperrors.ValidationError(qdomain.ImageURLValidationMessage(err))
+		}
+		if choiceText == "" && choiceImageURL == nil {
+			return nil, apperrors.ValidationError("ตัวเลือกต้องมีข้อความหรือรูปภาพ")
 		}
 		if !qdomain.IsValidChoiceKey(in.ChoiceKey) {
 			return nil, apperrors.ErrInvalidChoices
@@ -387,17 +418,30 @@ func validateChoices(inputs []ChoiceInput) ([]qdomain.Choice, error) {
 		if in.IsCorrect {
 			correctCount++
 		}
+		format := qdomain.NormalizeContentFormat(in.ContentFormat)
+		if format == qdomain.ContentFormatPlain && defaultFormat != "" {
+			format = defaultFormat
+		}
 		choices = append(choices, qdomain.Choice{
-			ChoiceKey:   in.ChoiceKey,
-			ChoiceLabel: label,
-			ChoiceText:  in.ChoiceText,
-			IsCorrect:   in.IsCorrect,
+			ChoiceKey:      in.ChoiceKey,
+			ChoiceLabel:    label,
+			ChoiceText:     choiceText,
+			ContentFormat:  format,
+			ChoiceImageURL: choiceImageURL,
+			IsCorrect:      in.IsCorrect,
 		})
 	}
 	if correctCount != 1 {
 		return nil, apperrors.ErrInvalidChoices
 	}
 	return choices, nil
+}
+
+func ptrStr(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
 }
 
 func isValidQuestionDifficulty(d string) bool {
@@ -410,16 +454,19 @@ func isValidQuestionStatus(s string) bool {
 
 func toQuestionResponse(q qdomain.Question) QuestionResponse {
 	resp := QuestionResponse{
-		ID:              q.ID.String(),
-		SubjectID:       q.SubjectID.String(),
-		QuestionText:    q.QuestionText,
-		QuestionPreview: questionrepo.TruncatePreview(q.QuestionText, 120),
-		Difficulty:      q.Difficulty,
-		Explanation:     q.Explanation,
-		Status:          q.Status,
-		IsActive:        q.IsActive,
-		CreatedAt:       q.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
-		UpdatedAt:       q.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		ID:                  q.ID.String(),
+		SubjectID:           q.SubjectID.String(),
+		QuestionText:        q.QuestionText,
+		ContentFormat:       qdomain.NormalizeContentFormat(q.ContentFormat),
+		QuestionImageURL:    q.QuestionImageURL,
+		QuestionPreview:     questionrepo.TruncatePreview(q.QuestionText, 120),
+		Difficulty:          q.Difficulty,
+		Explanation:         q.Explanation,
+		ExplanationImageURL: q.ExplanationImageURL,
+		Status:              q.Status,
+		IsActive:            q.IsActive,
+		CreatedAt:           q.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		UpdatedAt:           q.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
 	}
 	if q.Subject != nil {
 		resp.SubjectName = q.Subject.Name
@@ -429,11 +476,13 @@ func toQuestionResponse(q qdomain.Question) QuestionResponse {
 			resp.CorrectAnswer = c.ChoiceKey + " / " + c.ChoiceLabel
 		}
 		resp.Choices = append(resp.Choices, ChoiceResponse{
-			ID:          c.ID.String(),
-			ChoiceKey:   c.ChoiceKey,
-			ChoiceLabel: c.ChoiceLabel,
-			ChoiceText:  c.ChoiceText,
-			IsCorrect:   c.IsCorrect,
+			ID:             c.ID.String(),
+			ChoiceKey:      c.ChoiceKey,
+			ChoiceLabel:    c.ChoiceLabel,
+			ChoiceText:     c.ChoiceText,
+			ContentFormat:  qdomain.NormalizeContentFormat(c.ContentFormat),
+			ChoiceImageURL: c.ChoiceImageURL,
+			IsCorrect:      c.IsCorrect,
 		})
 	}
 	for _, t := range q.Tags {

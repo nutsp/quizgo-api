@@ -58,24 +58,38 @@ type ImportJobModel struct {
 func (ImportJobModel) TableName() string { return "question_import_jobs" }
 
 type ImportRowModel struct {
-	ID            uuid.UUID  `gorm:"type:uuid;primaryKey"`
-	ImportJobID   uuid.UUID  `gorm:"type:uuid;not null;index"`
-	RowNumber     int        `gorm:"not null"`
-	SubjectCode   string     `gorm:"type:varchar(100)"`
-	Tags          string     `gorm:"type:varchar(500)"`
-	QuestionText  string     `gorm:"type:text"`
-	ChoiceA       string     `gorm:"type:text"`
-	ChoiceB       string     `gorm:"type:text"`
-	ChoiceC       string     `gorm:"type:text"`
-	ChoiceD       string     `gorm:"type:text"`
-	CorrectChoice string     `gorm:"type:varchar(10)"`
-	Explanation   string     `gorm:"type:text"`
-	Difficulty    string     `gorm:"type:varchar(50)"`
-	Status        string     `gorm:"type:varchar(50)"`
-	Valid         bool       `gorm:"not null;default:false"`
-	Errors        StringList `gorm:"type:jsonb;not null;default:'[]'"`
-	Warnings      StringList `gorm:"type:jsonb;not null;default:'[]'"`
-	CreatedAt     time.Time  `gorm:"not null"`
+	ID                  uuid.UUID  `gorm:"type:uuid;primaryKey"`
+	ImportJobID         uuid.UUID  `gorm:"type:uuid;not null;index"`
+	RowNumber           int        `gorm:"not null"`
+	SubjectCode         string     `gorm:"type:varchar(100)"`
+	Tags                string     `gorm:"type:varchar(500)"`
+	QuestionType        string     `gorm:"type:varchar(30)"`
+	ContentFormat       string     `gorm:"type:varchar(30)"`
+	QuestionText        string     `gorm:"type:text"`
+	QuestionImage       string     `gorm:"type:text"`
+	QuestionImageURL    string     `gorm:"type:text"`
+	ChoiceA             string     `gorm:"type:text"`
+	ChoiceAImage        string     `gorm:"type:text"`
+	ChoiceAImageURL     string     `gorm:"type:text"`
+	ChoiceB             string     `gorm:"type:text"`
+	ChoiceBImage        string     `gorm:"type:text"`
+	ChoiceBImageURL     string     `gorm:"type:text"`
+	ChoiceC             string     `gorm:"type:text"`
+	ChoiceCImage        string     `gorm:"type:text"`
+	ChoiceCImageURL     string     `gorm:"type:text"`
+	ChoiceD             string     `gorm:"type:text"`
+	ChoiceDImage        string     `gorm:"type:text"`
+	ChoiceDImageURL     string     `gorm:"type:text"`
+	CorrectChoice       string     `gorm:"type:varchar(10)"`
+	Explanation         string     `gorm:"type:text"`
+	ExplanationImage    string     `gorm:"type:text"`
+	ExplanationImageURL string     `gorm:"type:text"`
+	Difficulty          string     `gorm:"type:varchar(50)"`
+	Status              string     `gorm:"type:varchar(50)"`
+	Valid               bool       `gorm:"not null;default:false"`
+	Errors              StringList `gorm:"type:jsonb;not null;default:'[]'"`
+	Warnings            StringList `gorm:"type:jsonb;not null;default:'[]'"`
+	CreatedAt           time.Time  `gorm:"not null"`
 }
 
 func (ImportRowModel) TableName() string { return "question_import_rows" }
@@ -271,46 +285,74 @@ func mapJobFromModel(m ImportJobModel) domain.ImportJob {
 
 func mapRowToModel(row domain.ImportJobRow) ImportRowModel {
 	return ImportRowModel{
-		ID:            row.ID,
-		ImportJobID:   row.ImportJobID,
-		RowNumber:     row.RowNumber,
-		SubjectCode:   row.SubjectCode,
-		Tags:          row.Tags,
-		QuestionText:  row.QuestionText,
-		ChoiceA:       row.ChoiceA,
-		ChoiceB:       row.ChoiceB,
-		ChoiceC:       row.ChoiceC,
-		ChoiceD:       row.ChoiceD,
-		CorrectChoice: row.CorrectChoice,
-		Explanation:   row.Explanation,
-		Difficulty:    row.Difficulty,
-		Status:        row.Status,
-		Valid:         row.Valid,
-		Errors:        StringList(row.Errors),
-		Warnings:      StringList(row.Warnings),
-		CreatedAt:     row.CreatedAt,
+		ID:                  row.ID,
+		ImportJobID:         row.ImportJobID,
+		RowNumber:           row.RowNumber,
+		SubjectCode:         row.SubjectCode,
+		Tags:                row.Tags,
+		QuestionType:        row.QuestionType,
+		ContentFormat:       row.ContentFormat,
+		QuestionText:        row.QuestionText,
+		QuestionImage:       row.QuestionImage,
+		QuestionImageURL:    row.QuestionImageURL,
+		ChoiceA:             row.ChoiceA,
+		ChoiceAImage:        row.ChoiceAImage,
+		ChoiceAImageURL:     row.ChoiceAImageURL,
+		ChoiceB:             row.ChoiceB,
+		ChoiceBImage:        row.ChoiceBImage,
+		ChoiceBImageURL:     row.ChoiceBImageURL,
+		ChoiceC:             row.ChoiceC,
+		ChoiceCImage:        row.ChoiceCImage,
+		ChoiceCImageURL:     row.ChoiceCImageURL,
+		ChoiceD:             row.ChoiceD,
+		ChoiceDImage:        row.ChoiceDImage,
+		ChoiceDImageURL:     row.ChoiceDImageURL,
+		CorrectChoice:       row.CorrectChoice,
+		Explanation:         row.Explanation,
+		ExplanationImage:    row.ExplanationImage,
+		ExplanationImageURL: row.ExplanationImageURL,
+		Difficulty:          row.Difficulty,
+		Status:              row.Status,
+		Valid:               row.Valid,
+		Errors:              StringList(row.Errors),
+		Warnings:            StringList(row.Warnings),
+		CreatedAt:           row.CreatedAt,
 	}
 }
 
 func mapRowFromModel(m ImportRowModel) domain.ImportJobRow {
 	return domain.ImportJobRow{
-		ID:            m.ID,
-		ImportJobID:   m.ImportJobID,
-		RowNumber:     m.RowNumber,
-		SubjectCode:   m.SubjectCode,
-		Tags:          m.Tags,
-		QuestionText:  m.QuestionText,
-		ChoiceA:       m.ChoiceA,
-		ChoiceB:       m.ChoiceB,
-		ChoiceC:       m.ChoiceC,
-		ChoiceD:       m.ChoiceD,
-		CorrectChoice: m.CorrectChoice,
-		Explanation:   m.Explanation,
-		Difficulty:    m.Difficulty,
-		Status:        m.Status,
-		Valid:         m.Valid,
-		Errors:        []string(m.Errors),
-		Warnings:      []string(m.Warnings),
-		CreatedAt:     m.CreatedAt,
+		ID:                  m.ID,
+		ImportJobID:         m.ImportJobID,
+		RowNumber:           m.RowNumber,
+		SubjectCode:         m.SubjectCode,
+		Tags:                m.Tags,
+		QuestionType:        m.QuestionType,
+		ContentFormat:       m.ContentFormat,
+		QuestionText:        m.QuestionText,
+		QuestionImage:       m.QuestionImage,
+		QuestionImageURL:    m.QuestionImageURL,
+		ChoiceA:             m.ChoiceA,
+		ChoiceAImage:        m.ChoiceAImage,
+		ChoiceAImageURL:     m.ChoiceAImageURL,
+		ChoiceB:             m.ChoiceB,
+		ChoiceBImage:        m.ChoiceBImage,
+		ChoiceBImageURL:     m.ChoiceBImageURL,
+		ChoiceC:             m.ChoiceC,
+		ChoiceCImage:        m.ChoiceCImage,
+		ChoiceCImageURL:     m.ChoiceCImageURL,
+		ChoiceD:             m.ChoiceD,
+		ChoiceDImage:        m.ChoiceDImage,
+		ChoiceDImageURL:     m.ChoiceDImageURL,
+		CorrectChoice:       m.CorrectChoice,
+		Explanation:         m.Explanation,
+		ExplanationImage:    m.ExplanationImage,
+		ExplanationImageURL: m.ExplanationImageURL,
+		Difficulty:          m.Difficulty,
+		Status:              m.Status,
+		Valid:               m.Valid,
+		Errors:              []string(m.Errors),
+		Warnings:            []string(m.Warnings),
+		CreatedAt:           m.CreatedAt,
 	}
 }
