@@ -41,6 +41,31 @@ func validateHeaders(headers []string) error {
 	return nil
 }
 
+func mergeQuestionGroupCodes(tagsCol, groupCodesCol string) string {
+	tagsCol = strings.TrimSpace(tagsCol)
+	groupCodesCol = strings.TrimSpace(groupCodesCol)
+	if groupCodesCol == "" {
+		return tagsCol
+	}
+	normalizedGroups := normalizeCommaSeparatedCodes(groupCodesCol)
+	if tagsCol == "" {
+		return normalizedGroups
+	}
+	return tagsCol + "|" + normalizedGroups
+}
+
+func normalizeCommaSeparatedCodes(raw string) string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		code := strings.ToLower(strings.TrimSpace(part))
+		if code != "" {
+			out = append(out, code)
+		}
+	}
+	return strings.Join(out, "|")
+}
+
 func rowFromMap(rowNum int, colIndex map[string]int, record []string) domain.ImportQuestionRow {
 	get := func(col string) string {
 		idx, ok := colIndex[col]
@@ -52,7 +77,7 @@ func rowFromMap(rowNum int, colIndex map[string]int, record []string) domain.Imp
 	return domain.ImportQuestionRow{
 		RowNumber:        rowNum,
 		SubjectCode:      get("subject_code"),
-		Tags:             get("tags"),
+		Tags:             mergeQuestionGroupCodes(get("tags"), get("question_group_codes")),
 		QuestionType:     get("question_type"),
 		ContentFormat:    get("content_format"),
 		QuestionText:     get("question_text"),

@@ -70,7 +70,7 @@ func Run(ctx context.Context, db *gorm.DB) error {
 			Desc:           "จำลองข้อสอบเสมือนจริงพร้อมจับเวลาและกระดาษคำตอบแบบฝน",
 			AccessType:     "free",
 			PriceAmount:    0,
-			CoverImageURL:  "https://images.unsplash.com/photo-1434030216411-0b793f4b4173",
+			CoverImageURL:  "",
 			IsFeatured:     true,
 			IsOfficial:     false,
 			TotalQuestions: 100,
@@ -83,7 +83,7 @@ func Run(ctx context.Context, db *gorm.DB) error {
 			AccessType:      "premium",
 			PriceAmount:     199,
 			SalePriceAmount: floatPtr(149),
-			CoverImageURL:   "https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8",
+			CoverImageURL:   "",
 			IsFeatured:      true,
 			IsOfficial:      false,
 			TotalQuestions:  100,
@@ -95,7 +95,7 @@ func Run(ctx context.Context, db *gorm.DB) error {
 			Desc:           "ชุดข้อสอบตำรวจ ชุดที่ 1 จำลองสนามสอบเสมือนจริง",
 			AccessType:     "premium",
 			PriceAmount:    249,
-			CoverImageURL:  "https://images.unsplash.com/photo-1516321318423-f06f85e504b3",
+			CoverImageURL:  "",
 			IsFeatured:     false,
 			IsOfficial:     false,
 			TotalQuestions: 100,
@@ -107,7 +107,7 @@ func Run(ctx context.Context, db *gorm.DB) error {
 			Desc:           "ชุดข้อสอบตำรวจ ชุดที่ 2",
 			AccessType:     "premium",
 			PriceAmount:    199,
-			CoverImageURL:  "https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8",
+			CoverImageURL:  "",
 			IsFeatured:     false,
 			IsOfficial:     false,
 			TotalQuestions: 80,
@@ -119,7 +119,7 @@ func Run(ctx context.Context, db *gorm.DB) error {
 			Desc:           "ชุดข้อสอบท้องถิ่น ชุดที่ 1 สำหรับฝึกสอบเสมือนจริง",
 			AccessType:     "free",
 			PriceAmount:    0,
-			CoverImageURL:  "https://images.unsplash.com/photo-1434030216411-0b793f4b4173",
+			CoverImageURL:  "",
 			IsFeatured:     false,
 			IsOfficial:     false,
 			TotalQuestions: 80,
@@ -131,7 +131,7 @@ func Run(ctx context.Context, db *gorm.DB) error {
 			Desc:           "จำลองข้อสอบเสมือนจริง พร้อมจับเวลาเหมือนสนามจริง",
 			AccessType:     "free",
 			PriceAmount:    0,
-			CoverImageURL:  "https://images.unsplash.com/photo-1516321318423-f06f85e504b3",
+			CoverImageURL:  "",
 			IsFeatured:     true,
 			IsOfficial:     true,
 			TotalQuestions: 20,
@@ -143,7 +143,10 @@ func Run(ctx context.Context, db *gorm.DB) error {
 
 	for _, def := range setDefs {
 		setID := uuid.New()
-		coverURL := def.CoverImageURL
+		var coverURL *string
+		if def.CoverImageURL != "" {
+			coverURL = &def.CoverImageURL
+		}
 		qCount := def.TotalQuestions
 		if qCount > questionCountPerSet {
 			qCount = questionCountPerSet
@@ -155,7 +158,7 @@ func Run(ctx context.Context, db *gorm.DB) error {
 			Code:            def.Code,
 			Title:           def.Title,
 			Description:     def.Desc,
-			CoverImageURL:   &coverURL,
+			CoverImageURL:   coverURL,
 			DurationMinutes: 120,
 			TotalQuestions:  def.TotalQuestions,
 			PassingScore:    60,

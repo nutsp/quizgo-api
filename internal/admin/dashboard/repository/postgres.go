@@ -22,6 +22,7 @@ type AdminUserMetrics struct {
 type Repository interface {
 	GetAdminUserMetrics(ctx context.Context) (*AdminUserMetrics, error)
 	GetAdminCharts(ctx context.Context) AdminCharts
+	GetAdminAttentionMetrics(ctx context.Context) AdminAttentionMetrics
 }
 
 type postgresRepository struct {

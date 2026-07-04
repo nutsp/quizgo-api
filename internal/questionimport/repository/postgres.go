@@ -5,6 +5,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -116,11 +117,21 @@ type Repository interface {
 	CreatePreview(ctx context.Context, job *domain.ImportJob, rows []domain.ImportJobRow) error
 	FindJobByID(ctx context.Context, id uuid.UUID) (*domain.ImportJob, error)
 	FindRowsByJobID(ctx context.Context, jobID uuid.UUID) ([]domain.ImportJobRow, error)
+	ListPreviewRows(ctx context.Context, jobID uuid.UUID, filter PreviewRowListFilter) ([]domain.ImportJobRow, int64, error)
 	ListJobs(ctx context.Context, filter JobListFilter) ([]domain.ImportJob, int64, error)
 	MarkImported(ctx context.Context, jobID uuid.UUID, imported, skipped, failed int) error
 	ExistsQuestionText(ctx context.Context, text string) (bool, error)
 	RunInTransaction(ctx context.Context, fn func(tx *gorm.DB) error) error
 	MarkImportedTx(tx *gorm.DB, jobID uuid.UUID, imported, skipped, failed int) error
+}
+
+type PreviewRowListFilter struct {
+	Page         int
+	Limit        int
+	Status       string
+	Search       string
+	SubjectCode  string
+	QuestionType string
 }
 
 type postgresRepository struct {
@@ -175,6 +186,59 @@ func (r *postgresRepository) FindRowsByJobID(ctx context.Context, jobID uuid.UUI
 		rows[i] = mapRowFromModel(m)
 	}
 	return rows, nil
+}
+
+func (r *postgresRepository) ListPreviewRows(
+	ctx context.Context,
+	jobID uuid.UUID,
+	filter PreviewRowListFilter,
+) ([]domain.ImportJobRow, int64, error) {
+	page, limit := pagination.Sanitize(filter.Page, filter.Limit)
+
+	q := r.db.WithContext(ctx).Model(&ImportRowModel{}).Where("import_job_id = ?", jobID)
+
+	switch filter.Status {
+	case "valid":
+		q = q.Where("valid = ?", true)
+	case "error":
+		q = q.Where("valid = ?", false)
+	case "warning":
+		q = q.Where("jsonb_array_length(warnings) > 0")
+	}
+
+	if filter.SubjectCode != "" {
+		q = q.Where("LOWER(subject_code) = ?", strings.ToLower(filter.SubjectCode))
+	}
+	if filter.QuestionType != "" {
+		q = q.Where("LOWER(question_type) = ?", strings.ToLower(filter.QuestionType))
+	}
+	if filter.Search != "" {
+		like := "%" + filter.Search + "%"
+		q = q.Where(
+			"(question_text ILIKE ? OR CAST(row_number AS TEXT) ILIKE ?)",
+			like, like,
+		)
+	}
+
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	var models []ImportRowModel
+	err := q.Order("row_number ASC").
+		Offset(pagination.Offset(page, limit)).
+		Limit(limit).
+		Find(&models).Error
+	if err != nil {
+		return nil, 0, err
+	}
+
+	rows := make([]domain.ImportJobRow, len(models))
+	for i, m := range models {
+		rows[i] = mapRowFromModel(m)
+	}
+	return rows, total, nil
 }
 
 func (r *postgresRepository) ListJobs(ctx context.Context, filter JobListFilter) ([]domain.ImportJob, int64, error) {

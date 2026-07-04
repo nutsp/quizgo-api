@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,9 +23,13 @@ import (
 	tagrepo "virtual-exam-api/internal/questiontag/repository"
 )
 
-const templateCSV = `subject_code,tags,question_text,choice_a,choice_b,choice_c,choice_d,correct_choice,explanation,difficulty,status
-law,document-regulation|official-letter,"ข้อใดเป็นหนังสือราชการภายนอก","บันทึกข้อความ","หนังสือภายนอก","หนังสือสั่งการ","หนังสือประชาสัมพันธ์","B","หนังสือภายนอกใช้สำหรับติดต่อระหว่างส่วนราชการ",medium,published
-math,,"5 + 7 เท่ากับข้อใด","10","11","12","13","C","5 + 7 = 12",easy,published
+const templateCSV = `subject_code,question_group_codes,question_type,content_format,question_text,question_image,choice_a,choice_a_image,choice_b,choice_b_image,choice_c,choice_c_image,choice_d,choice_d_image,correct_choice,explanation,explanation_image,difficulty,status
+thai,raw-01,normal,plain,"ข้อใดเป็นคำราชาศัพท์",,"เสวย",,"กิน",,"รับประทาน",,"ทาน",,A,"เสวย เป็นคำราชาศัพท์ที่ใช้กับการกิน",,easy,published
+math,math-01,math,markdown_math,"ค่าของ 1/2 + 1/4 คือข้อใด",,"1/4",,"2/4",,"3/4",,"4/4",,C,"เพราะ 1/2 = 2/4 และ 2/4 + 1/4 = 3/4",,medium,published
+math,math-01,math,markdown_math,"ค่าของ sqrt(49) คือข้อใด",,"6",,"7",,"8",,"9",,B,"sqrt(49) = 7",,easy,published
+math,math-01,math,markdown_math,"ค่าของ 2^3 คือข้อใด",,"6",,"8",,"9",,"12",,B,"2^3 = 8",,easy,published
+math,math-01,math,markdown_math,"ค่าของ $\frac{2^3}{4}$ คือข้อใด",,"1",,"2",,"4",,"8",,B,"เพราะ $2^3 = 8$ และ $\frac{8}{4} = 2$",,medium,published
+math,visual-01,image,plain,"จากภาพลูกบาศก์ เมื่อหมุนไปทางขวา 1 ครั้ง จะได้รูปใด","cube_q1.png",,"cube_a.png",,"cube_b.png",,"cube_c.png",,"cube_d.png",B,"คำตอบที่ถูกต้องคือรูป ข","cube_exp1.png",medium,draft
 `
 
 type UseCase struct {
@@ -96,11 +101,23 @@ func (uc *UseCase) Preview(ctx context.Context, adminUserID uuid.UUID, filename 
 
 	validCount := 0
 	invalidCount := 0
+	warningCount := 0
+	subjectCodes := make(map[string]struct{})
+	questionTypes := make(map[string]struct{})
 	for _, row := range previewRows {
 		if row.Valid {
 			validCount++
 		} else {
 			invalidCount++
+		}
+		if len(row.Warnings) > 0 {
+			warningCount++
+		}
+		if code := strings.TrimSpace(row.Data.SubjectCode); code != "" {
+			subjectCodes[code] = struct{}{}
+		}
+		if qt := strings.TrimSpace(row.Data.QuestionType); qt != "" {
+			questionTypes[qt] = struct{}{}
 		}
 	}
 
@@ -126,13 +143,116 @@ func (uc *UseCase) Preview(ctx context.Context, adminUserID uuid.UUID, filename 
 	}
 
 	return &domain.ImportPreviewResult{
-		ImportID:    jobID,
-		Filename:    filename,
-		TotalRows:   len(previewRows),
-		ValidRows:   validCount,
-		InvalidRows: invalidCount,
-		Rows:        previewRows,
+		ImportID: jobID,
+		Filename: filename,
+		Summary: domain.ImportPreviewSummary{
+			TotalRows:   len(previewRows),
+			ValidRows:   validCount,
+			ErrorRows:   invalidCount,
+			WarningRows: warningCount,
+		},
+		FilterOptions: domain.ImportPreviewFilterOptions{
+			SubjectCodes:  sortedKeys(subjectCodes),
+			QuestionTypes: sortedKeys(questionTypes),
+		},
 	}, nil
+}
+
+func sortedKeys(set map[string]struct{}) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+type PreviewRowListInput struct {
+	ImportID     uuid.UUID
+	Page         int
+	Limit        int
+	Status       string
+	Search       string
+	SubjectCode  string
+	QuestionType string
+}
+
+func (uc *UseCase) ListPreviewRows(ctx context.Context, adminUserID uuid.UUID, input PreviewRowListInput) (*pagination.PaginatedList[domain.ImportPreviewRow], error) {
+	if input.ImportID == uuid.Nil {
+		return nil, apperrors.ErrInvalidInput
+	}
+
+	job, err := uc.imports.FindJobByID(ctx, input.ImportID)
+	if err != nil {
+		return nil, err
+	}
+	if job == nil {
+		return nil, apperrors.ErrNotFound
+	}
+	if job.AdminUserID != adminUserID {
+		return nil, apperrors.ErrForbidden
+	}
+	if job.Status != domain.JobStatusPreview {
+		return nil, apperrors.New("IMPORT_NOT_IN_PREVIEW", "ไม่พบข้อมูลตัวอย่างการนำเข้า", 400)
+	}
+
+	filter := importrepo.PreviewRowListFilter{
+		Page:         input.Page,
+		Limit:        input.Limit,
+		Status:       input.Status,
+		Search:       input.Search,
+		SubjectCode:  input.SubjectCode,
+		QuestionType: input.QuestionType,
+	}
+	rows, total, err := uc.imports.ListPreviewRows(ctx, input.ImportID, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]domain.ImportPreviewRow, len(rows))
+	for i, row := range rows {
+		items[i] = jobRowToPreviewRow(row)
+	}
+
+	page, limit := pagination.Sanitize(input.Page, input.Limit)
+	result := pagination.NewList(items, page, limit, total)
+	return &result, nil
+}
+
+func jobRowToPreviewRow(row domain.ImportJobRow) domain.ImportPreviewRow {
+	return domain.ImportPreviewRow{
+		RowNumber: row.RowNumber,
+		Data: domain.ImportQuestionRow{
+			SubjectCode:         row.SubjectCode,
+			Tags:                row.Tags,
+			QuestionType:        row.QuestionType,
+			ContentFormat:       row.ContentFormat,
+			QuestionText:        row.QuestionText,
+			QuestionImage:       row.QuestionImage,
+			QuestionImageURL:    row.QuestionImageURL,
+			ChoiceA:             row.ChoiceA,
+			ChoiceAImage:        row.ChoiceAImage,
+			ChoiceAImageURL:     row.ChoiceAImageURL,
+			ChoiceB:             row.ChoiceB,
+			ChoiceBImage:        row.ChoiceBImage,
+			ChoiceBImageURL:     row.ChoiceBImageURL,
+			ChoiceC:             row.ChoiceC,
+			ChoiceCImage:        row.ChoiceCImage,
+			ChoiceCImageURL:     row.ChoiceCImageURL,
+			ChoiceD:             row.ChoiceD,
+			ChoiceDImage:        row.ChoiceDImage,
+			ChoiceDImageURL:     row.ChoiceDImageURL,
+			CorrectChoice:       row.CorrectChoice,
+			Explanation:         row.Explanation,
+			ExplanationImage:    row.ExplanationImage,
+			ExplanationImageURL: row.ExplanationImageURL,
+			Difficulty:          row.Difficulty,
+			Status:              row.Status,
+		},
+		Valid:    row.Valid,
+		Errors:   row.Errors,
+		Warnings: row.Warnings,
+	}
 }
 
 func (uc *UseCase) Confirm(ctx context.Context, adminUserID uuid.UUID, input domain.ImportConfirmInput) (*domain.ImportConfirmResult, error) {

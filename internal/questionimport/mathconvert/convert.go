@@ -6,12 +6,27 @@ import (
 )
 
 var (
-	reDateSlash  = regexp.MustCompile(`\d{1,2}/\d{1,2}/\d{2,4}`)
-	reSqrt       = regexp.MustCompile(`sqrt\(\s*([^)]+?)\s*\)`)
-	rePower      = regexp.MustCompile(`([a-zA-Z0-9]+)\^([a-zA-Z0-9]+)`)
-	reSimpleFrac = regexp.MustCompile(`(\d{1,3})\s*/\s*(\d{1,3})`)
-	reHasLatex   = regexp.MustCompile(`\$[^$]+\$`)
+	reDateSlash   = regexp.MustCompile(`\d{1,2}/\d{1,2}/\d{2,4}`)
+	reSqrt        = regexp.MustCompile(`sqrt\(\s*([^)]+?)\s*\)`)
+	rePower       = regexp.MustCompile(`([a-zA-Z0-9]+)\^([a-zA-Z0-9]+)`)
+	reSimpleFrac  = regexp.MustCompile(`(\d{1,3})\s*/\s*(\d{1,3})`)
+	reHasLatex    = regexp.MustCompile(`\$[^$]+\$`)
+	reStrongMath  = regexp.MustCompile(`\$|\\frac|\\sqrt|sqrt\(|\^`)
 )
+
+// HasStrongMathSignals detects conservative math markers for auto content_format.
+func HasStrongMathSignals(parts ...string) bool {
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if reStrongMath.MatchString(part) {
+			return true
+		}
+	}
+	return false
+}
 
 // ShouldConvert returns true when row is marked as math content.
 func ShouldConvert(questionType, contentFormat string) bool {
@@ -29,7 +44,7 @@ func ConvertSimpleMath(text string) string {
 	}
 
 	out := text
-	out = reSqrt.ReplaceAllString(out, `$\\sqrt{$1}$`)
+	out = reSqrt.ReplaceAllString(out, "$\\sqrt{$1}$")
 	out = rePower.ReplaceAllStringFunc(out, func(m string) string {
 		parts := rePower.FindStringSubmatch(m)
 		if len(parts) != 3 {
@@ -50,6 +65,6 @@ func convertFractions(text string) string {
 		if len(parts) != 3 {
 			return m
 		}
-		return `$\\frac{` + parts[1] + `}{` + parts[2] + `}$`
+		return "$\\frac{" + parts[1] + "}{" + parts[2] + "}$"
 	})
 }

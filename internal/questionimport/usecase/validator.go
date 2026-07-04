@@ -108,12 +108,15 @@ func validateRow(
 	}
 
 	if data.ContentFormat != "" && !qdomain.IsValidContentFormat(data.ContentFormat) {
-		errs = append(errs, "content_format ไม่ถูกต้อง")
+		errs = append(errs, "content_format ต้องเป็น plain หรือ markdown_math")
 	}
 
 	qt := strings.ToLower(strings.TrimSpace(data.QuestionType))
 	if qt != "" && qt != "normal" && qt != "math" && qt != "image" {
-		errs = append(errs, "question_type ไม่ถูกต้อง")
+		errs = append(errs, "question_type ต้องเป็น normal, math หรือ image")
+	}
+	if qt == "math" {
+		warns = append(warns, "โจทย์ประเภท math จะใช้รูปแบบสูตรคณิตและสัญลักษณ์พิเศษ")
 	}
 
 	if data.Difficulty == "" {
@@ -203,14 +206,32 @@ func normalizeImportRow(row domain.ImportQuestionRow) domain.ImportQuestionRow {
 	data.Status = strings.ToLower(strings.TrimSpace(row.Status))
 	data.Tags = strings.TrimSpace(row.Tags)
 
+	if data.QuestionType == "" {
+		data.QuestionType = "normal"
+	}
+
 	if data.ContentFormat == "" {
 		switch data.QuestionType {
 		case "math":
 			data.ContentFormat = qdomain.ContentFormatMarkdownMath
 		default:
-			data.ContentFormat = qdomain.ContentFormatPlain
+			if mathconvert.HasStrongMathSignals(
+				data.QuestionText,
+				data.ChoiceA,
+				data.ChoiceB,
+				data.ChoiceC,
+				data.ChoiceD,
+				data.Explanation,
+			) {
+				data.ContentFormat = qdomain.ContentFormatMarkdownMath
+			} else {
+				data.ContentFormat = qdomain.ContentFormatPlain
+			}
 		}
+	} else if data.QuestionType == "math" && data.ContentFormat == qdomain.ContentFormatPlain {
+		data.ContentFormat = qdomain.ContentFormatMarkdownMath
 	}
+
 	return data
 }
 

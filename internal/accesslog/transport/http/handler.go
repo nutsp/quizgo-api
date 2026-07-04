@@ -22,6 +22,7 @@ func NewHandler(admin *accessuc.AdminUseCase) *Handler {
 
 func (h *Handler) RegisterRoutes(admin *echo.Group) {
 	admin.GET("/access-logs", h.List)
+	admin.GET("/access-logs/:id", h.Get)
 }
 
 func (h *Handler) List(c echo.Context) error {
@@ -62,6 +63,21 @@ func (h *Handler) List(c echo.Context) error {
 	result, err := h.admin.List(c.Request().Context(), filter)
 	if err != nil {
 		return response.Error(c, err)
+	}
+	return response.JSON(c, 200, result)
+}
+
+func (h *Handler) Get(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return response.Error(c, apperrors.ErrInvalidUUID)
+	}
+	result, err := h.admin.Get(c.Request().Context(), id)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	if result == nil {
+		return response.Error(c, apperrors.ErrNotFound)
 	}
 	return response.JSON(c, 200, result)
 }

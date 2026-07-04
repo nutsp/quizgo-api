@@ -26,6 +26,7 @@ var RequiredColumns = []string{
 
 var OptionalColumns = []string{
 	"tags",
+	"question_group_codes",
 	"explanation",
 	"difficulty",
 	"status",
@@ -76,13 +77,32 @@ type ImportPreviewRow struct {
 	Warnings  []string          `json:"warnings"`
 }
 
+type ImportPreviewSummary struct {
+	TotalRows   int `json:"total_rows"`
+	ValidRows   int `json:"valid_rows"`
+	ErrorRows   int `json:"error_rows"`
+	WarningRows int `json:"warning_rows"`
+}
+
+type ImportPreviewFilterOptions struct {
+	SubjectCodes  []string `json:"subject_codes"`
+	QuestionTypes []string `json:"question_types"`
+}
+
 type ImportPreviewResult struct {
-	ImportID    uuid.UUID          `json:"import_id"`
-	Filename    string             `json:"filename"`
-	TotalRows   int                `json:"total_rows"`
-	ValidRows   int                `json:"valid_rows"`
-	InvalidRows int                `json:"invalid_rows"`
-	Rows        []ImportPreviewRow `json:"rows"`
+	ImportID      uuid.UUID                  `json:"import_id"`
+	Filename      string                     `json:"filename"`
+	Summary       ImportPreviewSummary       `json:"summary"`
+	FilterOptions ImportPreviewFilterOptions `json:"filter_options"`
+}
+
+type PreviewRowListFilter struct {
+	Page         int
+	Limit        int
+	Status       string
+	Search       string
+	SubjectCode  string
+	QuestionType string
 }
 
 type ImportConfirmInput struct {

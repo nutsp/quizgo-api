@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS idx_question_import_rows_job_valid;
+DROP INDEX IF EXISTS idx_question_import_rows_job_row_number;

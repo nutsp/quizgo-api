@@ -56,14 +56,15 @@ type DashboardUsageMetrics struct {
 }
 
 type DashboardResponse struct {
-	Content         DashboardContentMetrics        `json:"content"`
-	Usage           DashboardUsageMetrics          `json:"usage"`
-	Users           dashboardrepo.AdminUserMetrics `json:"users"`
-	Charts          dashboardrepo.AdminCharts      `json:"charts"`
-	PremiumExamSets int64                          `json:"premium_exam_sets"`
-	FreeExamSets    int64                          `json:"free_exam_sets"`
-	LatestExamSets  []DashboardLatestExamSet       `json:"latest_exam_sets"`
-	LatestQuestions []DashboardLatestQuestion      `json:"latest_questions"`
+	Content         DashboardContentMetrics           `json:"content"`
+	Usage           DashboardUsageMetrics             `json:"usage"`
+	Users           dashboardrepo.AdminUserMetrics    `json:"users"`
+	Charts          dashboardrepo.AdminCharts         `json:"charts"`
+	Attention       dashboardrepo.AdminAttentionMetrics `json:"attention"`
+	PremiumExamSets int64                             `json:"premium_exam_sets"`
+	FreeExamSets    int64                             `json:"free_exam_sets"`
+	LatestExamSets  []DashboardLatestExamSet          `json:"latest_exam_sets"`
+	LatestQuestions []DashboardLatestQuestion         `json:"latest_questions"`
 }
 
 func (uc *DashboardUseCase) Get(ctx context.Context) (*DashboardResponse, error) {
@@ -154,6 +155,7 @@ func (uc *DashboardUseCase) Get(ctx context.Context) (*DashboardResponse, error)
 	}
 
 	charts := uc.userRepo.GetAdminCharts(ctx)
+	attention := uc.userRepo.GetAdminAttentionMetrics(ctx)
 
 	return &DashboardResponse{
 		Content: DashboardContentMetrics{
@@ -170,6 +172,7 @@ func (uc *DashboardUseCase) Get(ctx context.Context) (*DashboardResponse, error)
 		},
 		Users:           *userMetrics,
 		Charts:          charts,
+		Attention:       attention,
 		PremiumExamSets: premiumSets,
 		FreeExamSets:    freeSets,
 		LatestExamSets:  latestSetResp,

@@ -71,6 +71,18 @@ func NewAdminUseCase(repo accessrepo.Repository) *AdminUseCase {
 	return &AdminUseCase{repo: repo}
 }
 
+func (uc *AdminUseCase) Get(ctx context.Context, id uuid.UUID) (*AccessLogResponse, error) {
+	item, err := uc.repo.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if item == nil {
+		return nil, nil
+	}
+	resp := toResponse(*item)
+	return &resp, nil
+}
+
 func (uc *AdminUseCase) List(ctx context.Context, filter accessrepo.AccessLogFilter) (*AccessLogListResponse, error) {
 	items, total, err := uc.repo.List(ctx, filter)
 	if err != nil {

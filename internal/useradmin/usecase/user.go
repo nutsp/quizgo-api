@@ -58,6 +58,7 @@ type UserResponse struct {
 	Status        string               `json:"status"`
 	LastLoginAt   *string              `json:"last_login_at,omitempty"`
 	CreatedAt     string               `json:"created_at"`
+	UpdatedAt     string               `json:"updated_at"`
 	AccessSummary AccessSummaryResponse `json:"access_summary"`
 }
 
@@ -387,6 +388,7 @@ func toUserResponse(u userdomain.User, summary entdomain.AccessSummary) UserResp
 		Status:        u.Status,
 		LastLoginAt:   lastLogin,
 		CreatedAt:     u.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:     u.UpdatedAt.UTC().Format(time.RFC3339),
 		AccessSummary: toAccessSummaryResponse(summary),
 	}
 }

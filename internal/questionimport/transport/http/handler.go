@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"virtual-exam-api/internal/apperrors"
 	audituc "virtual-exam-api/internal/auditlog/usecase"
@@ -31,6 +32,7 @@ func (h *Handler) RegisterRoutes(g *echo.Group, authMiddleware echo.MiddlewareFu
 	admin.GET("/questions/import/template", h.DownloadTemplate)
 	admin.GET("/questions/import/jobs", h.ListJobs)
 	admin.POST("/questions/import/preview", h.Preview)
+	admin.GET("/questions/import/preview/:importId/rows", h.ListPreviewRows)
 	admin.POST("/questions/import/confirm", h.Confirm)
 }
 
@@ -99,6 +101,35 @@ func (h *Handler) Preview(c echo.Context) error {
 		return response.Error(c, err)
 	}
 
+	return response.JSON(c, http.StatusOK, result)
+}
+
+func (h *Handler) ListPreviewRows(c echo.Context) error {
+	adminUserID, err := middleware.RequireUserID(c)
+	if err != nil {
+		return response.Error(c, err)
+	}
+
+	importID, err := uuid.Parse(c.Param("importId"))
+	if err != nil {
+		return response.Error(c, apperrors.ErrInvalidInput)
+	}
+
+	pq := pagination.ParsePagination(c)
+	input := importuc.PreviewRowListInput{
+		ImportID:     importID,
+		Page:         pq.Page,
+		Limit:        pq.Limit,
+		Status:       c.QueryParam("status"),
+		Search:       c.QueryParam("search"),
+		SubjectCode:  c.QueryParam("subject_code"),
+		QuestionType: c.QueryParam("question_type"),
+	}
+
+	result, err := h.uc.ListPreviewRows(c.Request().Context(), adminUserID, input)
+	if err != nil {
+		return response.Error(c, err)
+	}
 	return response.JSON(c, http.StatusOK, result)
 }
 

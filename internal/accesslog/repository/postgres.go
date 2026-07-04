@@ -49,6 +49,7 @@ var accessLogSortColumns = map[string]string{
 type Repository interface {
 	Create(ctx context.Context, log *domain.AccessLog) error
 	List(ctx context.Context, filter AccessLogFilter) ([]domain.AccessLog, int64, error)
+	FindByID(ctx context.Context, id uuid.UUID) (*domain.AccessLog, error)
 	ListRecentByUserID(ctx context.Context, userID uuid.UUID, limit int) ([]domain.AccessLog, error)
 }
 
@@ -113,6 +114,18 @@ func (r *postgresRepository) List(ctx context.Context, filter AccessLogFilter) (
 		items[i] = toDomain(&models[i])
 	}
 	return items, total, nil
+}
+
+func (r *postgresRepository) FindByID(ctx context.Context, id uuid.UUID) (*domain.AccessLog, error) {
+	var model AccessLogModel
+	if err := r.db.WithContext(ctx).First(&model, "id = ?", id).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	log := toDomain(&model)
+	return &log, nil
 }
 
 func (r *postgresRepository) ListRecentByUserID(ctx context.Context, userID uuid.UUID, limit int) ([]domain.AccessLog, error) {
