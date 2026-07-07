@@ -11,7 +11,7 @@ func TestAnswerSheetLayoutConfig_Validate(t *testing.T) {
 	cases := []AnswerSheetLayoutConfig{
 		{BlockColumns: 0, QuestionsPerBlock: 10, ChoiceLabelStyle: ChoiceLabelThai},
 		{BlockColumns: 5, QuestionsPerBlock: 10, ChoiceLabelStyle: ChoiceLabelThai},
-		{BlockColumns: 2, QuestionsPerBlock: 4, ChoiceLabelStyle: ChoiceLabelThai},
+		{BlockColumns: 2, QuestionsPerBlock: 0, ChoiceLabelStyle: ChoiceLabelThai},
 		{BlockColumns: 2, QuestionsPerBlock: 51, ChoiceLabelStyle: ChoiceLabelThai},
 		{BlockColumns: 2, QuestionsPerBlock: 10, ChoiceLabelStyle: "invalid"},
 	}

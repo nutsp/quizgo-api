@@ -29,6 +29,7 @@ const (
 	ReasonExamNotAvailable           = "EXAM_NOT_AVAILABLE"
 
 	AccessSourceFree           = "free"
+	AccessSourceTrial          = "trial"
 	AccessSourceSinglePurchase = "single_purchase"
 	AccessSourcePremium        = "premium"
 	AccessSourcePrivateGrant   = "private_grant"

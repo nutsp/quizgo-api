@@ -58,6 +58,7 @@ type TagAdminRepository interface {
 	FindActiveByCodes(ctx context.Context, codes []string) ([]domain.QuestionTag, error)
 	Create(ctx context.Context, tag *domain.QuestionTag) error
 	Update(ctx context.Context, tag *domain.QuestionTag) error
+	UpdateIsActive(ctx context.Context, id uuid.UUID, isActive bool) error
 	Delete(ctx context.Context, id uuid.UUID) error
 	Deactivate(ctx context.Context, id uuid.UUID) error
 	CountQuestions(ctx context.Context, tagID uuid.UUID) (int64, error)
@@ -193,6 +194,13 @@ func (r *tagAdminRepository) Update(ctx context.Context, tag *domain.QuestionTag
 		"color":       tag.Color,
 		"is_active":   tag.IsActive,
 		"updated_at":  tag.UpdatedAt,
+	}).Error
+}
+
+func (r *tagAdminRepository) UpdateIsActive(ctx context.Context, id uuid.UUID, isActive bool) error {
+	return r.db.WithContext(ctx).Model(&QuestionTagModel{}).Where("id = ?", id).Updates(map[string]any{
+		"is_active":  isActive,
+		"updated_at": time.Now().UTC(),
 	}).Error
 }
 

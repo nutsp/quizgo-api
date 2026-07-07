@@ -35,6 +35,7 @@ type AdminRepository interface {
 	List(ctx context.Context, filter AdminFilter) ([]domain.ExamTrack, int64, error)
 	Create(ctx context.Context, track *domain.ExamTrack) error
 	Update(ctx context.Context, track *domain.ExamTrack) error
+	UpdateIsActive(ctx context.Context, id uuid.UUID, isActive bool) error
 	Delete(ctx context.Context, id uuid.UUID) (deactivated bool, err error)
 	CountExamSets(ctx context.Context, trackID uuid.UUID) (int64, error)
 	RefreshCounters(ctx context.Context, trackID uuid.UUID) error
@@ -105,6 +106,13 @@ func (r *adminRepository) Update(ctx context.Context, track *domain.ExamTrack) e
 		"cover_image_url": track.CoverImageURL,
 		"is_active":       track.IsActive,
 		"updated_at":      track.UpdatedAt,
+	}).Error
+}
+
+func (r *adminRepository) UpdateIsActive(ctx context.Context, id uuid.UUID, isActive bool) error {
+	return r.db.WithContext(ctx).Model(&ExamTrackModel{}).Where("id = ?", id).Updates(map[string]any{
+		"is_active":  isActive,
+		"updated_at": time.Now().UTC(),
 	}).Error
 }
 

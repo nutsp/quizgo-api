@@ -60,6 +60,7 @@ type Repository interface {
 	FindByCode(ctx context.Context, code string) (*domain.ExamSet, error)
 	FindByID(ctx context.Context, id uuid.UUID) (*domain.ExamSet, error)
 	ListPopular(ctx context.Context, limit int) ([]domain.ExamSet, error)
+	AggregateFilterOptions(ctx context.Context, scope domain.VisibilityScope) (*domain.FilterOptionsResponse, error)
 }
 
 type postgresRepository struct {
@@ -85,27 +86,11 @@ func (r *postgresRepository) List(ctx context.Context, filter domain.ListFilter)
 
 	q := r.db.WithContext(ctx).Model(&ExamSetModel{}).Preload("ExamTrack")
 	if filter.OnlyPublished {
-		q = q.Where("exam_sets.status = ? AND exam_sets.is_active = ? AND exam_sets.access_type <> ?",
-			domain.StatusPublished, true, domain.AccessPrivate)
+		q = applyPublishedVisibility(q, filter.Visibility)
 	} else if filter.OnlyActive {
 		q = q.Where("exam_sets.is_active = ?", true)
 	}
-	if filter.TrackID != uuid.Nil {
-		q = q.Where("exam_track_id = ?", filter.TrackID)
-	}
-	if filter.AccessType != "" {
-		q = q.Where("access_type = ?", filter.AccessType)
-	}
-	if filter.Difficulty != "" {
-		q = q.Where("difficulty = ?", filter.Difficulty)
-	}
-	if filter.Mode != "" {
-		q = q.Where("mode = ?", filter.Mode)
-	}
-	if filter.Query != "" {
-		like := "%" + filter.Query + "%"
-		q = q.Where("title ILIKE ? OR description ILIKE ? OR code ILIKE ?", like, like, like)
-	}
+	q = applyListFilters(q, filter)
 
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
@@ -114,7 +99,7 @@ func (r *postgresRepository) List(ctx context.Context, filter domain.ListFilter)
 
 	var models []ExamSetModel
 	offset := (page - 1) * limit
-	err := q.Order("created_at DESC").Offset(offset).Limit(limit).Find(&models).Error
+	err := q.Order(listOrderClause(filter.Sort)).Offset(offset).Limit(limit).Find(&models).Error
 	if err != nil {
 		return nil, err
 	}

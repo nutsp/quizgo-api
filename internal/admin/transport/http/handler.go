@@ -6,20 +6,23 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	dashboarduc "virtual-exam-api/internal/admin/dashboard/usecase"
-	audituc "virtual-exam-api/internal/auditlog/usecase"
+	admindomain "virtual-exam-api/internal/admin/domain"
 	"virtual-exam-api/internal/apperrors"
+	audituc "virtual-exam-api/internal/auditlog/usecase"
 	"virtual-exam-api/internal/common/pagination"
+	examsetrepo "virtual-exam-api/internal/examset/repository"
 	examsetuc "virtual-exam-api/internal/examset/usecase"
+	esqhttp "virtual-exam-api/internal/examsetquestion/transport/http"
 	trackrepo "virtual-exam-api/internal/examtrack/repository"
 	trackuc "virtual-exam-api/internal/examtrack/usecase"
 	"virtual-exam-api/internal/middleware"
 	questionrepo "virtual-exam-api/internal/question/repository"
 	questionuc "virtual-exam-api/internal/question/usecase"
 	"virtual-exam-api/internal/response"
+	settingsdomain "virtual-exam-api/internal/settings/domain"
+	settingsuc "virtual-exam-api/internal/settings/usecase"
 	subjectrepo "virtual-exam-api/internal/subject/repository"
 	subjectuc "virtual-exam-api/internal/subject/usecase"
-	examsetrepo "virtual-exam-api/internal/examset/repository"
-	esqhttp "virtual-exam-api/internal/examsetquestion/transport/http"
 	userrepo "virtual-exam-api/internal/user/repository"
 )
 
@@ -30,6 +33,7 @@ type Handler struct {
 	subjects         *subjectuc.SubjectUseCase
 	questions        *questionuc.AdminUseCase
 	examSetQuestions *esqhttp.Handler
+	settings         *settingsuc.UseCase
 	audit            *audituc.Logger
 	users            userrepo.Repository
 }
@@ -41,6 +45,7 @@ func NewHandler(
 	subjects *subjectuc.SubjectUseCase,
 	questions *questionuc.AdminUseCase,
 	examSetQuestions *esqhttp.Handler,
+	settings *settingsuc.UseCase,
 	audit *audituc.Logger,
 	users userrepo.Repository,
 ) *Handler {
@@ -51,6 +56,7 @@ func NewHandler(
 		subjects:         subjects,
 		questions:        questions,
 		examSetQuestions: examSetQuestions,
+		settings:         settings,
 		audit:            audit,
 		users:            users,
 	}
@@ -59,11 +65,14 @@ func NewHandler(
 func (h *Handler) RegisterRoutes(g *echo.Group, authMiddleware echo.MiddlewareFunc, adminMiddleware echo.MiddlewareFunc) {
 	admin := g.Group("/admin", authMiddleware, adminMiddleware)
 	admin.GET("/dashboard", h.Dashboard)
+	admin.GET("/settings/omr", h.GetOMRSettings)
+	admin.PUT("/settings/omr", h.UpdateOMRSettings)
 
 	admin.GET("/exam-tracks", h.ListTracks)
 	admin.POST("/exam-tracks", h.CreateTrack)
 	admin.GET("/exam-tracks/:id", h.GetTrack)
 	admin.PUT("/exam-tracks/:id", h.UpdateTrack)
+	admin.PATCH("/exam-tracks/:id/status", h.UpdateTrackStatus)
 	admin.DELETE("/exam-tracks/:id", h.DeleteTrack)
 
 	admin.GET("/exam-sets", h.ListSets)
@@ -75,6 +84,7 @@ func (h *Handler) RegisterRoutes(g *echo.Group, authMiddleware echo.MiddlewareFu
 	admin.POST("/exam-sets/:id/archive", h.ArchiveSet)
 	admin.GET("/exam-sets/:id", h.GetSet)
 	admin.PUT("/exam-sets/:id", h.UpdateSet)
+	admin.PATCH("/exam-sets/:id/status", h.UpdateSetStatus)
 	admin.DELETE("/exam-sets/:id", h.DeleteSet)
 
 	if h.examSetQuestions != nil {
@@ -91,7 +101,36 @@ func (h *Handler) RegisterRoutes(g *echo.Group, authMiddleware echo.MiddlewareFu
 	admin.POST("/questions", h.CreateQuestion)
 	admin.GET("/questions/:id", h.GetQuestion)
 	admin.PUT("/questions/:id", h.UpdateQuestion)
+	admin.PATCH("/questions/:id/status", h.UpdateQuestionStatus)
 	admin.DELETE("/questions/:id", h.DeleteQuestion)
+}
+
+func (h *Handler) GetOMRSettings(c echo.Context) error {
+	if h.settings == nil {
+		return response.JSON(c, 200, settingsdomain.DefaultOMRAnswerSheetSettings())
+	}
+	result, err := h.settings.GetOMR(c.Request().Context())
+	if err != nil {
+		return response.Error(c, err)
+	}
+	return response.JSON(c, 200, result)
+}
+
+func (h *Handler) UpdateOMRSettings(c echo.Context) error {
+	if h.settings == nil {
+		return response.Error(c, apperrors.ErrNotFound)
+	}
+	before, _ := h.settings.GetOMR(c.Request().Context())
+	var input settingsdomain.OMRAnswerSheetSettings
+	if err := c.Bind(&input); err != nil {
+		return response.Error(c, apperrors.ErrInvalidInput)
+	}
+	result, err := h.settings.UpdateOMR(c.Request().Context(), input)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	h.logAudit(c, "settings.omr.update", "settings", nil, "กระดาษคำตอบ OMR", before, result)
+	return response.JSON(c, 200, result)
 }
 
 func (h *Handler) Dashboard(c echo.Context) error {
@@ -158,6 +197,29 @@ func (h *Handler) UpdateTrack(c echo.Context) error {
 	result, err := h.tracks.Update(c.Request().Context(), id, input)
 	if err != nil {
 		return response.Error(c, err)
+	}
+	return response.JSON(c, 200, result)
+}
+
+func (h *Handler) UpdateTrackStatus(c echo.Context) error {
+	id, err := parseUUID(c.Param("id"))
+	if err != nil {
+		return response.Error(c, err)
+	}
+	before, _ := h.tracks.Get(c.Request().Context(), id)
+	var body admindomain.UpdateActiveStatusRequest
+	if err := c.Bind(&body); err != nil {
+		return response.Error(c, apperrors.ErrInvalidInput)
+	}
+	result, err := h.tracks.UpdateActiveStatus(c.Request().Context(), id, body.IsActive)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	if before != nil {
+		h.logAudit(c, "exam_track.status_update", "exam_track", &id, before.Name,
+			map[string]any{"is_active": before.IsActive},
+			map[string]any{"is_active": body.IsActive},
+		)
 	}
 	return response.JSON(c, 200, result)
 }
@@ -250,6 +312,29 @@ func (h *Handler) UpdateSet(c echo.Context) error {
 		h.logAudit(c, "exam_set.access_config_update", "exam_set", &id, result.Title,
 			map[string]any{"access_type": before.AccessType, "price_amount": before.PriceAmount},
 			map[string]any{"access_type": result.AccessType, "price_amount": result.PriceAmount},
+		)
+	}
+	return response.JSON(c, 200, result)
+}
+
+func (h *Handler) UpdateSetStatus(c echo.Context) error {
+	id, err := parseUUID(c.Param("id"))
+	if err != nil {
+		return response.Error(c, err)
+	}
+	before, _ := h.sets.Get(c.Request().Context(), id)
+	var body admindomain.UpdateActiveStatusRequest
+	if err := c.Bind(&body); err != nil {
+		return response.Error(c, apperrors.ErrInvalidInput)
+	}
+	result, err := h.sets.UpdateActiveStatus(c.Request().Context(), id, body.IsActive)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	if before != nil {
+		h.logAudit(c, "exam_set.status_update", "exam_set", &id, before.Title,
+			map[string]any{"is_active": before.IsActive},
+			map[string]any{"is_active": body.IsActive},
 		)
 	}
 	return response.JSON(c, 200, result)
@@ -477,6 +562,33 @@ func (h *Handler) UpdateQuestion(c echo.Context) error {
 		name = result.QuestionText
 	}
 	h.logAudit(c, "question.update", "question", &id, name, before, result)
+	return response.JSON(c, 200, result)
+}
+
+func (h *Handler) UpdateQuestionStatus(c echo.Context) error {
+	id, err := parseUUID(c.Param("id"))
+	if err != nil {
+		return response.Error(c, err)
+	}
+	before, _ := h.questions.GetQuestion(c.Request().Context(), id)
+	var body admindomain.UpdateActiveStatusRequest
+	if err := c.Bind(&body); err != nil {
+		return response.Error(c, apperrors.ErrInvalidInput)
+	}
+	result, err := h.questions.UpdateActiveStatus(c.Request().Context(), id, body.IsActive)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	if before != nil {
+		name := before.QuestionPreview
+		if name == "" {
+			name = before.QuestionText
+		}
+		h.logAudit(c, "question.status_update", "question", &id, name,
+			map[string]any{"is_active": before.IsActive},
+			map[string]any{"is_active": body.IsActive},
+		)
+	}
 	return response.JSON(c, 200, result)
 }
 

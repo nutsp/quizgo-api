@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 	"virtual-exam-api/internal/apperrors"
 	"virtual-exam-api/internal/cache"
+	admindomain "virtual-exam-api/internal/admin/domain"
 	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/examtrack/domain"
 	trackrepo "virtual-exam-api/internal/examtrack/repository"
@@ -155,6 +156,34 @@ func (uc *AdminUseCase) Delete(ctx context.Context, id uuid.UUID) (deactivated b
 		uc.invalidator.OnExamTrackChanged(ctx)
 	}
 	return deactivated, err
+}
+
+func (uc *AdminUseCase) UpdateActiveStatus(ctx context.Context, id uuid.UUID, isActive bool) (*admindomain.ActiveStatusResponse, error) {
+	track, err := uc.reads.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if track == nil {
+		return nil, apperrors.ErrExamTrackNotFound
+	}
+	if err := uc.tracks.UpdateIsActive(ctx, id, isActive); err != nil {
+		return nil, err
+	}
+	updated, err := uc.reads.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if updated == nil {
+		return nil, apperrors.ErrExamTrackNotFound
+	}
+	if uc.invalidator != nil {
+		uc.invalidator.OnExamTrackChanged(ctx)
+	}
+	return &admindomain.ActiveStatusResponse{
+		ID:        id.String(),
+		IsActive:  isActive,
+		UpdatedAt: updated.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+	}, nil
 }
 
 func toTrackAdminResponse(t domain.ExamTrack) TrackAdminResponse {

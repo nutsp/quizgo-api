@@ -190,6 +190,12 @@ func normalizeImportRow(row domain.ImportQuestionRow) domain.ImportQuestionRow {
 	data.SubjectCode = strings.ToLower(strings.TrimSpace(row.SubjectCode))
 	data.QuestionType = strings.ToLower(strings.TrimSpace(row.QuestionType))
 	data.ContentFormat = strings.ToLower(strings.TrimSpace(row.ContentFormat))
+	if data.QuestionType == "text" {
+		data.QuestionType = "normal"
+	}
+	if data.ContentFormat == "plain_text" {
+		data.ContentFormat = qdomain.ContentFormatPlain
+	}
 	data.QuestionText = strings.TrimSpace(row.QuestionText)
 	data.QuestionImage = strings.TrimSpace(row.QuestionImage)
 	data.ChoiceA = strings.TrimSpace(row.ChoiceA)

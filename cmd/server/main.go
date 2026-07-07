@@ -11,62 +11,64 @@ import (
 
 	"github.com/labstack/echo/v4"
 	echomw "github.com/labstack/echo/v4/middleware"
-	authhttp "virtual-exam-api/internal/auth/transport/http"
-	authuc "virtual-exam-api/internal/auth/usecase"
-	oauthpkg "virtual-exam-api/internal/auth/oauth"
-	oauthrepo "virtual-exam-api/internal/auth/oauth/repository"
-	"virtual-exam-api/internal/config"
-	"virtual-exam-api/internal/cache"
-	"virtual-exam-api/internal/database"
-	attempthttp "virtual-exam-api/internal/examattempt/transport/http"
-	attemptrepo "virtual-exam-api/internal/examattempt/repository"
-	attemptuc "virtual-exam-api/internal/examattempt/usecase"
-	entrepo "virtual-exam-api/internal/entitlement/repository"
-	enthttp "virtual-exam-api/internal/entitlement/transport/http"
-	entuc "virtual-exam-api/internal/entitlement/usecase"
-	examsethttp "virtual-exam-api/internal/examset/transport/http"
-	examsetrepo "virtual-exam-api/internal/examset/repository"
-	examsetuc "virtual-exam-api/internal/examset/usecase"
-	trackhttp "virtual-exam-api/internal/examtrack/transport/http"
-	trackrepo "virtual-exam-api/internal/examtrack/repository"
-	trackuc "virtual-exam-api/internal/examtrack/usecase"
-	homehttp "virtual-exam-api/internal/home/transport/http"
-	homeuc "virtual-exam-api/internal/home/usecase"
-	"virtual-exam-api/internal/middleware"
-	questionrepo "virtual-exam-api/internal/question/repository"
-	questionuc "virtual-exam-api/internal/question/usecase"
-	subjectrepo "virtual-exam-api/internal/subject/repository"
-	subjectuc "virtual-exam-api/internal/subject/usecase"
-	adminhttp "virtual-exam-api/internal/admin/transport/http"
-	dashboarduc "virtual-exam-api/internal/admin/dashboard/usecase"
 	accessrepo "virtual-exam-api/internal/accesslog/repository"
 	accesshttp "virtual-exam-api/internal/accesslog/transport/http"
 	accessuc "virtual-exam-api/internal/accesslog/usecase"
+	dashboarduc "virtual-exam-api/internal/admin/dashboard/usecase"
+	adminhttp "virtual-exam-api/internal/admin/transport/http"
 	auditrepo "virtual-exam-api/internal/auditlog/repository"
 	audithttp "virtual-exam-api/internal/auditlog/transport/http"
 	audituc "virtual-exam-api/internal/auditlog/usecase"
+	oauthpkg "virtual-exam-api/internal/auth/oauth"
+	oauthrepo "virtual-exam-api/internal/auth/oauth/repository"
+	authhttp "virtual-exam-api/internal/auth/transport/http"
+	authuc "virtual-exam-api/internal/auth/usecase"
+	"virtual-exam-api/internal/cache"
+	"virtual-exam-api/internal/config"
+	"virtual-exam-api/internal/database"
+	entrepo "virtual-exam-api/internal/entitlement/repository"
+	enthttp "virtual-exam-api/internal/entitlement/transport/http"
+	entuc "virtual-exam-api/internal/entitlement/usecase"
+	attemptrepo "virtual-exam-api/internal/examattempt/repository"
+	attempthttp "virtual-exam-api/internal/examattempt/transport/http"
+	attemptuc "virtual-exam-api/internal/examattempt/usecase"
+	examsetrepo "virtual-exam-api/internal/examset/repository"
+	examsethttp "virtual-exam-api/internal/examset/transport/http"
+	examsetuc "virtual-exam-api/internal/examset/usecase"
 	esqrepo "virtual-exam-api/internal/examsetquestion/repository"
-	esquc "virtual-exam-api/internal/examsetquestion/usecase"
 	esqhttp "virtual-exam-api/internal/examsetquestion/transport/http"
+	esquc "virtual-exam-api/internal/examsetquestion/usecase"
+	trackrepo "virtual-exam-api/internal/examtrack/repository"
+	trackhttp "virtual-exam-api/internal/examtrack/transport/http"
 	trackadminuc "virtual-exam-api/internal/examtrack/usecase"
-	importhttp "virtual-exam-api/internal/questionimport/transport/http"
-	importrepo "virtual-exam-api/internal/questionimport/repository"
-	importuc "virtual-exam-api/internal/questionimport/usecase"
-	tagrepo "virtual-exam-api/internal/questiontag/repository"
-	taguc "virtual-exam-api/internal/questiontag/usecase"
-	taghttp "virtual-exam-api/internal/questiontag/transport/http"
+	trackuc "virtual-exam-api/internal/examtrack/usecase"
+	homehttp "virtual-exam-api/internal/home/transport/http"
+	homeuc "virtual-exam-api/internal/home/usecase"
 	leaderboardrepo "virtual-exam-api/internal/leaderboard/repository"
 	leaderboardhttp "virtual-exam-api/internal/leaderboard/transport/http"
 	leaderboarduc "virtual-exam-api/internal/leaderboard/usecase"
-	mediahttp "virtual-exam-api/internal/media/transport/http"
 	"virtual-exam-api/internal/media/storage"
+	mediahttp "virtual-exam-api/internal/media/transport/http"
+	"virtual-exam-api/internal/middleware"
 	profilehttp "virtual-exam-api/internal/profile/transport/http"
 	profileuc "virtual-exam-api/internal/profile/usecase"
+	questionrepo "virtual-exam-api/internal/question/repository"
+	questionuc "virtual-exam-api/internal/question/usecase"
+	importrepo "virtual-exam-api/internal/questionimport/repository"
+	importhttp "virtual-exam-api/internal/questionimport/transport/http"
+	importuc "virtual-exam-api/internal/questionimport/usecase"
+	tagrepo "virtual-exam-api/internal/questiontag/repository"
+	taghttp "virtual-exam-api/internal/questiontag/transport/http"
+	taguc "virtual-exam-api/internal/questiontag/usecase"
+	redisclient "virtual-exam-api/internal/redis"
 	resultrepo "virtual-exam-api/internal/result/repository"
 	resulthttp "virtual-exam-api/internal/result/transport/http"
 	resultuc "virtual-exam-api/internal/result/usecase"
-	redisclient "virtual-exam-api/internal/redis"
 	scoringuc "virtual-exam-api/internal/scoring/usecase"
+	settingsrepo "virtual-exam-api/internal/settings/repository"
+	settingsuc "virtual-exam-api/internal/settings/usecase"
+	subjectrepo "virtual-exam-api/internal/subject/repository"
+	subjectuc "virtual-exam-api/internal/subject/usecase"
 	userrepo "virtual-exam-api/internal/user/repository"
 	useradminrepo "virtual-exam-api/internal/useradmin/repository"
 	useradminhttp "virtual-exam-api/internal/useradmin/transport/http"
@@ -104,6 +106,7 @@ func main() {
 			&tagrepo.QuestionTagModel{},
 			&tagrepo.QuestionTagMappingModel{},
 			&entrepo.EntitlementModel{},
+			&settingsrepo.SystemSettingModel{},
 		)
 	}
 
@@ -131,6 +134,7 @@ func main() {
 	questionRepository := questionrepo.NewPostgresRepository(db)
 	attemptRepository := attemptrepo.NewPostgresRepository(db)
 	attemptCache := attemptrepo.NewRedisRepository(rdb.Runtime)
+	settingsRepository := settingsrepo.NewPostgresRepository(db)
 
 	authUseCase := authuc.NewAuthUseCase(userRepository, cfg)
 	oauthRepository := oauthrepo.NewPostgresRepository(db)
@@ -138,6 +142,7 @@ func main() {
 	entitlementRepository := entrepo.NewPostgresRepository(db)
 	entitlementUseCase := entuc.NewUseCaseWithAttempts(entitlementRepository, examSetRepository, userRepository, attemptRepository, userCache, cacheInvalidator)
 	trackUseCase := trackuc.NewExamTrackUseCase(trackRepository, examSetRepository, contentCache)
+	settingsUseCase := settingsuc.NewUseCase(settingsRepository, contentCache)
 	examSetUseCase := examsetuc.NewExamSetUseCaseWithAttempts(examSetRepository, questionRepository, entitlementUseCase, attemptRepository, contentCache)
 	scoringUseCase := scoringuc.NewScoringUseCase()
 	attemptUseCase := attemptuc.NewExamAttemptUseCase(
@@ -150,6 +155,7 @@ func main() {
 		resultCache,
 		runtimeLocks,
 		cacheInvalidator,
+		settingsUseCase,
 	)
 	homeUseCase := homeuc.NewHomeUseCase(trackRepository, examSetRepository, attemptRepository, entitlementUseCase, contentCache)
 
@@ -189,7 +195,7 @@ func main() {
 	examSetAdminUC := examsetuc.NewAdminUseCase(examSetAdminRepo, examSetRepository, trackRepository, trackAdminRepo, setQuestionAdminRepo, cacheInvalidator)
 	subjectAdminUC := subjectuc.NewSubjectUseCase(subjectAdminRepo)
 	tagAdminUC := taguc.NewTagUseCase(tagAdminRepo)
-	questionAdminUC := questionuc.NewAdminUseCase(questionAdminRepo, setQuestionAdminRepo, subjectAdminRepo, tagAdminUC, examSetRepository, examSetAdminRepo, trackAdminRepo)
+	questionAdminUC := questionuc.NewAdminUseCase(questionAdminRepo, setQuestionAdminRepo, subjectAdminRepo, tagAdminUC, examSetRepository, examSetAdminRepo, trackAdminRepo, cacheInvalidator)
 	dashboardUC := dashboarduc.NewDashboardUseCase(db)
 
 	examSetQuestionRepo := esqrepo.NewPostgresRepository(db)
@@ -226,7 +232,7 @@ func main() {
 
 	importhttp.NewHandler(importUseCase, auditLogger, userRepository).
 		RegisterRoutes(api, authMiddleware, middleware.AdminOnly())
-	adminhttp.NewHandler(dashboardUC, trackAdminUC, examSetAdminUC, subjectAdminUC, questionAdminUC, examSetQuestionHandler, auditLogger, userRepository).
+	adminhttp.NewHandler(dashboardUC, trackAdminUC, examSetAdminUC, subjectAdminUC, questionAdminUC, examSetQuestionHandler, settingsUseCase, auditLogger, userRepository).
 		RegisterRoutes(api, authMiddleware, middleware.AdminOnly())
 	mediahttp.NewMediaHandler(uploadStore).RegisterRoutes(adminRoute)
 

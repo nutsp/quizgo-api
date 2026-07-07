@@ -5,6 +5,7 @@ import (
 
 	"github.com/google/uuid"
 	examsetdomain "virtual-exam-api/internal/examset/domain"
+	settingsdomain "virtual-exam-api/internal/settings/domain"
 )
 
 const (
@@ -41,11 +42,11 @@ type ExamAttempt struct {
 }
 
 type ExamSetRef struct {
-	Code              string                            `json:"code"`
-	Title             string                            `json:"title"`
-	DurationMinutes   int                               `json:"duration_minutes"`
-	TotalQuestions    int                               `json:"total_questions"`
-	PassingScore      int                               `json:"passing_score,omitempty"`
+	Code              string                                `json:"code"`
+	Title             string                                `json:"title"`
+	DurationMinutes   int                                   `json:"duration_minutes"`
+	TotalQuestions    int                                   `json:"total_questions"`
+	PassingScore      int                                   `json:"passing_score,omitempty"`
 	AnswerSheetLayout examsetdomain.AnswerSheetLayoutConfig `json:"answer_sheet_layout"`
 }
 
@@ -65,21 +66,22 @@ type ExamAnswer struct {
 }
 
 type StartAttemptResponse struct {
-	AttemptID string                 `json:"attempt_id"`
-	ExamSet   ExamSetRef             `json:"exam_set"`
-	StartedAt time.Time              `json:"started_at"`
-	ExpiresAt time.Time              `json:"expires_at"`
-	Questions []QuestionForExam      `json:"questions"`
-	Answers   map[int]string         `json:"answers"`
+	AttemptID   string                                `json:"attempt_id"`
+	ExamSet     ExamSetRef                            `json:"exam_set"`
+	OMRSettings settingsdomain.OMRAnswerSheetSettings `json:"omr_settings"`
+	StartedAt   time.Time                             `json:"started_at"`
+	ExpiresAt   time.Time                             `json:"expires_at"`
+	Questions   []QuestionForExam                     `json:"questions"`
+	Answers     map[int]string                        `json:"answers"`
 }
 
 type QuestionForExam struct {
-	QuestionNo        int            `json:"question_no"`
-	QuestionID        string         `json:"question_id"`
-	QuestionText      string         `json:"question_text"`
-	ContentFormat     string         `json:"content_format,omitempty"`
-	QuestionImageURL  *string        `json:"question_image_url,omitempty"`
-	Choices           []ChoicePublic `json:"choices"`
+	QuestionNo       int            `json:"question_no"`
+	QuestionID       string         `json:"question_id"`
+	QuestionText     string         `json:"question_text"`
+	ContentFormat    string         `json:"content_format,omitempty"`
+	QuestionImageURL *string        `json:"question_image_url,omitempty"`
+	Choices          []ChoicePublic `json:"choices"`
 }
 
 type ChoicePublic struct {
@@ -91,16 +93,17 @@ type ChoicePublic struct {
 }
 
 type GetAttemptResponse struct {
-	AttemptID        string            `json:"attempt_id"`
-	Status           string            `json:"status"`
-	ExamSet          ExamSetRef        `json:"exam_set"`
-	StartedAt        time.Time         `json:"started_at"`
-	ExpiresAt        time.Time         `json:"expires_at"`
-	RemainingSeconds int               `json:"remaining_seconds"`
-	Questions        []QuestionForExam `json:"questions"`
-	Answers          map[int]string    `json:"answers"`
-	AnsweredCount    int               `json:"answered_count"`
-	UnansweredCount  int               `json:"unanswered_count"`
+	AttemptID        string                                `json:"attempt_id"`
+	Status           string                                `json:"status"`
+	ExamSet          ExamSetRef                            `json:"exam_set"`
+	OMRSettings      settingsdomain.OMRAnswerSheetSettings `json:"omr_settings"`
+	StartedAt        time.Time                             `json:"started_at"`
+	ExpiresAt        time.Time                             `json:"expires_at"`
+	RemainingSeconds int                                   `json:"remaining_seconds"`
+	Questions        []QuestionForExam                     `json:"questions"`
+	Answers          map[int]string                        `json:"answers"`
+	AnsweredCount    int                                   `json:"answered_count"`
+	UnansweredCount  int                                   `json:"unanswered_count"`
 }
 
 type SaveAnswerRequest struct {
@@ -108,24 +111,24 @@ type SaveAnswerRequest struct {
 }
 
 type SaveAnswerResponse struct {
-	QuestionNo       int    `json:"question_no"`
+	QuestionNo        int    `json:"question_no"`
 	SelectedChoiceKey string `json:"selected_choice_key"`
-	AnsweredCount    int    `json:"answered_count"`
-	UnansweredCount  int    `json:"unanswered_count"`
-	MarkedCount      int    `json:"marked_count,omitempty"`
+	AnsweredCount     int    `json:"answered_count"`
+	UnansweredCount   int    `json:"unanswered_count"`
+	MarkedCount       int    `json:"marked_count,omitempty"`
 }
 
 type SubmitResponse struct {
-	AttemptID        string  `json:"attempt_id"`
-	Status           string  `json:"status"`
-	Score            float64 `json:"score"`
-	TotalScore       float64 `json:"total_score"`
-	ScorePercent     float64 `json:"score_percent"`
-	CorrectCount     int     `json:"correct_count"`
-	WrongCount       int     `json:"wrong_count"`
-	UnansweredCount  int     `json:"unanswered_count"`
-	DurationSeconds  int     `json:"duration_seconds"`
-	Passed           bool    `json:"passed"`
+	AttemptID       string  `json:"attempt_id"`
+	Status          string  `json:"status"`
+	Score           float64 `json:"score"`
+	TotalScore      float64 `json:"total_score"`
+	ScorePercent    float64 `json:"score_percent"`
+	CorrectCount    int     `json:"correct_count"`
+	WrongCount      int     `json:"wrong_count"`
+	UnansweredCount int     `json:"unanswered_count"`
+	DurationSeconds int     `json:"duration_seconds"`
+	Passed          bool    `json:"passed"`
 }
 
 type SubjectBreakdown struct {
@@ -205,13 +208,13 @@ type ReviewTagRef struct {
 }
 
 type ContinueAttempt struct {
-	AttemptID        string     `json:"attempt_id"`
-	ExamSetCode      string     `json:"exam_set_code"`
-	ExamSetTitle     string     `json:"exam_set_title"`
-	AnsweredCount    int        `json:"answered_count"`
-	TotalQuestions   int        `json:"total_questions"`
-	RemainingSeconds int        `json:"remaining_seconds"`
-	ExpiresAt        time.Time  `json:"expires_at"`
+	AttemptID        string    `json:"attempt_id"`
+	ExamSetCode      string    `json:"exam_set_code"`
+	ExamSetTitle     string    `json:"exam_set_title"`
+	AnsweredCount    int       `json:"answered_count"`
+	TotalQuestions   int       `json:"total_questions"`
+	RemainingSeconds int       `json:"remaining_seconds"`
+	ExpiresAt        time.Time `json:"expires_at"`
 }
 
 type LatestAttemptSummary struct {

@@ -13,6 +13,8 @@ func TestValidateAccessConfig(t *testing.T) {
 		wantErr             bool
 	}{
 		{"free valid", AccessFree, 0, nil, false, false},
+		{"trial valid", AccessTrial, 0, nil, false, false},
+		{"trial invalid price", AccessTrial, 10, nil, false, true},
 		{"free invalid price", AccessFree, 10, nil, false, true},
 		{"free invalid allow single", AccessFree, 0, nil, true, true},
 		{"paid valid", AccessPaid, 49, nil, true, false},
@@ -54,5 +56,8 @@ func TestIsPublicDiscoveryAccessType(t *testing.T) {
 	}
 	if !IsPublicDiscoveryAccessType(AccessFree) {
 		t.Fatal("free must be public discovery")
+	}
+	if !IsPublicDiscoveryAccessType(AccessTrial) {
+		t.Fatal("trial must be public discovery")
 	}
 }

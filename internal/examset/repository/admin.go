@@ -35,12 +35,13 @@ var examSetSortColumns = map[string]string{
 }
 
 type AdminRepository interface {
-	List(ctx context.Context, filter AdminFilter) (pagination.PaginatedList[domain.ExamSetSummary], error)
+	List(ctx context.Context, filter AdminFilter) (pagination.PaginatedList[domain.ExamSet], error)
 	Create(ctx context.Context, set *domain.ExamSet) error
 	Update(ctx context.Context, set *domain.ExamSet) error
 	Delete(ctx context.Context, id uuid.UUID) (deactivated bool, err error)
 	UpdateTotalQuestions(ctx context.Context, examSetID uuid.UUID, count int) error
 	UpdateStatus(ctx context.Context, id uuid.UUID, status string, isActive bool) error
+	UpdateIsActive(ctx context.Context, id uuid.UUID, isActive bool) error
 }
 
 type adminRepository struct {
@@ -51,7 +52,7 @@ func NewAdminRepository(db *gorm.DB) AdminRepository {
 	return &adminRepository{db: db}
 }
 
-func (r *adminRepository) List(ctx context.Context, filter AdminFilter) (pagination.PaginatedList[domain.ExamSetSummary], error) {
+func (r *adminRepository) List(ctx context.Context, filter AdminFilter) (pagination.PaginatedList[domain.ExamSet], error) {
 	page, limit := pagination.Sanitize(filter.Page, filter.Limit)
 	sortCol := pagination.ResolveSort(filter.Sort, examSetSortColumns, "updated_at")
 	orderDir := pagination.ResolveOrder(filter.Order, true)
@@ -80,17 +81,16 @@ func (r *adminRepository) List(ctx context.Context, filter AdminFilter) (paginat
 	}
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
-		return pagination.PaginatedList[domain.ExamSetSummary]{}, err
+		return pagination.PaginatedList[domain.ExamSet]{}, err
 	}
 	var models []ExamSetModel
 	err := q.Order(pagination.OrderClause(sortCol, orderDir)).Offset(pagination.Offset(page, limit)).Limit(limit).Find(&models).Error
 	if err != nil {
-		return pagination.PaginatedList[domain.ExamSetSummary]{}, err
+		return pagination.PaginatedList[domain.ExamSet]{}, err
 	}
-	items := make([]domain.ExamSetSummary, len(models))
+	items := make([]domain.ExamSet, len(models))
 	for i := range models {
-		set := toDomain(&models[i])
-		items[i] = set.ToSummary()
+		items[i] = toDomain(&models[i])
 	}
 	return pagination.NewList(items, page, limit, total), nil
 }
@@ -197,6 +197,13 @@ func (r *adminRepository) UpdateTotalQuestions(ctx context.Context, examSetID uu
 func (r *adminRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status string, isActive bool) error {
 	return r.db.WithContext(ctx).Model(&ExamSetModel{}).Where("id = ?", id).Updates(map[string]any{
 		"status":     status,
+		"is_active":  isActive,
+		"updated_at": time.Now().UTC(),
+	}).Error
+}
+
+func (r *adminRepository) UpdateIsActive(ctx context.Context, id uuid.UUID, isActive bool) error {
+	return r.db.WithContext(ctx).Model(&ExamSetModel{}).Where("id = ?", id).Updates(map[string]any{
 		"is_active":  isActive,
 		"updated_at": time.Now().UTC(),
 	}).Error

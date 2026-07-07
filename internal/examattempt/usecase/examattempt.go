@@ -18,7 +18,12 @@ import (
 	questionrepo "virtual-exam-api/internal/question/repository"
 	scoringdomain "virtual-exam-api/internal/scoring/domain"
 	scoringuc "virtual-exam-api/internal/scoring/usecase"
+	settingsdomain "virtual-exam-api/internal/settings/domain"
 )
+
+type OMRSettingsProvider interface {
+	GetOMR(ctx context.Context) (*settingsdomain.OMRAnswerSheetSettings, error)
+}
 
 type ExamAttemptUseCase struct {
 	attempts     attemptrepo.Repository
@@ -30,6 +35,7 @@ type ExamAttemptUseCase struct {
 	resultCache  appcache.CacheService
 	runtimeLocks *appcache.RuntimeLocks
 	invalidator  *appcache.Invalidator
+	omrSettings  OMRSettingsProvider
 	validator    *validator.Validate
 }
 
@@ -43,6 +49,7 @@ func NewExamAttemptUseCase(
 	resultCache appcache.CacheService,
 	runtimeLocks *appcache.RuntimeLocks,
 	invalidator *appcache.Invalidator,
+	omrSettings OMRSettingsProvider,
 ) *ExamAttemptUseCase {
 	if resultCache == nil {
 		resultCache = appcache.Noop()
@@ -57,6 +64,7 @@ func NewExamAttemptUseCase(
 		resultCache:  resultCache,
 		runtimeLocks: runtimeLocks,
 		invalidator:  invalidator,
+		omrSettings:  omrSettings,
 		validator:    validator.New(),
 	}
 }
@@ -140,13 +148,16 @@ func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examS
 	_ = uc.cache.SetTimer(ctx, attemptID.String(), expiresAt, ttl)
 	uc.invalidateUserExams(ctx, userID)
 
+	omrSettings := uc.currentOMRSettings(ctx)
+	examSetRef := uc.examSetRefWithOMRSettings(set, omrSettings)
 	return &domain.StartAttemptResponse{
-		AttemptID: attemptID.String(),
-		ExamSet:   buildExamSetRef(set),
-		StartedAt: now,
-		ExpiresAt: expiresAt,
-		Questions: buildQuestionsForExam(setQuestions),
-		Answers:   map[int]string{},
+		AttemptID:   attemptID.String(),
+		ExamSet:     examSetRef,
+		OMRSettings: omrSettings,
+		StartedAt:   now,
+		ExpiresAt:   expiresAt,
+		Questions:   buildQuestionsForExam(setQuestions),
+		Answers:     map[int]string{},
 	}, nil
 }
 
@@ -174,13 +185,16 @@ func (uc *ExamAttemptUseCase) buildStartResponseFromExisting(
 		return nil, err
 	}
 	answerMap, _ := buildAnswerMap(answers)
+	omrSettings := uc.currentOMRSettings(ctx)
+	examSetRef := uc.examSetRefWithOMRSettings(set, omrSettings)
 	return &domain.StartAttemptResponse{
-		AttemptID: attempt.ID.String(),
-		ExamSet:   buildExamSetRef(set),
-		StartedAt: attempt.StartedAt,
-		ExpiresAt: attempt.ExpiresAt,
-		Questions: buildQuestionsForExam(setQuestions),
-		Answers:   answerMap,
+		AttemptID:   attempt.ID.String(),
+		ExamSet:     examSetRef,
+		OMRSettings: omrSettings,
+		StartedAt:   attempt.StartedAt,
+		ExpiresAt:   attempt.ExpiresAt,
+		Questions:   buildQuestionsForExam(setQuestions),
+		Answers:     answerMap,
 	}, nil
 }
 
@@ -207,15 +221,18 @@ func (uc *ExamAttemptUseCase) Get(ctx context.Context, userID, attemptID uuid.UU
 	}
 
 	answerMap, answeredCount := buildAnswerMap(answers)
+	omrSettings := uc.currentOMRSettings(ctx)
 	examSetRef := domain.ExamSetRef{}
 	if attempt.ExamSet != nil {
 		examSetRef = *attempt.ExamSet
+		examSetRef.AnswerSheetLayout = omrSettings.ToAnswerSheetLayout()
 	}
 
 	return &domain.GetAttemptResponse{
 		AttemptID:        attempt.ID.String(),
 		Status:           attempt.Status,
 		ExamSet:          examSetRef,
+		OMRSettings:      omrSettings,
 		StartedAt:        attempt.StartedAt,
 		ExpiresAt:        attempt.ExpiresAt,
 		RemainingSeconds: attemptrepo.RemainingSeconds(attempt.ExpiresAt),
@@ -330,9 +347,9 @@ func (uc *ExamAttemptUseCase) ClearAnswer(ctx context.Context, userID, attemptID
 
 	total := len(answers)
 	return &domain.SaveAnswerResponse{
-		QuestionNo:       questionNo,
-		AnsweredCount:    answeredCount,
-		UnansweredCount:  total - answeredCount,
+		QuestionNo:      questionNo,
+		AnsweredCount:   answeredCount,
+		UnansweredCount: total - answeredCount,
 	}, nil
 }
 
@@ -802,11 +819,12 @@ func mapWeaknessAnalysis(items []scoringdomain.SubjectScore) []domain.WeaknessAn
 	return out
 }
 
-func buildExamSetRef(set *examsetdomain.ExamSet) domain.ExamSetRef {
+func (uc *ExamAttemptUseCase) examSetRefWithOMRSettings(set *examsetdomain.ExamSet, settings settingsdomain.OMRAnswerSheetSettings) domain.ExamSetRef {
 	layout := set.AnswerSheetLayout
 	if err := layout.Validate(); err != nil {
 		layout = examsetdomain.DefaultAnswerSheetLayout()
 	}
+	layout = settings.ToAnswerSheetLayout()
 	return domain.ExamSetRef{
 		Code:              set.Code,
 		Title:             set.Title,
@@ -815,4 +833,15 @@ func buildExamSetRef(set *examsetdomain.ExamSet) domain.ExamSetRef {
 		PassingScore:      set.PassingScore,
 		AnswerSheetLayout: layout,
 	}
+}
+
+func (uc *ExamAttemptUseCase) currentOMRSettings(ctx context.Context) settingsdomain.OMRAnswerSheetSettings {
+	if uc.omrSettings == nil {
+		return settingsdomain.DefaultOMRAnswerSheetSettings()
+	}
+	settings, err := uc.omrSettings.GetOMR(ctx)
+	if err != nil || settings == nil {
+		return settingsdomain.DefaultOMRAnswerSheetSettings()
+	}
+	return *settings
 }

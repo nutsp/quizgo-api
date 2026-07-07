@@ -4,22 +4,23 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	admindomain "virtual-exam-api/internal/admin/domain"
 	"virtual-exam-api/internal/apperrors"
 	"virtual-exam-api/internal/cache"
 	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/examset/domain"
 	examsetrepo "virtual-exam-api/internal/examset/repository"
-	questionrepo "virtual-exam-api/internal/question/repository"
 	trackrepo "virtual-exam-api/internal/examtrack/repository"
+	questionrepo "virtual-exam-api/internal/question/repository"
 )
 
 type AdminUseCase struct {
-	sets          examsetrepo.AdminRepository
-	reads         examsetrepo.Repository
-	tracks        trackrepo.Repository
-	trackAdmin    trackrepo.AdminRepository
-	setQuestions  questionrepo.ExamSetQuestionAdminRepository
-	invalidator   *cache.Invalidator
+	sets         examsetrepo.AdminRepository
+	reads        examsetrepo.Repository
+	tracks       trackrepo.Repository
+	trackAdmin   trackrepo.AdminRepository
+	setQuestions questionrepo.ExamSetQuestionAdminRepository
+	invalidator  *cache.Invalidator
 }
 
 func NewAdminUseCase(
@@ -50,26 +51,26 @@ type AnswerSheetLayoutInput struct {
 }
 
 type CreateSetInput struct {
-	ExamTrackID       string                   `json:"exam_track_id"`
-	Title             string                   `json:"title"`
-	Code              string                   `json:"code"`
-	Description       string                   `json:"description"`
-	CoverImageURL     *string                  `json:"cover_image_url"`
-	DurationMinutes   int                      `json:"duration_minutes"`
-	TotalQuestions    int                      `json:"total_questions"`
-	PassingScore      int                      `json:"passing_score"`
-	Difficulty        string                   `json:"difficulty"`
-	AccessType          string                   `json:"access_type"`
-	AllowSinglePurchase bool                     `json:"allow_single_purchase"`
-	PriceAmount         float64                  `json:"price_amount"`
-	OriginalPriceAmount *float64                 `json:"original_price_amount"`
-	SalePriceAmount     *float64                 `json:"sale_price_amount"`
-	Currency            string                   `json:"currency"`
-	Mode              string                   `json:"mode"`
-	IsOfficial        bool                     `json:"is_official"`
-	IsFeatured        bool                     `json:"is_featured"`
-	IsActive          bool                     `json:"is_active"`
-	AnswerSheetLayout AnswerSheetLayoutInput   `json:"answer_sheet_layout"`
+	ExamTrackID         string                 `json:"exam_track_id"`
+	Title               string                 `json:"title"`
+	Code                string                 `json:"code"`
+	Description         string                 `json:"description"`
+	CoverImageURL       *string                `json:"cover_image_url"`
+	DurationMinutes     int                    `json:"duration_minutes"`
+	TotalQuestions      int                    `json:"total_questions"`
+	PassingScore        int                    `json:"passing_score"`
+	Difficulty          string                 `json:"difficulty"`
+	AccessType          string                 `json:"access_type"`
+	AllowSinglePurchase bool                   `json:"allow_single_purchase"`
+	PriceAmount         float64                `json:"price_amount"`
+	OriginalPriceAmount *float64               `json:"original_price_amount"`
+	SalePriceAmount     *float64               `json:"sale_price_amount"`
+	Currency            string                 `json:"currency"`
+	Mode                string                 `json:"mode"`
+	IsOfficial          bool                   `json:"is_official"`
+	IsFeatured          bool                   `json:"is_featured"`
+	IsActive            bool                   `json:"is_active"`
+	AnswerSheetLayout   AnswerSheetLayoutInput `json:"answer_sheet_layout"`
 }
 
 type UpdateSetInput = CreateSetInput
@@ -89,8 +90,9 @@ func (uc *AdminUseCase) List(ctx context.Context, filter examsetrepo.AdminFilter
 		return nil, err
 	}
 	resp := make([]SetAdminResponse, len(result.Items))
-	for i, item := range result.Items {
-		resp[i] = SetAdminResponse{ExamSetSummary: item}
+	for i := range result.Items {
+		set := result.Items[i]
+		resp[i] = *toSetAdminResponse(&set)
 	}
 	list := pagination.NewList(resp, result.Pagination.Page, result.Pagination.Limit, result.Pagination.Total)
 	return &list, nil
@@ -184,6 +186,31 @@ func (uc *AdminUseCase) Delete(ctx context.Context, id uuid.UUID) (bool, error) 
 	return deactivated, err
 }
 
+func (uc *AdminUseCase) UpdateActiveStatus(ctx context.Context, id uuid.UUID, isActive bool) (*admindomain.ActiveStatusResponse, error) {
+	set, err := uc.reads.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if set == nil {
+		return nil, apperrors.ErrExamSetNotFound
+	}
+	if err := uc.sets.UpdateIsActive(ctx, id, isActive); err != nil {
+		return nil, err
+	}
+	updated, err := uc.reads.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if uc.invalidator != nil {
+		uc.invalidator.OnExamSetChanged(ctx, id.String(), set.Code)
+	}
+	return &admindomain.ActiveStatusResponse{
+		ID:        id.String(),
+		IsActive:  isActive,
+		UpdatedAt: updated.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+	}, nil
+}
+
 func (uc *AdminUseCase) buildSetFromInput(input CreateSetInput, existingLayout *domain.AnswerSheetLayoutConfig) (*domain.ExamSet, error) {
 	if input.ExamTrackID == "" || input.Title == "" || input.Code == "" {
 		return nil, apperrors.ErrInvalidInput
@@ -225,10 +252,11 @@ func (uc *AdminUseCase) buildSetFromInput(input CreateSetInput, existingLayout *
 		input.OriginalPriceAmount = nil
 		input.AllowSinglePurchase = false
 	}
-	if input.AccessType == domain.AccessFree {
+	if input.AccessType == domain.AccessFree || input.AccessType == domain.AccessTrial {
 		input.PriceAmount = 0
 		input.AllowSinglePurchase = false
 		input.OriginalPriceAmount = nil
+		input.SalePriceAmount = nil
 	}
 	if input.AccessType == domain.AccessPremium && !input.AllowSinglePurchase {
 		input.OriginalPriceAmount = nil
@@ -237,52 +265,37 @@ func (uc *AdminUseCase) buildSetFromInput(input CreateSetInput, existingLayout *
 	if currency == "" {
 		currency = "THB"
 	}
-	layout := domain.AnswerSheetLayoutConfig{
-		BlockColumns:      input.AnswerSheetLayout.BlockColumns,
-		QuestionsPerBlock: input.AnswerSheetLayout.QuestionsPerBlock,
-		ChoiceLabelStyle:  input.AnswerSheetLayout.ChoiceLabelStyle,
-		ShowHeader:        input.AnswerSheetLayout.ShowHeader,
-		ShowInstructions:  input.AnswerSheetLayout.ShowInstructions,
-		ShowCandidateInfo: input.AnswerSheetLayout.ShowCandidateInfo,
-	}
-	if input.AnswerSheetLayout.BlockColumns == 0 && input.AnswerSheetLayout.QuestionsPerBlock == 0 {
-		if existingLayout != nil {
-			layout = *existingLayout
-		} else {
-			layout = domain.DefaultAnswerSheetLayout()
-		}
-	} else if err := layout.Validate(); err != nil {
-		return nil, apperrors.ValidationError("ตั้งค่ากระดาษคำตอบไม่ถูกต้อง")
-	} else {
-		layout = domain.NormalizeAnswerSheetLayout(layout)
+	layout := domain.DefaultAnswerSheetLayout()
+	if existingLayout != nil {
+		layout = *existingLayout
 	}
 	coverImageURL, err := domain.NormalizeCoverImageURL(input.CoverImageURL)
 	if err != nil {
 		return nil, err
 	}
 	return &domain.ExamSet{
-		ExamTrackID:     trackID,
-		Code:            input.Code,
-		Title:           input.Title,
-		Description:     input.Description,
-		CoverImageURL:   coverImageURL,
-		DurationMinutes: input.DurationMinutes,
-		TotalQuestions:  input.TotalQuestions,
-		PassingScore:    input.PassingScore,
-		Difficulty:      input.Difficulty,
+		ExamTrackID:         trackID,
+		Code:                input.Code,
+		Title:               input.Title,
+		Description:         input.Description,
+		CoverImageURL:       coverImageURL,
+		DurationMinutes:     input.DurationMinutes,
+		TotalQuestions:      input.TotalQuestions,
+		PassingScore:        input.PassingScore,
+		Difficulty:          input.Difficulty,
 		AccessType:          input.AccessType,
 		AllowSinglePurchase: input.AllowSinglePurchase,
 		PriceAmount:         input.PriceAmount,
 		OriginalPriceAmount: input.OriginalPriceAmount,
 		Currency:            currency,
 		SalePriceAmount:     input.SalePriceAmount,
-		Mode:            input.Mode,
-		IsOfficial:      input.IsOfficial,
-		IsFeatured:      input.IsFeatured,
-		IsActive:        input.IsActive,
-		Status:          domain.StatusDraft,
-		AnswerSheetLayout: layout,
-		ExamTrack:       &domain.ExamTrackRef{Code: track.Code, Name: track.Name},
+		Mode:                input.Mode,
+		IsOfficial:          input.IsOfficial,
+		IsFeatured:          input.IsFeatured,
+		IsActive:            input.IsActive,
+		Status:              domain.StatusDraft,
+		AnswerSheetLayout:   layout,
+		ExamTrack:           &domain.ExamTrackRef{Code: track.Code, Name: track.Name},
 	}, nil
 }
 
@@ -301,7 +314,7 @@ func isValidDifficulty(d string) bool {
 }
 
 func isValidAccess(a string) bool {
-	return a == domain.AccessFree || a == domain.AccessPaid || a == domain.AccessPremium || a == domain.AccessPrivate
+	return a == domain.AccessFree || a == domain.AccessTrial || a == domain.AccessPaid || a == domain.AccessPremium || a == domain.AccessPrivate
 }
 
 func isValidMode(m string) bool {

@@ -34,6 +34,14 @@ func (h *Handler) RegisterRoutes(g *echo.Group, authMiddleware echo.MiddlewareFu
 	admin.POST("/questions/import/preview", h.Preview)
 	admin.GET("/questions/import/preview/:importId/rows", h.ListPreviewRows)
 	admin.POST("/questions/import/confirm", h.Confirm)
+	admin.GET("/question-import-batches", h.ListJobs)
+	admin.POST("/question-import-batches", h.CreateBatch)
+	admin.GET("/question-import-batches/:id", h.GetBatch)
+	admin.GET("/question-import-batches/:id/items", h.ListBatchItems)
+	admin.PUT("/question-import-batches/:id/items/:itemId", h.UpdateBatchItem)
+	admin.POST("/question-import-batches/:id/approve", h.ApproveBatch)
+	admin.POST("/question-import-batches/:id/reject", h.RejectBatch)
+	admin.GET("/question-import-batches/:id/error-report", h.DownloadErrorReport)
 }
 
 func (h *Handler) DownloadTemplate(c echo.Context) error {
@@ -62,6 +70,14 @@ func (h *Handler) ListJobs(c echo.Context) error {
 }
 
 func (h *Handler) Preview(c echo.Context) error {
+	return h.createBatchFromUpload(c)
+}
+
+func (h *Handler) CreateBatch(c echo.Context) error {
+	return h.createBatchFromUpload(c)
+}
+
+func (h *Handler) createBatchFromUpload(c echo.Context) error {
 	adminUserID, err := middleware.RequireUserID(c)
 	if err != nil {
 		return response.Error(c, err)
@@ -69,7 +85,10 @@ func (h *Handler) Preview(c echo.Context) error {
 
 	file, err := c.FormFile("file")
 	if err != nil {
-		return response.Error(c, apperrors.New("MISSING_FILE", "กรุณาเลือกไฟล์", 400))
+		file, err = c.FormFile("question_file")
+		if err != nil {
+			return response.Error(c, apperrors.New("MISSING_FILE", "กรุณาเลือกไฟล์", 400))
+		}
 	}
 
 	src, err := file.Open()
@@ -94,6 +113,16 @@ func (h *Handler) Preview(c echo.Context) error {
 		if err != nil {
 			return response.Error(c, apperrors.ErrInvalidInput)
 		}
+	} else if zipFile, err := c.FormFile("image_zip"); err == nil && zipFile != nil {
+		zipSrc, err := zipFile.Open()
+		if err != nil {
+			return response.Error(c, apperrors.ErrInvalidInput)
+		}
+		zipData, err = io.ReadAll(io.LimitReader(zipSrc, zipimages.MaxZipSize+1))
+		zipSrc.Close()
+		if err != nil {
+			return response.Error(c, apperrors.ErrInvalidInput)
+		}
 	}
 
 	result, err := h.uc.Preview(c.Request().Context(), adminUserID, file.Filename, data, zipData)
@@ -102,6 +131,176 @@ func (h *Handler) Preview(c echo.Context) error {
 	}
 
 	return response.JSON(c, http.StatusOK, result)
+}
+
+func (h *Handler) GetBatch(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return response.Error(c, apperrors.ErrInvalidInput)
+	}
+	result, err := h.uc.GetJob(c.Request().Context(), id)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	return response.JSON(c, http.StatusOK, result)
+}
+
+func (h *Handler) ListBatchItems(c echo.Context) error {
+	adminUserID, err := middleware.RequireUserID(c)
+	if err != nil {
+		return response.Error(c, err)
+	}
+
+	importID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return response.Error(c, apperrors.ErrInvalidInput)
+	}
+
+	resultFilter := c.QueryParam("result")
+	status := ""
+	switch resultFilter {
+	case "valid":
+		status = "valid"
+	case "invalid":
+		status = "error"
+	}
+
+	pq := pagination.ParsePagination(c)
+	input := importuc.PreviewRowListInput{
+		ImportID: importID,
+		Page:     pq.Page,
+		Limit:    pq.Limit,
+		Status:   status,
+		Search:   c.QueryParam("q"),
+	}
+
+	result, err := h.uc.ListPreviewRows(c.Request().Context(), adminUserID, input)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	return response.JSON(c, http.StatusOK, result)
+}
+
+func (h *Handler) UpdateBatchItem(c echo.Context) error {
+	adminUserID, err := middleware.RequireUserID(c)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	batchID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return response.Error(c, apperrors.ErrInvalidInput)
+	}
+	itemID, err := uuid.Parse(c.Param("itemId"))
+	if err != nil {
+		return response.Error(c, apperrors.ErrInvalidInput)
+	}
+	var body importuc.UpdateImportItemInput
+	if err := c.Bind(&body); err != nil {
+		return response.Error(c, apperrors.ErrInvalidInput)
+	}
+	body.BatchID = batchID
+	body.ItemID = itemID
+
+	result, err := h.uc.UpdateItem(c.Request().Context(), adminUserID, body)
+	if err != nil {
+		return response.Error(c, err)
+	}
+
+	if h.audit != nil {
+		email := ""
+		if actor, err := h.users.FindByID(c.Request().Context(), adminUserID); err == nil && actor != nil {
+			email = actor.Email
+		}
+		h.audit.Log(c.Request().Context(), audituc.LogInput{
+			ActorUserID:  &adminUserID,
+			ActorEmail:   email,
+			Action:       "question_import.item_update",
+			ResourceType: "question_import_item",
+			ResourceID:   &itemID,
+			ResourceName: "question import item",
+			AfterData: map[string]any{
+				"batch_id": batchID.String(),
+				"is_valid": result.IsValid,
+			},
+			IPAddress: c.RealIP(),
+			UserAgent: c.Request().UserAgent(),
+		})
+	}
+
+	return response.JSON(c, http.StatusOK, result)
+}
+
+func (h *Handler) ApproveBatch(c echo.Context) error {
+	adminUserID, err := middleware.RequireUserID(c)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	importID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return response.Error(c, apperrors.ErrInvalidInput)
+	}
+	result, err := h.uc.Approve(c.Request().Context(), adminUserID, importID)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	if h.audit != nil {
+		email := ""
+		if actor, err := h.users.FindByID(c.Request().Context(), adminUserID); err == nil && actor != nil {
+			email = actor.Email
+		}
+		h.audit.Log(c.Request().Context(), audituc.LogInput{
+			ActorUserID:  &adminUserID,
+			ActorEmail:   email,
+			Action:       "question_import.approve",
+			ResourceType: "question_import_job",
+			ResourceID:   &importID,
+			ResourceName: "question import",
+			AfterData: map[string]any{
+				"imported_questions": result.ImportedQuestions,
+				"skipped_rows":       result.SkippedRows,
+				"failed_rows":        result.FailedRows,
+			},
+			IPAddress: c.RealIP(),
+			UserAgent: c.Request().UserAgent(),
+		})
+	}
+	return response.JSON(c, http.StatusOK, result)
+}
+
+func (h *Handler) RejectBatch(c echo.Context) error {
+	adminUserID, err := middleware.RequireUserID(c)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	importID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return response.Error(c, apperrors.ErrInvalidInput)
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	_ = c.Bind(&body)
+	result, err := h.uc.Reject(c.Request().Context(), adminUserID, domain.ImportRejectInput{
+		ImportID: importID,
+		Reason:   body.Reason,
+	})
+	if err != nil {
+		return response.Error(c, err)
+	}
+	return response.JSON(c, http.StatusOK, result)
+}
+
+func (h *Handler) DownloadErrorReport(c echo.Context) error {
+	importID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return response.Error(c, apperrors.ErrInvalidInput)
+	}
+	data, err := h.uc.ErrorReport(c.Request().Context(), importID)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	c.Response().Header().Set(echo.HeaderContentDisposition, `attachment; filename="question-import-error-report.csv"`)
+	return c.Blob(http.StatusOK, "text/csv; charset=utf-8", data)
 }
 
 func (h *Handler) ListPreviewRows(c echo.Context) error {
@@ -165,7 +364,7 @@ func (h *Handler) Confirm(c echo.Context) error {
 			AfterData: map[string]any{
 				"imported_questions": result.ImportedQuestions,
 				"skipped_rows":       result.SkippedRows,
-				"failed_rows":          result.FailedRows,
+				"failed_rows":        result.FailedRows,
 			},
 			IPAddress: c.RealIP(),
 			UserAgent: c.Request().UserAgent(),

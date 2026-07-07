@@ -6,16 +6,18 @@ import (
 )
 
 const (
-	TTLExamTracksList   = 15 * time.Minute
-	TTLExamSetsList     = 3 * time.Minute
-	TTLExamSetDetail    = 10 * time.Minute
-	TTLExamSetsByTrack  = 3 * time.Minute
-	TTLHome             = 5 * time.Minute
-	TTLUserEntitlements = 3 * time.Minute
-	TTLMyExams          = 3 * time.Minute
-	TTLUserAccess       = 1 * time.Minute
-	TTLResult           = 3 * time.Hour
-	TTLIndexBuffer      = 10 * time.Minute
+	TTLExamTracksList        = 15 * time.Minute
+	TTLExamSetsList          = 3 * time.Minute
+	TTLExamSetDetail         = 10 * time.Minute
+	TTLExamSetsFilterOptions = 5 * time.Minute
+	TTLExamSetsByTrack       = 3 * time.Minute
+	TTLHome                  = 5 * time.Minute
+	TTLSettingsOMR           = 10 * time.Minute
+	TTLUserEntitlements      = 3 * time.Minute
+	TTLMyExams               = 3 * time.Minute
+	TTLUserAccess            = 1 * time.Minute
+	TTLResult                = 3 * time.Hour
+	TTLIndexBuffer           = 10 * time.Minute
 )
 
 func ExamTracksList() string {
@@ -24,6 +26,10 @@ func ExamTracksList() string {
 
 func ExamSetsList(hash string) string {
 	return "exam_sets:list:" + hash
+}
+
+func ExamSetsFilterOptions(scope string) string {
+	return "exam_sets:filter_options:" + scope
 }
 
 func ExamSetDetail(code string) string {
@@ -44,6 +50,10 @@ func HomeFeaturedExamSets() string {
 
 func HomeSummary() string {
 	return "home:summary"
+}
+
+func SettingsOMRAnswerSheet() string {
+	return "settings:omr_answer_sheet"
 }
 
 func UserEntitlements(userID string) string {
@@ -72,6 +82,10 @@ func IndexExamTracks() string {
 
 func IndexExamSetsList() string {
 	return "index:exam_sets:list"
+}
+
+func IndexExamSetsFilterOptions() string {
+	return "index:exam_sets:filter_options"
 }
 
 func IndexExamSet(examSetID string) string {

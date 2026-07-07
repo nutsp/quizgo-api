@@ -8,6 +8,8 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"virtual-exam-api/internal/apperrors"
+	admindomain "virtual-exam-api/internal/admin/domain"
+	"virtual-exam-api/internal/cache"
 	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/examset/domain"
 	examsetrepo "virtual-exam-api/internal/examset/repository"
@@ -26,6 +28,7 @@ type AdminUseCase struct {
 	sets         examsetrepo.Repository
 	setAdmin     examsetrepo.AdminRepository
 	trackAdmin   trackrepo.AdminRepository
+	invalidator  *cache.Invalidator
 }
 
 func NewAdminUseCase(
@@ -36,6 +39,7 @@ func NewAdminUseCase(
 	sets examsetrepo.Repository,
 	setAdmin examsetrepo.AdminRepository,
 	trackAdmin trackrepo.AdminRepository,
+	invalidator *cache.Invalidator,
 ) *AdminUseCase {
 	return &AdminUseCase{
 		questions:    questions,
@@ -45,6 +49,7 @@ func NewAdminUseCase(
 		sets:         sets,
 		setAdmin:     setAdmin,
 		trackAdmin:   trackAdmin,
+		invalidator:  invalidator,
 	}
 }
 
@@ -200,6 +205,31 @@ func (uc *AdminUseCase) DeleteQuestion(ctx context.Context, id uuid.UUID) (archi
 		return false, apperrors.ErrQuestionNotFound
 	}
 	return uc.questions.Delete(ctx, id)
+}
+
+func (uc *AdminUseCase) UpdateActiveStatus(ctx context.Context, id uuid.UUID, isActive bool) (*admindomain.ActiveStatusResponse, error) {
+	q, err := uc.questions.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if q == nil {
+		return nil, apperrors.ErrQuestionNotFound
+	}
+	if err := uc.questions.UpdateIsActive(ctx, id, isActive); err != nil {
+		return nil, err
+	}
+	updated, err := uc.questions.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if uc.invalidator != nil {
+		uc.invalidator.OnExamSetChanged(ctx, "", "")
+	}
+	return &admindomain.ActiveStatusResponse{
+		ID:        id.String(),
+		IsActive:  isActive,
+		UpdatedAt: updated.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+	}, nil
 }
 
 func (uc *AdminUseCase) ListExamSetQuestions(ctx context.Context, examSetID uuid.UUID) ([]ExamSetQuestionResponse, error) {

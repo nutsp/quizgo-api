@@ -19,6 +19,7 @@ func NewInvalidator(content, user, result CacheService) *Invalidator {
 func (inv *Invalidator) OnExamTrackChanged(ctx context.Context) {
 	_ = inv.content.DeleteByIndex(ctx, IndexExamTracks())
 	_ = inv.content.DeleteByIndex(ctx, IndexExamSetsList())
+	_ = inv.content.DeleteByIndex(ctx, IndexExamSetsFilterOptions())
 	_ = inv.content.DeleteByIndex(ctx, IndexHome())
 }
 
@@ -30,6 +31,7 @@ func (inv *Invalidator) OnExamSetChanged(ctx context.Context, examSetID, examSet
 		_ = inv.content.DeleteByIndex(ctx, IndexExamSetCode(examSetCode))
 	}
 	_ = inv.content.DeleteByIndex(ctx, IndexExamSetsList())
+	_ = inv.content.DeleteByIndex(ctx, IndexExamSetsFilterOptions())
 	_ = inv.content.DeleteByIndex(ctx, IndexHome())
 }
 

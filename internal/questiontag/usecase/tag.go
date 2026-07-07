@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"virtual-exam-api/internal/apperrors"
+	admindomain "virtual-exam-api/internal/admin/domain"
 	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/questiontag/domain"
 	tagrepo "virtual-exam-api/internal/questiontag/repository"
@@ -178,6 +179,28 @@ func (uc *TagUseCase) Delete(ctx context.Context, id uuid.UUID) (*TagResponse, e
 		return nil, err
 	}
 	return nil, nil
+}
+
+func (uc *TagUseCase) UpdateActiveStatus(ctx context.Context, id uuid.UUID, isActive bool) (*admindomain.ActiveStatusResponse, error) {
+	t, err := uc.tags.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if t == nil {
+		return nil, apperrors.ErrNotFound
+	}
+	if err := uc.tags.UpdateIsActive(ctx, id, isActive); err != nil {
+		return nil, err
+	}
+	updated, err := uc.tags.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &admindomain.ActiveStatusResponse{
+		ID:        id.String(),
+		IsActive:  isActive,
+		UpdatedAt: updated.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+	}, nil
 }
 
 func (uc *TagUseCase) ValidateTagIDs(ctx context.Context, tagIDs []uuid.UUID) error {

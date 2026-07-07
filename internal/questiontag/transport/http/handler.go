@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"virtual-exam-api/internal/apperrors"
+	admindomain "virtual-exam-api/internal/admin/domain"
 	audituc "virtual-exam-api/internal/auditlog/usecase"
 	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/middleware"
@@ -30,6 +31,7 @@ func (h *Handler) RegisterRoutes(admin *echo.Group) {
 	admin.POST("/question-tags", h.Create)
 	admin.GET("/question-tags/:id", h.Get)
 	admin.PUT("/question-tags/:id", h.Update)
+	admin.PATCH("/question-tags/:id/status", h.UpdateStatus)
 	admin.DELETE("/question-tags/:id", h.Delete)
 }
 
@@ -92,6 +94,29 @@ func (h *Handler) Update(c echo.Context) error {
 		return response.Error(c, err)
 	}
 	h.logAudit(c, "question_tag.update", "question_tag", &id, result.Name, before, result)
+	return response.JSON(c, 200, result)
+}
+
+func (h *Handler) UpdateStatus(c echo.Context) error {
+	id, err := parseUUID(c.Param("id"))
+	if err != nil {
+		return response.Error(c, err)
+	}
+	before, _ := h.tags.Get(c.Request().Context(), id)
+	var body admindomain.UpdateActiveStatusRequest
+	if err := c.Bind(&body); err != nil {
+		return response.Error(c, apperrors.ErrInvalidInput)
+	}
+	result, err := h.tags.UpdateActiveStatus(c.Request().Context(), id, body.IsActive)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	if before != nil {
+		h.logAudit(c, "question_tag.status_update", "question_tag", &id, before.Name,
+			map[string]any{"is_active": before.IsActive},
+			map[string]any{"is_active": body.IsActive},
+		)
+	}
 	return response.JSON(c, 200, result)
 }
 

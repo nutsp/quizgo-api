@@ -62,7 +62,21 @@ func Run(ctx context.Context, db *gorm.DB) error {
 		IsFeatured      bool
 		IsOfficial      bool
 		TotalQuestions  int
+		DurationMinutes int
 	}{
+		{
+			TrackCode:      "gpor",
+			Code:           "quizgo-trial",
+			Title:          "ข้อสอบทดลอง QuizGo",
+			Desc:           "ลองทำข้อสอบแบบจับเวลาและกระดาษคำตอบ OMR เพื่อทดลองประสบการณ์ซ้อมสอบก่อนเลือกชุดเต็ม",
+			AccessType:     "trial",
+			PriceAmount:    0,
+			CoverImageURL:  "",
+			IsFeatured:     true,
+			IsOfficial:     true,
+			TotalQuestions: 10,
+			DurationMinutes: 15,
+		},
 		{
 			TrackCode:      "gpor",
 			Code:           "gpor-set-1",
@@ -151,6 +165,10 @@ func Run(ctx context.Context, db *gorm.DB) error {
 		if qCount > questionCountPerSet {
 			qCount = questionCountPerSet
 		}
+		durationMinutes := def.DurationMinutes
+		if durationMinutes <= 0 {
+			durationMinutes = 120
+		}
 
 		set := examsetrepo.ExamSetModel{
 			ID:              setID,
@@ -159,7 +177,7 @@ func Run(ctx context.Context, db *gorm.DB) error {
 			Title:           def.Title,
 			Description:     def.Desc,
 			CoverImageURL:   coverURL,
-			DurationMinutes: 120,
+			DurationMinutes: durationMinutes,
 			TotalQuestions:  def.TotalQuestions,
 			PassingScore:    60,
 			Difficulty:      "medium",

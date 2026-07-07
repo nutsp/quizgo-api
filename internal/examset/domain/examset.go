@@ -8,6 +8,7 @@ import (
 
 const (
 	AccessFree    = "free"
+	AccessTrial   = "trial"
 	AccessPaid    = "paid"
 	AccessPremium = "premium"
 	AccessPrivate = "private"
@@ -133,16 +134,25 @@ func (s ExamSet) ToSummary() ExamSetSummary {
 }
 
 type ListFilter struct {
-	Query       string
-	TrackCode   string
-	TrackID     uuid.UUID
-	AccessType  string
-	Difficulty  string
-	Mode        string
-	Page        int
-	Limit       int
+	Query          string
+	TrackCode      string
+	TrackCodes     []string
+	TrackID        uuid.UUID
+	SubjectCodes   []string
+	QuestionTypes  []string
+	AccessType     string
+	AccessTypes    []string
+	Difficulty     string
+	Difficulties   []string
+	Mode           string
+	Modes          []string
+	Statuses       []string
+	Sort           string
+	Page           int
+	Limit          int
 	OnlyActive     bool
 	OnlyPublished  bool
+	Visibility     VisibilityScope
 }
 
 type PaginatedResult struct {

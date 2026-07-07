@@ -99,6 +99,10 @@ func (uc *UseCase) CheckExamSetAccessWithQuestionCount(
 		result.CanStart = true
 		result.AccessSource = domain.AccessSourceFree
 		return result
+	case examsetdomain.AccessTrial:
+		result.CanStart = true
+		result.AccessSource = domain.AccessSourceTrial
+		return result
 	case examsetdomain.AccessPaid:
 		if hasExamSet {
 			result.CanStart = true
@@ -193,6 +197,21 @@ func (uc *UseCase) HasActiveExamSetEntitlement(ctx context.Context, userID, exam
 
 func (uc *UseCase) HasActivePremiumEntitlement(ctx context.Context, userID uuid.UUID) (bool, *time.Time, error) {
 	return uc.entitlements.HasActivePremiumEntitlement(ctx, userID)
+}
+
+func (uc *UseCase) ListEntitledPrivateExamSetIDs(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := uc.entitlements.ListActiveExamSetEntitlementsByUser(ctx, userID, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	out := make([]uuid.UUID, 0)
+	for _, row := range rows {
+		if row.ExamSet.AccessType != examsetdomain.AccessPrivate {
+			continue
+		}
+		out = append(out, row.ExamSet.ID)
+	}
+	return out, nil
 }
 
 func (uc *UseCase) BuildAccessInfo(ctx context.Context, userID *uuid.UUID, set *examsetdomain.ExamSet) examsetdomain.AccessInfo {

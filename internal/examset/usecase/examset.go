@@ -52,6 +52,7 @@ func NewExamSetUseCaseWithAttempts(
 
 func (uc *ExamSetUseCase) List(ctx context.Context, filter domain.ListFilter, userID *uuid.UUID) (*domain.PaginatedResult, error) {
 	filter.OnlyPublished = true
+	filter.Visibility = uc.buildVisibilityScope(ctx, userID)
 
 	hash := cache.HashExamSetListFilter(filter)
 	key := cache.ExamSetsList(hash)

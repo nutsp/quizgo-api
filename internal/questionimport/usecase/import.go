@@ -1,10 +1,13 @@
 package usecase
 
 import (
+	"bytes"
 	"context"
+	"encoding/csv"
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,8 +22,8 @@ import (
 	"virtual-exam-api/internal/questionimport/parser"
 	importrepo "virtual-exam-api/internal/questionimport/repository"
 	"virtual-exam-api/internal/questionimport/zipimages"
-	subjectrepo "virtual-exam-api/internal/subject/repository"
 	tagrepo "virtual-exam-api/internal/questiontag/repository"
+	subjectrepo "virtual-exam-api/internal/subject/repository"
 )
 
 const templateCSV = `subject_code,question_group_codes,question_type,content_format,question_text,question_image,choice_a,choice_a_image,choice_b,choice_b_image,choice_c,choice_c_image,choice_d,choice_d_image,correct_choice,explanation,explanation_image,difficulty,status
@@ -126,11 +129,14 @@ func (uc *UseCase) Preview(ctx context.Context, adminUserID uuid.UUID, filename 
 		ID:          jobID,
 		AdminUserID: adminUserID,
 		Filename:    filename,
-		Status:      domain.JobStatusPreview,
+		Status:      domain.JobStatusPendingApproval,
 		TotalRows:   len(previewRows),
 		ValidRows:   validCount,
 		InvalidRows: invalidCount,
 		CreatedAt:   now,
+	}
+	if invalidCount > 0 {
+		job.Status = domain.JobStatusValidationFailed
 	}
 
 	dbRows := make([]domain.ImportJobRow, len(previewRows))
@@ -189,10 +195,12 @@ func (uc *UseCase) ListPreviewRows(ctx context.Context, adminUserID uuid.UUID, i
 	if job == nil {
 		return nil, apperrors.ErrNotFound
 	}
-	if job.AdminUserID != adminUserID {
-		return nil, apperrors.ErrForbidden
-	}
-	if job.Status != domain.JobStatusPreview {
+	if job.Status != domain.JobStatusPreview &&
+		job.Status != domain.JobStatusPendingApproval &&
+		job.Status != domain.JobStatusValidationFailed &&
+		job.Status != domain.JobStatusImported &&
+		job.Status != domain.JobStatusRejected &&
+		job.Status != domain.JobStatusImportFailed {
 		return nil, apperrors.New("IMPORT_NOT_IN_PREVIEW", "ไม่พบข้อมูลตัวอย่างการนำเข้า", 400)
 	}
 
@@ -221,6 +229,7 @@ func (uc *UseCase) ListPreviewRows(ctx context.Context, adminUserID uuid.UUID, i
 
 func jobRowToPreviewRow(row domain.ImportJobRow) domain.ImportPreviewRow {
 	return domain.ImportPreviewRow{
+		ID:        row.ID,
 		RowNumber: row.RowNumber,
 		Data: domain.ImportQuestionRow{
 			SubjectCode:         row.SubjectCode,
@@ -276,6 +285,12 @@ func (uc *UseCase) Confirm(ctx context.Context, adminUserID uuid.UUID, input dom
 			SkippedRows:       job.SkippedRows,
 			FailedRows:        job.FailedRows,
 		}, nil
+	}
+	if job.Status != domain.JobStatusPendingApproval {
+		return nil, apperrors.New("IMPORT_NOT_APPROVABLE", "รายการนำเข้านี้ยังไม่พร้อมอนุมัติ", 400)
+	}
+	if job.InvalidRows > 0 {
+		return nil, apperrors.New("INVALID_ROWS", "ยังไม่สามารถอนุมัติได้ เพราะยังมีรายการผิดพลาด", 400)
 	}
 
 	rows, err := uc.imports.FindRowsByJobID(ctx, input.ImportID)
@@ -336,6 +351,88 @@ func (uc *UseCase) Confirm(ctx context.Context, adminUserID uuid.UUID, input dom
 		SkippedRows:       skipped,
 		FailedRows:        0,
 	}, nil
+}
+
+func (uc *UseCase) GetJob(ctx context.Context, id uuid.UUID) (*ImportJobResponse, error) {
+	if id == uuid.Nil {
+		return nil, apperrors.ErrInvalidInput
+	}
+	job, err := uc.imports.FindJobByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if job == nil {
+		return nil, apperrors.ErrNotFound
+	}
+	resp := toImportJobResponse(*job)
+	return &resp, nil
+}
+
+func (uc *UseCase) Approve(ctx context.Context, adminUserID uuid.UUID, importID uuid.UUID) (*domain.ImportConfirmResult, error) {
+	return uc.Confirm(ctx, adminUserID, domain.ImportConfirmInput{
+		ImportID:            importID,
+		ImportOnlyValidRows: false,
+	})
+}
+
+func (uc *UseCase) Reject(ctx context.Context, adminUserID uuid.UUID, input domain.ImportRejectInput) (*ImportJobResponse, error) {
+	if input.ImportID == uuid.Nil {
+		return nil, apperrors.ErrInvalidInput
+	}
+	job, err := uc.imports.FindJobByID(ctx, input.ImportID)
+	if err != nil {
+		return nil, err
+	}
+	if job == nil {
+		return nil, apperrors.ErrNotFound
+	}
+	if job.Status == domain.JobStatusImported {
+		return nil, apperrors.New("IMPORT_ALREADY_IMPORTED", "รายการนี้นำเข้าแล้ว ไม่สามารถปฏิเสธได้", 400)
+	}
+	if err := uc.imports.MarkRejected(ctx, input.ImportID); err != nil {
+		return nil, err
+	}
+	job.Status = domain.JobStatusRejected
+	resp := toImportJobResponse(*job)
+	return &resp, nil
+}
+
+func (uc *UseCase) ErrorReport(ctx context.Context, importID uuid.UUID) ([]byte, error) {
+	if importID == uuid.Nil {
+		return nil, apperrors.ErrInvalidInput
+	}
+	job, err := uc.imports.FindJobByID(ctx, importID)
+	if err != nil {
+		return nil, err
+	}
+	if job == nil {
+		return nil, apperrors.ErrNotFound
+	}
+	rows, err := uc.imports.FindRowsByJobID(ctx, importID)
+	if err != nil {
+		return nil, err
+	}
+
+	var buf bytes.Buffer
+	writer := csv.NewWriter(&buf)
+	_ = writer.Write([]string{"row_number", "subject_code", "question_text", "errors", "warnings"})
+	for _, row := range rows {
+		if len(row.Errors) == 0 && len(row.Warnings) == 0 {
+			continue
+		}
+		_ = writer.Write([]string{
+			strconv.Itoa(row.RowNumber),
+			row.SubjectCode,
+			row.QuestionText,
+			strings.Join(row.Errors, "; "),
+			strings.Join(row.Warnings, "; "),
+		})
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func buildQuestion(subjectID uuid.UUID, row domain.ImportJobRow) *qdomain.Question {
@@ -443,17 +540,27 @@ func resolveImportTagRefs(ctx context.Context, tags tagrepo.TagAdminRepository, 
 }
 
 type ImportJobResponse struct {
-	ID                string  `json:"id"`
-	Filename          string  `json:"filename"`
-	Status            string  `json:"status"`
-	TotalRows         int     `json:"total_rows"`
-	ValidRows         int     `json:"valid_rows"`
-	InvalidRows       int     `json:"invalid_rows"`
-	ImportedQuestions int     `json:"imported_questions"`
-	SkippedRows       int     `json:"skipped_rows"`
-	FailedRows        int     `json:"failed_rows"`
-	CreatedAt         string  `json:"created_at"`
-	ConfirmedAt       *string `json:"confirmed_at,omitempty"`
+	ID                string            `json:"id"`
+	Filename          string            `json:"filename"`
+	OriginalFilename  string            `json:"original_filename"`
+	FileType          string            `json:"file_type"`
+	Status            string            `json:"status"`
+	TotalRows         int               `json:"total_rows"`
+	ValidRows         int               `json:"valid_rows"`
+	InvalidRows       int               `json:"invalid_rows"`
+	ImportedQuestions int               `json:"imported_questions"`
+	SkippedRows       int               `json:"skipped_rows"`
+	FailedRows        int               `json:"failed_rows"`
+	UploadedBy        AdminUserResponse `json:"uploaded_by"`
+	CreatedAt         string            `json:"created_at"`
+	UploadedAt        string            `json:"uploaded_at"`
+	ConfirmedAt       *string           `json:"confirmed_at,omitempty"`
+}
+
+type AdminUserResponse struct {
+	ID    string `json:"id"`
+	Name  string `json:"name,omitempty"`
+	Email string `json:"email,omitempty"`
 }
 
 type ImportJobListFilter struct {
@@ -510,6 +617,8 @@ func toImportJobResponse(job domain.ImportJob) ImportJobResponse {
 	out := ImportJobResponse{
 		ID:                job.ID.String(),
 		Filename:          job.Filename,
+		OriginalFilename:  job.Filename,
+		FileType:          strings.TrimPrefix(strings.ToLower(filepath.Ext(job.Filename)), "."),
 		Status:            job.Status,
 		TotalRows:         job.TotalRows,
 		ValidRows:         job.ValidRows,
@@ -517,11 +626,203 @@ func toImportJobResponse(job domain.ImportJob) ImportJobResponse {
 		ImportedQuestions: job.ImportedQuestions,
 		SkippedRows:       job.SkippedRows,
 		FailedRows:        job.FailedRows,
-		CreatedAt:         job.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		UploadedBy: AdminUserResponse{
+			ID:    job.AdminUserID.String(),
+			Name:  strings.TrimSpace(job.AdminUserName),
+			Email: strings.TrimSpace(job.AdminUserEmail),
+		},
+		CreatedAt:  job.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		UploadedAt: job.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
 	}
 	if job.ConfirmedAt != nil {
 		s := job.ConfirmedAt.Format("2006-01-02T15:04:05Z07:00")
 		out.ConfirmedAt = &s
 	}
 	return out
+}
+
+type ImportItemChoiceInput struct {
+	Label    string `json:"label"`
+	Text     string `json:"text"`
+	ImageURL string `json:"image_url,omitempty"`
+}
+
+type ImportItemParsedData struct {
+	SubjectCode         string                  `json:"subject_code"`
+	QuestionGroupCodes  []string                `json:"question_group_codes"`
+	QuestionType        string                  `json:"question_type"`
+	ContentFormat       string                  `json:"content_format"`
+	QuestionText        string                  `json:"question_text"`
+	QuestionImageURL    string                  `json:"question_image_url,omitempty"`
+	Choices             []ImportItemChoiceInput `json:"choices"`
+	CorrectAnswer       string                  `json:"correct_answer"`
+	Explanation         string                  `json:"explanation"`
+	ExplanationImageURL string                  `json:"explanation_image_url,omitempty"`
+	Difficulty          string                  `json:"difficulty,omitempty"`
+	Status              string                  `json:"status,omitempty"`
+}
+
+type UpdateImportItemInput struct {
+	BatchID    uuid.UUID            `json:"-"`
+	ItemID     uuid.UUID            `json:"-"`
+	ParsedData ImportItemParsedData `json:"parsed_data"`
+}
+
+type UpdateImportItemResponse struct {
+	ID                 string               `json:"id"`
+	RowNumber          int                  `json:"row_number"`
+	ParsedData         ImportItemParsedData `json:"parsed_data"`
+	ValidationErrors   []string             `json:"validation_errors"`
+	ValidationWarnings []string             `json:"validation_warnings"`
+	IsValid            bool                 `json:"is_valid"`
+}
+
+func (uc *UseCase) UpdateItem(ctx context.Context, adminUserID uuid.UUID, input UpdateImportItemInput) (*UpdateImportItemResponse, error) {
+	if input.BatchID == uuid.Nil || input.ItemID == uuid.Nil {
+		return nil, apperrors.ErrInvalidInput
+	}
+	job, err := uc.imports.FindJobByID(ctx, input.BatchID)
+	if err != nil {
+		return nil, err
+	}
+	if job == nil {
+		return nil, apperrors.ErrNotFound
+	}
+	if !isEditableImportStatus(job.Status) {
+		return nil, apperrors.New("IMPORT_NOT_EDITABLE", "รายการนำเข้านี้ไม่สามารถแก้ไขได้", 400)
+	}
+	existing, err := uc.imports.FindRowByID(ctx, input.BatchID, input.ItemID)
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil {
+		return nil, apperrors.ErrNotFound
+	}
+
+	rows, err := uc.imports.FindRowsByJobID(ctx, input.BatchID)
+	if err != nil {
+		return nil, err
+	}
+	candidate := importQuestionRowFromParsedData(input.ParsedData, *existing)
+	textCounts := make(map[string]int)
+	for _, row := range rows {
+		text := strings.TrimSpace(row.QuestionText)
+		if row.ID == input.ItemID {
+			text = strings.TrimSpace(candidate.QuestionText)
+		}
+		if text != "" {
+			textCounts[text]++
+		}
+	}
+
+	preview := validateRow(ctx, candidate, uc.subjects, uc.tags, uc.imports.ExistsQuestionText, textCounts, map[string][]byte{})
+	updated := previewRowToJobRow(input.BatchID, preview, existing.CreatedAt)
+	updated.ID = existing.ID
+	updated.QuestionImage = existing.QuestionImage
+	updated.ChoiceAImage = existing.ChoiceAImage
+	updated.ChoiceBImage = existing.ChoiceBImage
+	updated.ChoiceCImage = existing.ChoiceCImage
+	updated.ChoiceDImage = existing.ChoiceDImage
+	updated.ExplanationImage = existing.ExplanationImage
+
+	validRows := 0
+	invalidRows := 0
+	for _, row := range rows {
+		valid := row.Valid
+		if row.ID == input.ItemID {
+			valid = updated.Valid
+		}
+		if valid {
+			validRows++
+		} else {
+			invalidRows++
+		}
+	}
+	nextStatus := domain.JobStatusPendingApproval
+	if invalidRows > 0 {
+		nextStatus = domain.JobStatusValidationFailed
+	}
+	if err := uc.imports.UpdateRowAndJobStats(ctx, updated, validRows, invalidRows, nextStatus); err != nil {
+		return nil, err
+	}
+
+	resp := importItemResponseFromRow(updated)
+	return &resp, nil
+}
+
+func isEditableImportStatus(status string) bool {
+	return status == domain.JobStatusValidationFailed ||
+		status == domain.JobStatusPendingApproval ||
+		status == domain.JobStatusUploaded
+}
+
+func importQuestionRowFromParsedData(data ImportItemParsedData, existing domain.ImportJobRow) domain.ImportQuestionRow {
+	row := domain.ImportQuestionRow{
+		RowNumber:           existing.RowNumber,
+		SubjectCode:         data.SubjectCode,
+		Tags:                strings.Join(data.QuestionGroupCodes, "|"),
+		QuestionType:        data.QuestionType,
+		ContentFormat:       data.ContentFormat,
+		QuestionText:        data.QuestionText,
+		QuestionImageURL:    data.QuestionImageURL,
+		CorrectChoice:       data.CorrectAnswer,
+		Explanation:         data.Explanation,
+		ExplanationImageURL: data.ExplanationImageURL,
+		Difficulty:          data.Difficulty,
+		Status:              data.Status,
+	}
+	if row.Difficulty == "" {
+		row.Difficulty = existing.Difficulty
+	}
+	if row.Status == "" {
+		row.Status = existing.Status
+	}
+	if len(data.Choices) > 0 {
+		for _, choice := range data.Choices {
+			switch strings.ToUpper(strings.TrimSpace(choice.Label)) {
+			case qdomain.ChoiceA, "ก":
+				row.ChoiceA = choice.Text
+				row.ChoiceAImageURL = choice.ImageURL
+			case qdomain.ChoiceB, "ข":
+				row.ChoiceB = choice.Text
+				row.ChoiceBImageURL = choice.ImageURL
+			case qdomain.ChoiceC, "ค":
+				row.ChoiceC = choice.Text
+				row.ChoiceCImageURL = choice.ImageURL
+			case qdomain.ChoiceD, "ง":
+				row.ChoiceD = choice.Text
+				row.ChoiceDImageURL = choice.ImageURL
+			}
+		}
+	}
+	return row
+}
+
+func importItemResponseFromRow(row domain.ImportJobRow) UpdateImportItemResponse {
+	return UpdateImportItemResponse{
+		ID:        row.ID.String(),
+		RowNumber: row.RowNumber,
+		ParsedData: ImportItemParsedData{
+			SubjectCode:        row.SubjectCode,
+			QuestionGroupCodes: parseTagCodes(row.Tags),
+			QuestionType:       row.QuestionType,
+			ContentFormat:      row.ContentFormat,
+			QuestionText:       row.QuestionText,
+			QuestionImageURL:   row.QuestionImageURL,
+			Choices: []ImportItemChoiceInput{
+				{Label: qdomain.ChoiceA, Text: row.ChoiceA, ImageURL: row.ChoiceAImageURL},
+				{Label: qdomain.ChoiceB, Text: row.ChoiceB, ImageURL: row.ChoiceBImageURL},
+				{Label: qdomain.ChoiceC, Text: row.ChoiceC, ImageURL: row.ChoiceCImageURL},
+				{Label: qdomain.ChoiceD, Text: row.ChoiceD, ImageURL: row.ChoiceDImageURL},
+			},
+			CorrectAnswer:       row.CorrectChoice,
+			Explanation:         row.Explanation,
+			ExplanationImageURL: row.ExplanationImageURL,
+			Difficulty:          row.Difficulty,
+			Status:              row.Status,
+		},
+		ValidationErrors:   row.Errors,
+		ValidationWarnings: row.Warnings,
+		IsValid:            row.Valid,
+	}
 }

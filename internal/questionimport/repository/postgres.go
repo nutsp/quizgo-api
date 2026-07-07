@@ -42,17 +42,19 @@ func (s *StringList) Scan(value interface{}) error {
 }
 
 type ImportJobModel struct {
-	ID                uuid.UUID  `gorm:"type:uuid;primaryKey"`
-	AdminUserID       uuid.UUID  `gorm:"type:uuid;not null"`
-	Filename          string     `gorm:"not null"`
-	Status            string     `gorm:"type:varchar(50);not null;default:preview"`
-	TotalRows         int        `gorm:"not null;default:0"`
-	ValidRows         int        `gorm:"not null;default:0"`
-	InvalidRows       int        `gorm:"not null;default:0"`
-	ImportedQuestions int        `gorm:"not null;default:0"`
-	SkippedRows       int        `gorm:"not null;default:0"`
-	FailedRows        int        `gorm:"not null;default:0"`
-	CreatedAt         time.Time  `gorm:"not null"`
+	ID                uuid.UUID `gorm:"type:uuid;primaryKey"`
+	AdminUserID       uuid.UUID `gorm:"type:uuid;not null"`
+	AdminUserName     string    `gorm:"->;column:admin_user_name"`
+	AdminUserEmail    string    `gorm:"->;column:admin_user_email"`
+	Filename          string    `gorm:"not null"`
+	Status            string    `gorm:"type:varchar(50);not null;default:preview"`
+	TotalRows         int       `gorm:"not null;default:0"`
+	ValidRows         int       `gorm:"not null;default:0"`
+	InvalidRows       int       `gorm:"not null;default:0"`
+	ImportedQuestions int       `gorm:"not null;default:0"`
+	SkippedRows       int       `gorm:"not null;default:0"`
+	FailedRows        int       `gorm:"not null;default:0"`
+	CreatedAt         time.Time `gorm:"not null"`
 	ConfirmedAt       *time.Time
 }
 
@@ -116,10 +118,13 @@ var importJobSortColumns = map[string]string{
 type Repository interface {
 	CreatePreview(ctx context.Context, job *domain.ImportJob, rows []domain.ImportJobRow) error
 	FindJobByID(ctx context.Context, id uuid.UUID) (*domain.ImportJob, error)
+	FindRowByID(ctx context.Context, jobID uuid.UUID, rowID uuid.UUID) (*domain.ImportJobRow, error)
 	FindRowsByJobID(ctx context.Context, jobID uuid.UUID) ([]domain.ImportJobRow, error)
 	ListPreviewRows(ctx context.Context, jobID uuid.UUID, filter PreviewRowListFilter) ([]domain.ImportJobRow, int64, error)
 	ListJobs(ctx context.Context, filter JobListFilter) ([]domain.ImportJob, int64, error)
+	UpdateRowAndJobStats(ctx context.Context, row domain.ImportJobRow, validRows int, invalidRows int, status string) error
 	MarkImported(ctx context.Context, jobID uuid.UUID, imported, skipped, failed int) error
+	MarkRejected(ctx context.Context, jobID uuid.UUID) error
 	ExistsQuestionText(ctx context.Context, text string) (bool, error)
 	RunInTransaction(ctx context.Context, fn func(tx *gorm.DB) error) error
 	MarkImportedTx(tx *gorm.DB, jobID uuid.UUID, imported, skipped, failed int) error
@@ -161,7 +166,12 @@ func (r *postgresRepository) CreatePreview(ctx context.Context, job *domain.Impo
 
 func (r *postgresRepository) FindJobByID(ctx context.Context, id uuid.UUID) (*domain.ImportJob, error) {
 	var model ImportJobModel
-	err := r.db.WithContext(ctx).Where("id = ?", id).First(&model).Error
+	err := r.db.WithContext(ctx).
+		Model(&ImportJobModel{}).
+		Select("question_import_jobs.*, users.display_name AS admin_user_name, users.email AS admin_user_email").
+		Joins("LEFT JOIN users ON users.id = question_import_jobs.admin_user_id").
+		Where("question_import_jobs.id = ?", id).
+		First(&model).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
@@ -170,6 +180,21 @@ func (r *postgresRepository) FindJobByID(ctx context.Context, id uuid.UUID) (*do
 	}
 	job := mapJobFromModel(model)
 	return &job, nil
+}
+
+func (r *postgresRepository) FindRowByID(ctx context.Context, jobID uuid.UUID, rowID uuid.UUID) (*domain.ImportJobRow, error) {
+	var model ImportRowModel
+	err := r.db.WithContext(ctx).
+		Where("import_job_id = ? AND id = ?", jobID, rowID).
+		First(&model).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	row := mapRowFromModel(model)
+	return &row, nil
 }
 
 func (r *postgresRepository) FindRowsByJobID(ctx context.Context, jobID uuid.UUID) ([]domain.ImportJobRow, error) {
@@ -246,7 +271,10 @@ func (r *postgresRepository) ListJobs(ctx context.Context, filter JobListFilter)
 	sortCol := pagination.ResolveSort(filter.Sort, importJobSortColumns, "created_at")
 	orderDir := pagination.ResolveOrder(filter.Order, true)
 
-	q := r.db.WithContext(ctx).Model(&ImportJobModel{})
+	q := r.db.WithContext(ctx).
+		Model(&ImportJobModel{}).
+		Select("question_import_jobs.*, users.display_name AS admin_user_name, users.email AS admin_user_email").
+		Joins("LEFT JOIN users ON users.id = question_import_jobs.admin_user_id")
 	if filter.Query != "" {
 		q = q.Where("filename ILIKE ?", "%"+filter.Query+"%")
 	}
@@ -281,8 +309,60 @@ func (r *postgresRepository) ListJobs(ctx context.Context, filter JobListFilter)
 	return jobs, total, nil
 }
 
+func (r *postgresRepository) UpdateRowAndJobStats(ctx context.Context, row domain.ImportJobRow, validRows int, invalidRows int, status string) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		rowModel := mapRowToModel(row)
+		if err := tx.Model(&ImportRowModel{}).Where("id = ? AND import_job_id = ?", row.ID, row.ImportJobID).Updates(map[string]any{
+			"subject_code":          rowModel.SubjectCode,
+			"tags":                  rowModel.Tags,
+			"question_type":         rowModel.QuestionType,
+			"content_format":        rowModel.ContentFormat,
+			"question_text":         rowModel.QuestionText,
+			"question_image":        rowModel.QuestionImage,
+			"question_image_url":    rowModel.QuestionImageURL,
+			"choice_a":              rowModel.ChoiceA,
+			"choice_a_image":        rowModel.ChoiceAImage,
+			"choice_a_image_url":    rowModel.ChoiceAImageURL,
+			"choice_b":              rowModel.ChoiceB,
+			"choice_b_image":        rowModel.ChoiceBImage,
+			"choice_b_image_url":    rowModel.ChoiceBImageURL,
+			"choice_c":              rowModel.ChoiceC,
+			"choice_c_image":        rowModel.ChoiceCImage,
+			"choice_c_image_url":    rowModel.ChoiceCImageURL,
+			"choice_d":              rowModel.ChoiceD,
+			"choice_d_image":        rowModel.ChoiceDImage,
+			"choice_d_image_url":    rowModel.ChoiceDImageURL,
+			"correct_choice":        rowModel.CorrectChoice,
+			"explanation":           rowModel.Explanation,
+			"explanation_image":     rowModel.ExplanationImage,
+			"explanation_image_url": rowModel.ExplanationImageURL,
+			"difficulty":            rowModel.Difficulty,
+			"status":                rowModel.Status,
+			"valid":                 rowModel.Valid,
+			"errors":                rowModel.Errors,
+			"warnings":              rowModel.Warnings,
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&ImportJobModel{}).Where("id = ?", row.ImportJobID).Updates(map[string]any{
+			"valid_rows":   validRows,
+			"invalid_rows": invalidRows,
+			"status":       status,
+		}).Error
+	})
+}
+
 func (r *postgresRepository) MarkImported(ctx context.Context, jobID uuid.UUID, imported, skipped, failed int) error {
 	return r.markImported(r.db.WithContext(ctx), jobID, imported, skipped, failed)
+}
+
+func (r *postgresRepository) MarkRejected(ctx context.Context, jobID uuid.UUID) error {
+	return r.db.WithContext(ctx).
+		Model(&ImportJobModel{}).
+		Where("id = ?", jobID).
+		Updates(map[string]any{
+			"status": domain.JobStatusRejected,
+		}).Error
 }
 
 func (r *postgresRepository) MarkImportedTx(tx *gorm.DB, jobID uuid.UUID, imported, skipped, failed int) error {
@@ -317,6 +397,8 @@ func mapJobToModel(job *domain.ImportJob) ImportJobModel {
 	return ImportJobModel{
 		ID:                job.ID,
 		AdminUserID:       job.AdminUserID,
+		AdminUserName:     job.AdminUserName,
+		AdminUserEmail:    job.AdminUserEmail,
 		Filename:          job.Filename,
 		Status:            job.Status,
 		TotalRows:         job.TotalRows,
@@ -334,6 +416,8 @@ func mapJobFromModel(m ImportJobModel) domain.ImportJob {
 	return domain.ImportJob{
 		ID:                m.ID,
 		AdminUserID:       m.AdminUserID,
+		AdminUserName:     m.AdminUserName,
+		AdminUserEmail:    m.AdminUserEmail,
 		Filename:          m.Filename,
 		Status:            m.Status,
 		TotalRows:         m.TotalRows,

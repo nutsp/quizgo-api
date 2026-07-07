@@ -31,7 +31,7 @@ func (c AnswerSheetLayoutConfig) Validate() error {
 	if c.BlockColumns < 1 || c.BlockColumns > 4 {
 		return fmt.Errorf("block_columns out of range")
 	}
-	if c.QuestionsPerBlock < 5 || c.QuestionsPerBlock > 50 {
+	if c.QuestionsPerBlock < 1 || c.QuestionsPerBlock > 50 {
 		return fmt.Errorf("questions_per_block out of range")
 	}
 	if c.ChoiceLabelStyle != ChoiceLabelThai && c.ChoiceLabelStyle != ChoiceLabelEnglish {
@@ -45,7 +45,7 @@ func NormalizeAnswerSheetLayout(c AnswerSheetLayoutConfig) AnswerSheetLayoutConf
 	if c.BlockColumns < 1 || c.BlockColumns > 4 {
 		c.BlockColumns = def.BlockColumns
 	}
-	if c.QuestionsPerBlock < 5 || c.QuestionsPerBlock > 50 {
+	if c.QuestionsPerBlock < 1 || c.QuestionsPerBlock > 50 {
 		c.QuestionsPerBlock = def.QuestionsPerBlock
 	}
 	if c.ChoiceLabelStyle != ChoiceLabelThai && c.ChoiceLabelStyle != ChoiceLabelEnglish {

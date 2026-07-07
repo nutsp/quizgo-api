@@ -14,6 +14,7 @@ const (
 	MyExamSourcePrivateGrant    = "private_grant"
 	MyExamSourcePremiumActivity = "premium_activity"
 	MyExamSourceFreeActivity    = "free_activity"
+	MyExamSourceTrialActivity   = "trial_activity"
 
 	MyExamTabAll          = "all"
 	MyExamTabInProgress   = "in_progress"
@@ -178,6 +179,7 @@ var myExamSourcePriority = map[string]int{
 	MyExamSourceManualGrant:     4,
 	MyExamSourceSinglePurchase:  3,
 	MyExamSourcePremiumActivity: 2,
+	MyExamSourceTrialActivity:   2,
 	MyExamSourceFreeActivity:    1,
 }
 
@@ -192,6 +194,9 @@ func ResolveEntitlementAccessSource(setAccessType, entitlementSource string) str
 }
 
 func ResolveActivityAccessSource(setAccessType, attemptAccessSource string) string {
+	if setAccessType == examsetdomain.AccessTrial || attemptAccessSource == AccessSourceTrial {
+		return MyExamSourceTrialActivity
+	}
 	if setAccessType == examsetdomain.AccessFree {
 		return MyExamSourceFreeActivity
 	}
@@ -229,6 +234,8 @@ func MyExamSourceLabel(source string, hasPremium bool) string {
 		return "เคยทำผ่าน Premium\nPremium หมดอายุแล้ว"
 	case MyExamSourceFreeActivity:
 		return "เคยทำข้อสอบฟรี"
+	case MyExamSourceTrialActivity:
+		return "เคยทดลองทำ"
 	default:
 		return ""
 	}
@@ -236,9 +243,7 @@ func MyExamSourceLabel(source string, hasPremium bool) string {
 
 func ShouldIncludeActivityRow(setAccessType string, attemptAccessSource *string) bool {
 	switch setAccessType {
-	case examsetdomain.AccessFree:
-		return true
-	case examsetdomain.AccessPremium:
+	case examsetdomain.AccessFree, examsetdomain.AccessTrial, examsetdomain.AccessPremium:
 		return true
 	default:
 		return true

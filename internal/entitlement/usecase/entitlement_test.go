@@ -148,6 +148,15 @@ func TestCheckExamSetAccess(t *testing.T) {
 			wantStart: true,
 		},
 		{
+			name: "trial allowed",
+			mutate: func(s *examsetdomain.ExamSet) {
+				s.AccessType = examsetdomain.AccessTrial
+			},
+			userID:    userPtr,
+			questions: 5,
+			wantStart: true,
+		},
+		{
 			name: "paid without entitlement denied",
 			mutate: func(s *examsetdomain.ExamSet) {
 				s.AccessType = examsetdomain.AccessPaid
@@ -323,6 +332,9 @@ func TestCheckExamSetAccess(t *testing.T) {
 			}
 			if got.CanStart && set.AccessType == examsetdomain.AccessFree && got.AccessSource != entdomain.AccessSourceFree {
 				t.Fatalf("free access_source = %q", got.AccessSource)
+			}
+			if got.CanStart && set.AccessType == examsetdomain.AccessTrial && got.AccessSource != entdomain.AccessSourceTrial {
+				t.Fatalf("trial access_source = %q", got.AccessSource)
 			}
 			if got.CanStart && set.AccessType == examsetdomain.AccessPremium && got.HasPremium && got.AccessSource != entdomain.AccessSourcePremium {
 				t.Fatalf("premium access_source = %q", got.AccessSource)

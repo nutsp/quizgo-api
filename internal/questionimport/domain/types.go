@@ -7,9 +7,18 @@ import (
 )
 
 const (
-	JobStatusPreview   = "preview"
-	JobStatusImported  = "imported"
-	JobStatusConfirmed = "already_imported"
+	JobStatusUploaded         = "uploaded"
+	JobStatusValidating       = "validating"
+	JobStatusPendingApproval  = "pending_approval"
+	JobStatusApproved         = "approved"
+	JobStatusImported         = "imported"
+	JobStatusValidationFailed = "validation_failed"
+	JobStatusRejected         = "rejected"
+	JobStatusImportFailed     = "import_failed"
+	JobStatusConfirmed        = "already_imported"
+
+	// Deprecated status retained for old preview endpoints and historical rows.
+	JobStatusPreview = "preview"
 
 	MaxFileSize = 5 * 1024 * 1024 // 5MB
 )
@@ -70,6 +79,7 @@ type ImportQuestionRow struct {
 }
 
 type ImportPreviewRow struct {
+	ID        uuid.UUID         `json:"id"`
 	RowNumber int               `json:"row_number"`
 	Data      ImportQuestionRow `json:"data"`
 	Valid     bool              `json:"valid"`
@@ -118,9 +128,16 @@ type ImportConfirmResult struct {
 	FailedRows        int       `json:"failed_rows,omitempty"`
 }
 
+type ImportRejectInput struct {
+	ImportID uuid.UUID `json:"import_id"`
+	Reason   string    `json:"reason"`
+}
+
 type ImportJob struct {
 	ID                uuid.UUID
 	AdminUserID       uuid.UUID
+	AdminUserName     string
+	AdminUserEmail    string
 	Filename          string
 	Status            string
 	TotalRows         int

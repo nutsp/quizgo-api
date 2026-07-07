@@ -44,6 +44,7 @@ type QuestionAdminRepository interface {
 	CountAll(ctx context.Context) (int64, error)
 	ListLatest(ctx context.Context, limit int) ([]domain.Question, error)
 	IsUsedInAttempts(ctx context.Context, questionID uuid.UUID) (bool, error)
+	UpdateIsActive(ctx context.Context, id uuid.UUID, isActive bool) error
 }
 
 type questionAdminRepository struct {
@@ -265,6 +266,13 @@ func (r *questionAdminRepository) Delete(ctx context.Context, id uuid.UUID) (boo
 		}
 		return tx.Delete(&QuestionModel{}, "id = ?", id).Error
 	})
+}
+
+func (r *questionAdminRepository) UpdateIsActive(ctx context.Context, id uuid.UUID, isActive bool) error {
+	return r.db.WithContext(ctx).Model(&QuestionModel{}).Where("id = ?", id).Updates(map[string]any{
+		"is_active":  isActive,
+		"updated_at": time.Now().UTC(),
+	}).Error
 }
 
 func (r *questionAdminRepository) CountByStatus(ctx context.Context, status string) (int64, error) {
