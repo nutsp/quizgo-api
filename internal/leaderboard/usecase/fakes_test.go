@@ -27,6 +27,7 @@ type projectionFixture struct {
 	stopCalls   int
 	joinedWith  time.Time
 	stoppedWith time.Time
+	published   bool
 
 	enrollActiveOnEnsure bool
 }
@@ -49,6 +50,7 @@ func newProjectionFixture() *projectionFixture {
 		}},
 		bestScores: make(map[uuid.UUID]domain.ScoreCandidate),
 		entries:    make(map[uuid.UUID]leaderboardrepo.EntryRow),
+		published:  true,
 	}
 }
 
@@ -91,6 +93,7 @@ func (f *projectionFixture) JoinExamSet(_ context.Context, seasonID, examSetID u
 		return errors.New("unexpected season or exam set ID")
 	}
 	f.joinedWith = joinedAt
+	f.published = true
 	for _, interval := range f.intervals {
 		if interval.joinedAt.Equal(joinedAt) {
 			return nil
@@ -118,6 +121,7 @@ func (f *projectionFixture) StopExamSet(_ context.Context, examSetID uuid.UUID, 
 		return errors.New("unexpected exam set ID")
 	}
 	f.stoppedWith = stoppedAt
+	f.published = false
 	for i := len(f.intervals) - 1; i >= 0; i-- {
 		if f.intervals[i].stoppedAt == nil && !f.intervals[i].joinedAt.After(stoppedAt) {
 			stoppedAtCopy := stoppedAt
@@ -146,6 +150,48 @@ func (f *projectionFixture) GetEligibleSeason(_ context.Context, examSetID uuid.
 		}
 	}
 	return nil, nil
+}
+
+func (f *projectionFixture) ProjectBestScore(
+	ctx context.Context,
+	userID, examSetID, attemptID uuid.UUID,
+	submittedAt time.Time,
+	candidate domain.ScoreCandidate,
+) (*leaderboardrepo.BestScoreProjection, error) {
+	projection := &leaderboardrepo.BestScoreProjection{}
+	if !f.published {
+		return projection, nil
+	}
+
+	season, err := f.GetEligibleSeason(ctx, examSetID, submittedAt)
+	if err != nil || season == nil {
+		return projection, err
+	}
+	projection.Season = season
+	projection.PreviousRank, err = f.GetUserRank(ctx, season.ID, userID)
+	if err != nil {
+		return nil, err
+	}
+	projection.ScoreUpdate, err = f.UpsertBestScore(
+		ctx,
+		season.ID,
+		userID,
+		examSetID,
+		attemptID,
+		candidate,
+	)
+	if err != nil {
+		return nil, err
+	}
+	projection.Entry, err = f.RebuildEntry(ctx, season.ID, userID)
+	if err != nil {
+		return nil, err
+	}
+	projection.CurrentRank, err = f.GetUserRank(ctx, season.ID, userID)
+	if err != nil {
+		return nil, err
+	}
+	return projection, nil
 }
 
 func (f *projectionFixture) UpsertBestScore(

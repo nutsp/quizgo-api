@@ -17,6 +17,7 @@ type ProjectorRepository interface {
 	JoinExamSet(context.Context, uuid.UUID, uuid.UUID, time.Time) error
 	StopExamSet(context.Context, uuid.UUID, time.Time) error
 	GetEligibleSeason(context.Context, uuid.UUID, time.Time) (*leaderboardrepo.SeasonRow, error)
+	ProjectBestScore(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, time.Time, domain.ScoreCandidate) (*leaderboardrepo.BestScoreProjection, error)
 	UpsertBestScore(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, domain.ScoreCandidate) (*leaderboardrepo.BestScoreUpdate, error)
 	RebuildEntry(context.Context, uuid.UUID, uuid.UUID) (*leaderboardrepo.EntryRow, error)
 	GetUserRank(context.Context, uuid.UUID, uuid.UUID) (*leaderboardrepo.UserRankRow, error)
@@ -38,69 +39,48 @@ func (p *Projector) ProjectAttempt(ctx context.Context, input domain.ProjectionI
 	input.Candidate.Points = normalizeProjectedPoints(input.Candidate.Points)
 	result := &domain.ProjectionUpdate{TrackCode: input.TrackCode}
 
-	season, err := p.repo.GetEligibleSeason(ctx, input.ExamSetID, input.SubmittedAt)
+	window, err := domain.BangkokSeasonWindow(input.SubmittedAt)
 	if err != nil {
 		return nil, err
 	}
-	if season == nil {
-		window, err := domain.BangkokSeasonWindow(input.SubmittedAt)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := p.repo.EnsureSeason(ctx, input.ExamTrackID, window); err != nil {
-			return nil, err
-		}
-		season, err = p.repo.GetEligibleSeason(ctx, input.ExamSetID, input.SubmittedAt)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if season == nil {
-		return result, nil
-	}
-	result.SeasonID = season.ID.String()
-	result.Year = season.Year
-	result.Month = season.Month
-
-	previousRank, err := p.repo.GetUserRank(ctx, season.ID, input.UserID)
-	if err != nil {
+	if _, err := p.repo.EnsureSeason(ctx, input.ExamTrackID, window); err != nil {
 		return nil, err
 	}
 
-	scoreUpdate, err := p.repo.UpsertBestScore(
+	projection, err := p.repo.ProjectBestScore(
 		ctx,
-		season.ID,
 		input.UserID,
 		input.ExamSetID,
 		input.AttemptID,
+		input.SubmittedAt,
 		input.Candidate,
 	)
 	if err != nil {
 		return nil, err
 	}
+	if projection.Season == nil {
+		return result, nil
+	}
+	season := projection.Season
+	result.SeasonID = season.ID.String()
+	result.Year = season.Year
+	result.Month = season.Month
+
+	scoreUpdate := projection.ScoreUpdate
 	if scoreUpdate.Previous != nil {
 		result.BestScoreBefore = scoreUpdate.Previous.Points
 	}
 	result.BestScoreAfter = scoreUpdate.Current.Points
 	result.ImprovedBestScore = scoreUpdate.Improved
 	result.PointsAdded = normalizeProjectedPoints(scoreUpdate.Current.Points - result.BestScoreBefore)
+	result.TotalPoints = projection.Entry.TotalPoints
 
-	entry, err := p.repo.RebuildEntry(ctx, season.ID, input.UserID)
-	if err != nil {
-		return nil, err
-	}
-	result.TotalPoints = entry.TotalPoints
-
-	currentRank, err := p.repo.GetUserRank(ctx, season.ID, input.UserID)
-	if err != nil {
-		return nil, err
-	}
-	if previousRank != nil {
-		rank := previousRank.Rank
+	if projection.PreviousRank != nil {
+		rank := projection.PreviousRank.Rank
 		result.PreviousRank = &rank
 	}
-	if currentRank != nil {
-		result.CurrentRank = currentRank.Rank
+	if projection.CurrentRank != nil {
+		result.CurrentRank = projection.CurrentRank.Rank
 	}
 	return result, nil
 }

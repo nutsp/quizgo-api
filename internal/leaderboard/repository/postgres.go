@@ -38,6 +38,14 @@ type UserRankRow struct {
 	TotalPoints float64
 }
 
+type BestScoreProjection struct {
+	Season       *SeasonRow
+	PreviousRank *UserRankRow
+	ScoreUpdate  *BestScoreUpdate
+	Entry        *EntryRow
+	CurrentRank  *UserRankRow
+}
+
 type ExamSetContextRow struct {
 	ID            uuid.UUID
 	Code          string
@@ -98,6 +106,7 @@ type Repository interface {
 	JoinExamSet(ctx context.Context, seasonID, examSetID uuid.UUID, joinedAt time.Time) error
 	StopExamSet(ctx context.Context, examSetID uuid.UUID, stoppedAt time.Time) error
 	GetEligibleSeason(ctx context.Context, examSetID uuid.UUID, submittedAt time.Time) (*SeasonRow, error)
+	ProjectBestScore(ctx context.Context, userID, examSetID, attemptID uuid.UUID, submittedAt time.Time, candidate domain.ScoreCandidate) (*BestScoreProjection, error)
 	UpsertBestScore(ctx context.Context, seasonID, userID, examSetID, attemptID uuid.UUID, candidate domain.ScoreCandidate) (*BestScoreUpdate, error)
 	RebuildEntry(ctx context.Context, seasonID, userID uuid.UUID) (*EntryRow, error)
 	GetUserRank(ctx context.Context, seasonID, userID uuid.UUID) (*UserRankRow, error)
@@ -136,17 +145,72 @@ const findSeasonSQL = `
 	WHERE exam_track_id = ? AND year = ? AND month = ?
 `
 
-const enrollSeasonExamSetsSQL = `
-	INSERT INTO leaderboard_season_exam_sets (id, season_id, exam_set_id, joined_at)
-	SELECT gen_random_uuid(), ?, id, ?
+const hasPriorSeasonSQL = `
+	SELECT EXISTS (
+		SELECT 1
+		FROM leaderboard_seasons
+		WHERE exam_track_id = ? AND starts_at < ?
+	)
+`
+
+const listRolloverExamSetCandidatesSQL = `
+	WITH prior_season AS (
+		SELECT id
+		FROM leaderboard_seasons
+		WHERE exam_track_id = ? AND starts_at < ?
+		ORDER BY starts_at DESC
+		LIMIT 1
+	)
+	SELECT es.id
+	FROM exam_sets es
+	JOIN leaderboard_season_exam_sets ses ON ses.exam_set_id = es.id
+	JOIN prior_season ps ON ps.id = ses.season_id
+	WHERE es.exam_track_id = ?
+		AND es.status = ?
+		AND es.is_active = true
+		AND ses.stopped_at IS NULL
+		AND (?::uuid IS NULL OR es.id <> ?)
+	ORDER BY es.id
+`
+
+const listBootstrapExamSetCandidatesSQL = `
+	SELECT id
 	FROM exam_sets
 	WHERE exam_track_id = ?
 		AND status = ?
 		AND is_active = true
+		AND (?::uuid IS NULL OR id <> ?)
+	ORDER BY id
 `
 
-const enrollSeasonExamSetsForPublishSQL = enrollSeasonExamSetsSQL + `
-		AND id <> ?
+const findRolloverExamSetStateSQL = `
+	WITH prior_season AS (
+		SELECT id
+		FROM leaderboard_seasons
+		WHERE exam_track_id = ? AND starts_at < ?
+		ORDER BY starts_at DESC
+		LIMIT 1
+	)
+	SELECT EXISTS (
+		SELECT 1
+		FROM exam_sets es
+		JOIN leaderboard_season_exam_sets ses ON ses.exam_set_id = es.id
+		JOIN prior_season ps ON ps.id = ses.season_id
+		WHERE es.id = ?
+			AND es.exam_track_id = ?
+			AND es.status = ?
+			AND es.is_active = true
+			AND ses.stopped_at IS NULL
+	)
+`
+
+const findBootstrapExamSetStateSQL = `
+	SELECT updated_at
+	FROM exam_sets
+	WHERE id = ?
+		AND exam_track_id = ?
+		AND status = ?
+		AND is_active = true
 `
 
 func (r *postgresRepository) EnsureSeason(ctx context.Context, examTrackID uuid.UUID, window domain.SeasonWindow) (*SeasonRow, error) {
@@ -180,13 +244,7 @@ func (r *postgresRepository) ensureSeason(
 			return tx.Raw(findSeasonSQL, examTrackID, window.Year, window.Month).Scan(&row).Error
 		}
 
-		enrollmentSQL := enrollSeasonExamSetsSQL
-		enrollmentArgs := []any{row.ID, row.StartsAt, examTrackID, examsetdomain.StatusPublished}
-		if excludedExamSetID != nil {
-			enrollmentSQL = enrollSeasonExamSetsForPublishSQL
-			enrollmentArgs = append(enrollmentArgs, *excludedExamSetID)
-		}
-		return tx.Exec(enrollmentSQL, enrollmentArgs...).Error
+		return r.enrollSeasonExamSets(tx, row, excludedExamSetID)
 	})
 	if err != nil {
 		return nil, err
@@ -194,8 +252,122 @@ func (r *postgresRepository) ensureSeason(
 	return &row, nil
 }
 
+func (r *postgresRepository) enrollSeasonExamSets(
+	tx *gorm.DB,
+	season SeasonRow,
+	excludedExamSetID *uuid.UUID,
+) error {
+	var hasPriorSeason bool
+	if err := tx.Raw(hasPriorSeasonSQL, season.ExamTrackID, season.StartsAt).Scan(&hasPriorSeason).Error; err != nil {
+		return err
+	}
+
+	var excluded any
+	if excludedExamSetID != nil {
+		excluded = *excludedExamSetID
+	}
+	var candidateIDs []uuid.UUID
+	// Later seasons inherit only open lifecycle state. The first season uses the
+	// persisted set-state timestamp as a conservative bootstrap boundary.
+	if hasPriorSeason {
+		if err := tx.Raw(
+			listRolloverExamSetCandidatesSQL,
+			season.ExamTrackID,
+			season.StartsAt,
+			season.ExamTrackID,
+			examsetdomain.StatusPublished,
+			excluded,
+			excluded,
+		).Scan(&candidateIDs).Error; err != nil {
+			return err
+		}
+	} else if err := tx.Raw(
+		listBootstrapExamSetCandidatesSQL,
+		season.ExamTrackID,
+		examsetdomain.StatusPublished,
+		excluded,
+		excluded,
+	).Scan(&candidateIDs).Error; err != nil {
+		return err
+	}
+
+	for _, examSetID := range candidateIDs {
+		if err := tx.Exec(acquireExamSetTransitionLockSQL, examSetID).Error; err != nil {
+			return err
+		}
+
+		joinedAt, eligible, err := effectiveSeasonJoinTime(tx, season, examSetID, hasPriorSeason)
+		if err != nil {
+			return err
+		}
+		if !eligible || !joinedAt.Before(season.EndsAt) {
+			continue
+		}
+		if err := tx.Exec(
+			insertSeasonExamSetIntervalSQL,
+			uuid.New(), season.ID, examSetID, joinedAt,
+		).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func effectiveSeasonJoinTime(
+	tx *gorm.DB,
+	season SeasonRow,
+	examSetID uuid.UUID,
+	hasPriorSeason bool,
+) (time.Time, bool, error) {
+	if hasPriorSeason {
+		var stillPublished bool
+		if err := tx.Raw(
+			findRolloverExamSetStateSQL,
+			season.ExamTrackID,
+			season.StartsAt,
+			examSetID,
+			season.ExamTrackID,
+			examsetdomain.StatusPublished,
+		).Scan(&stillPublished).Error; err != nil {
+			return time.Time{}, false, err
+		}
+		return season.StartsAt, stillPublished, nil
+	}
+
+	var stateUpdatedAt time.Time
+	if err := tx.Raw(
+		findBootstrapExamSetStateSQL,
+		examSetID,
+		season.ExamTrackID,
+		examsetdomain.StatusPublished,
+	).Scan(&stateUpdatedAt).Error; err != nil {
+		return time.Time{}, false, err
+	}
+	if stateUpdatedAt.IsZero() {
+		return time.Time{}, false, nil
+	}
+	if stateUpdatedAt.Before(season.StartsAt) {
+		stateUpdatedAt = season.StartsAt
+	}
+	return stateUpdatedAt, true, nil
+}
+
 const acquireExamSetTransitionLockSQL = `
 	SELECT pg_advisory_xact_lock(hashtextextended(CAST(? AS text), 0))
+`
+
+const acquireSeasonUserProjectionLockSQL = `
+	SELECT pg_advisory_xact_lock(
+		hashtextextended(CAST(? AS text) || ':' || CAST(? AS text), 1)
+	)
+`
+
+const findPublishedActiveExamSetSQL = `
+	SELECT EXISTS (
+		SELECT 1
+		FROM exam_sets
+		WHERE id = ? AND status = ? AND is_active = true
+	)
 `
 
 const findExactExamSetIntervalSQL = `
@@ -289,8 +461,12 @@ func (r *postgresRepository) StopExamSet(ctx context.Context, examSetID uuid.UUI
 }
 
 func (r *postgresRepository) GetEligibleSeason(ctx context.Context, examSetID uuid.UUID, submittedAt time.Time) (*SeasonRow, error) {
+	return getEligibleSeason(r.db.WithContext(ctx), examSetID, submittedAt)
+}
+
+func getEligibleSeason(db *gorm.DB, examSetID uuid.UUID, submittedAt time.Time) (*SeasonRow, error) {
 	var row SeasonRow
-	err := r.db.WithContext(ctx).Raw(`
+	err := db.Raw(`
 		SELECT s.id, s.exam_track_id, s.year, s.month, s.starts_at, s.ends_at
 		FROM leaderboard_seasons s
 		WHERE s.status = 'active'
@@ -316,6 +492,70 @@ func (r *postgresRepository) GetEligibleSeason(ctx context.Context, examSetID uu
 	return &row, nil
 }
 
+func (r *postgresRepository) ProjectBestScore(
+	ctx context.Context,
+	userID, examSetID, attemptID uuid.UUID,
+	submittedAt time.Time,
+	candidate domain.ScoreCandidate,
+) (*BestScoreProjection, error) {
+	projection := &BestScoreProjection{}
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(acquireExamSetTransitionLockSQL, examSetID).Error; err != nil {
+			return err
+		}
+
+		var currentlyPublished bool
+		if err := tx.Raw(
+			findPublishedActiveExamSetSQL,
+			examSetID,
+			examsetdomain.StatusPublished,
+		).Scan(&currentlyPublished).Error; err != nil {
+			return err
+		}
+		if !currentlyPublished {
+			return nil
+		}
+
+		season, err := getEligibleSeason(tx, examSetID, submittedAt)
+		if err != nil {
+			return err
+		}
+		if season == nil {
+			return nil
+		}
+		projection.Season = season
+
+		if err := tx.Exec(acquireSeasonUserProjectionLockSQL, season.ID, userID).Error; err != nil {
+			return err
+		}
+		projection.PreviousRank, err = getUserRank(tx, season.ID, userID)
+		if err != nil {
+			return err
+		}
+		projection.ScoreUpdate, err = upsertBestScore(
+			tx,
+			season.ID,
+			userID,
+			examSetID,
+			attemptID,
+			candidate,
+		)
+		if err != nil {
+			return err
+		}
+		projection.Entry, err = rebuildEntry(tx, season.ID, userID)
+		if err != nil {
+			return err
+		}
+		projection.CurrentRank, err = getUserRank(tx, season.ID, userID)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return projection, nil
+}
+
 func (r *postgresRepository) UpsertBestScore(
 	ctx context.Context,
 	seasonID, userID, examSetID, attemptID uuid.UUID,
@@ -323,58 +563,12 @@ func (r *postgresRepository) UpsertBestScore(
 ) (*BestScoreUpdate, error) {
 	var update BestScoreUpdate
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		insert := tx.Exec(`
-			INSERT INTO leaderboard_scores (
-				season_id, user_id, exam_set_id, attempt_id,
-				points, duration_seconds, achieved_at
-			)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT (season_id, user_id, exam_set_id) DO NOTHING
-		`, seasonID, userID, examSetID, attemptID, candidate.Points, candidate.DurationSeconds, candidate.AchievedAt)
-		if insert.Error != nil {
-			return insert.Error
+		var err error
+		projected, err := upsertBestScore(tx, seasonID, userID, examSetID, attemptID, candidate)
+		if err == nil {
+			update = *projected
 		}
-		if insert.RowsAffected == 1 {
-			update.Current = candidate
-			update.Improved = true
-			return nil
-		}
-
-		var current struct {
-			Points          float64
-			DurationSeconds int
-			AchievedAt      time.Time
-		}
-		if err := tx.Raw(`
-			SELECT points, duration_seconds, achieved_at
-			FROM leaderboard_scores
-			WHERE season_id = ? AND user_id = ? AND exam_set_id = ?
-			FOR UPDATE
-		`, seasonID, userID, examSetID).Scan(&current).Error; err != nil {
-			return err
-		}
-
-		previous := domain.ScoreCandidate{
-			Points:          current.Points,
-			DurationSeconds: current.DurationSeconds,
-			AchievedAt:      current.AchievedAt,
-		}
-		update.Previous = &previous
-		update.Current = previous
-		if !domain.AttemptWins(candidate, previous) {
-			return nil
-		}
-
-		if err := tx.Exec(`
-			UPDATE leaderboard_scores
-			SET attempt_id = ?, points = ?, duration_seconds = ?, achieved_at = ?, updated_at = now()
-			WHERE season_id = ? AND user_id = ? AND exam_set_id = ?
-		`, attemptID, candidate.Points, candidate.DurationSeconds, candidate.AchievedAt, seasonID, userID, examSetID).Error; err != nil {
-			return err
-		}
-		update.Current = candidate
-		update.Improved = true
-		return nil
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -382,26 +576,103 @@ func (r *postgresRepository) UpsertBestScore(
 	return &update, nil
 }
 
+func upsertBestScore(
+	tx *gorm.DB,
+	seasonID, userID, examSetID, attemptID uuid.UUID,
+	candidate domain.ScoreCandidate,
+) (*BestScoreUpdate, error) {
+	var update BestScoreUpdate
+	insert := tx.Exec(`
+			INSERT INTO leaderboard_scores (
+				season_id, user_id, exam_set_id, attempt_id,
+				points, duration_seconds, achieved_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (season_id, user_id, exam_set_id) DO NOTHING
+		`, seasonID, userID, examSetID, attemptID, candidate.Points, candidate.DurationSeconds, candidate.AchievedAt)
+	if insert.Error != nil {
+		return nil, insert.Error
+	}
+	if insert.RowsAffected == 1 {
+		update.Current = candidate
+		update.Improved = true
+		return &update, nil
+	}
+
+	var current struct {
+		Points          float64
+		DurationSeconds int
+		AchievedAt      time.Time
+	}
+	if err := tx.Raw(`
+			SELECT points, duration_seconds, achieved_at
+			FROM leaderboard_scores
+			WHERE season_id = ? AND user_id = ? AND exam_set_id = ?
+			FOR UPDATE
+		`, seasonID, userID, examSetID).Scan(&current).Error; err != nil {
+		return nil, err
+	}
+
+	previous := domain.ScoreCandidate{
+		Points:          current.Points,
+		DurationSeconds: current.DurationSeconds,
+		AchievedAt:      current.AchievedAt,
+	}
+	update.Previous = &previous
+	update.Current = previous
+	if !domain.AttemptWins(candidate, previous) {
+		return &update, nil
+	}
+
+	if err := tx.Exec(`
+			UPDATE leaderboard_scores
+			SET attempt_id = ?, points = ?, duration_seconds = ?, achieved_at = ?, updated_at = now()
+			WHERE season_id = ? AND user_id = ? AND exam_set_id = ?
+		`, attemptID, candidate.Points, candidate.DurationSeconds, candidate.AchievedAt, seasonID, userID, examSetID).Error; err != nil {
+		return nil, err
+	}
+	update.Current = candidate
+	update.Improved = true
+	return &update, nil
+}
+
 func (r *postgresRepository) RebuildEntry(ctx context.Context, seasonID, userID uuid.UUID) (*EntryRow, error) {
 	var entry EntryRow
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var lockedAttempts []uuid.UUID
-		if err := tx.Raw(`
+		rebuilt, err := rebuildEntry(tx, seasonID, userID)
+		if err == nil {
+			entry = *rebuilt
+		}
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &entry, nil
+}
+
+func rebuildEntry(tx *gorm.DB, seasonID, userID uuid.UUID) (*EntryRow, error) {
+	var entry EntryRow
+	var lockedAttempts []uuid.UUID
+	if err := tx.Raw(`
 			SELECT attempt_id
 			FROM leaderboard_scores
 			WHERE season_id = ? AND user_id = ?
 			ORDER BY exam_set_id
 			FOR UPDATE
 		`, seasonID, userID).Scan(&lockedAttempts).Error; err != nil {
-			return err
-		}
-		if len(lockedAttempts) == 0 {
-			return tx.Exec(`
+		return nil, err
+	}
+	if len(lockedAttempts) == 0 {
+		if err := tx.Exec(`
 				DELETE FROM leaderboard_entries WHERE season_id = ? AND user_id = ?
-			`, seasonID, userID).Error
+			`, seasonID, userID).Error; err != nil {
+			return nil, err
 		}
+		return &entry, nil
+	}
 
-		if err := tx.Raw(`
+	if err := tx.Raw(`
 			SELECT
 				COALESCE(SUM(points), 0) AS total_points,
 				COUNT(*)::int AS completed_exam_sets,
@@ -410,10 +681,10 @@ func (r *postgresRepository) RebuildEntry(ctx context.Context, seasonID, userID 
 			FROM leaderboard_scores
 			WHERE season_id = ? AND user_id = ?
 		`, seasonID, userID).Scan(&entry).Error; err != nil {
-			return err
-		}
+		return nil, err
+	}
 
-		return tx.Exec(`
+	if err := tx.Exec(`
 			INSERT INTO leaderboard_entries (
 				season_id, user_id, total_points, completed_exam_sets,
 				total_duration_seconds, score_achieved_at
@@ -425,9 +696,7 @@ func (r *postgresRepository) RebuildEntry(ctx context.Context, seasonID, userID 
 				total_duration_seconds = EXCLUDED.total_duration_seconds,
 				score_achieved_at = EXCLUDED.score_achieved_at,
 				updated_at = now()
-		`, seasonID, userID, entry.TotalPoints, entry.CompletedExamSets, entry.TotalDurationSeconds, entry.ScoreAchievedAt).Error
-	})
-	if err != nil {
+		`, seasonID, userID, entry.TotalPoints, entry.CompletedExamSets, entry.TotalDurationSeconds, entry.ScoreAchievedAt).Error; err != nil {
 		return nil, err
 	}
 	return &entry, nil
@@ -456,8 +725,12 @@ const monthlyRankedEntriesCTE = `
 `
 
 func (r *postgresRepository) GetUserRank(ctx context.Context, seasonID, userID uuid.UUID) (*UserRankRow, error) {
+	return getUserRank(r.db.WithContext(ctx), seasonID, userID)
+}
+
+func getUserRank(db *gorm.DB, seasonID, userID uuid.UUID) (*UserRankRow, error) {
 	var row UserRankRow
-	err := r.db.WithContext(ctx).Raw(monthlyRankedEntriesCTE+`
+	err := db.Raw(monthlyRankedEntriesCTE+`
 		SELECT rank, total_points
 		FROM ordered
 		WHERE user_id = ?

@@ -23,28 +23,48 @@ func TestLifecycleSQLSerializesTransitionsAndGuardsEventTime(t *testing.T) {
 	if strings.Contains(strings.ToUpper(insertSeasonExamSetIntervalSQL), "ON CONFLICT") {
 		t.Error("join insert uses conflict suppression instead of returning unexpected interval conflicts")
 	}
+	if !strings.Contains(acquireSeasonUserProjectionLockSQL, "pg_advisory_xact_lock") {
+		t.Error("projection SQL does not serialize score and aggregate writes per season/user")
+	}
+	for _, fragment := range []string{"status = ?", "is_active = true"} {
+		if !strings.Contains(findPublishedActiveExamSetSQL, fragment) {
+			t.Errorf("projection publication recheck SQL missing %q", fragment)
+		}
+	}
 }
 
-func TestEnsureSeasonSQLEnrollsActivePublishedSetsAtSeasonStart(t *testing.T) {
+func TestEnsureSeasonSQLUsesPriorIntervalsAndExplicitBootstrapState(t *testing.T) {
 	t.Parallel()
 
 	for _, fragment := range []string{
-		"FROM exam_sets",
-		"exam_track_id = ?",
-		"status = ?",
-		"is_active = true",
+		"prior_season",
+		"leaderboard_season_exam_sets",
+		"ses.stopped_at IS NULL",
+		"ORDER BY es.id",
 	} {
-		if !strings.Contains(enrollSeasonExamSetsSQL, fragment) {
+		if !strings.Contains(listRolloverExamSetCandidatesSQL, fragment) {
 			t.Errorf("rollover enrollment SQL missing %q", fragment)
 		}
 	}
-	if !strings.Contains(enrollSeasonExamSetsSQL, "SELECT gen_random_uuid(), ?, id, ?") {
-		t.Error("rollover enrollment SQL does not join active sets at the supplied season start")
+	for _, fragment := range []string{
+		"FROM exam_sets",
+		"status = ?",
+		"is_active = true",
+		"ORDER BY id",
+	} {
+		if !strings.Contains(listBootstrapExamSetCandidatesSQL, fragment) {
+			t.Errorf("bootstrap enrollment SQL missing %q", fragment)
+		}
 	}
-	if strings.Contains(strings.ToUpper(enrollSeasonExamSetsSQL), "ON CONFLICT") {
-		t.Error("rollover enrollment hides interval conflicts")
+	if !strings.Contains(findBootstrapExamSetStateSQL, "updated_at") {
+		t.Error("bootstrap enrollment does not derive an effective time from persisted set state")
 	}
-	if !strings.Contains(enrollSeasonExamSetsForPublishSQL, "id <> ?") {
-		t.Error("publish-time season creation does not exclude the newly published set from rollover")
+	for name, query := range map[string]string{
+		"rollover":  listRolloverExamSetCandidatesSQL,
+		"bootstrap": listBootstrapExamSetCandidatesSQL,
+	} {
+		if !strings.Contains(query, "id <> ?") {
+			t.Errorf("%s season creation does not exclude the newly published set", name)
+		}
 	}
 }
