@@ -191,3 +191,22 @@ and GORM model checks now enforce points in `0..100`, non-negative duration, and
   need recreation or an equivalent additive migration before this code is deployed.
 - No persistent PostgreSQL test harness was added, per scope. Focused repository policy tests,
   PostgreSQL 16 smoke evidence, the full Go suite, and race verification cover this fix.
+
+### Takeover Verification (2026-07-14)
+
+This task was taken over from an interrupted worker. The intended implementation was already
+committed as `43de6bd fix: serialize leaderboard lifecycle rollover`; no further production-code
+change was required after independent inspection and verification.
+
+- `git diff --check`
+  - PASS: no whitespace errors.
+- `go test -timeout 60s ./internal/leaderboard/usecase -run 'TestProjectAttemptRejectsInvalidCandidateValues|TestProjectAttemptEnrollsActiveSetAtBangkokMonthRollover|TestProjectorJoinsNewSetAtPublishTimeWhenCreatingSeason|TestProjectorLifecycleUsesEventTimeForStaleRetries|TestProjectorManagesSeasonEnrollmentLifecycle' -count=1 -v`
+  - PASS in `0.465s`.
+- `go test -timeout 60s ./internal/leaderboard/repository -run 'TestSeasonExamSetModelDeclaresIntervalKeys|TestScoreModelDeclaresValueChecks|TestLifecycleSQLSerializesTransitionsAndGuardsEventTime|TestEnsureSeasonSQLEnrollsActivePublishedSetsAtSeasonStart|TestMonthlyRanking' -count=1 -v`
+  - PASS in `0.451s`.
+- `go test -timeout 120s ./internal/leaderboard/... -count=1 -v`
+  - PASS: domain, repository, use-case, and transport packages in `0.897s` total; no timeout or deadlock occurred.
+- `go test -race -timeout 120s ./internal/leaderboard/... -count=1`
+  - PASS: all leaderboard packages in `2.1s`; no Go data races reported.
+- `PGPASSWORD=appsecret perl -e 'alarm 40; exec @ARGV' zsh -c '<create disposable database; apply migration 000023; exercise stale stop and one-open-interval assertions; drop database>'`
+  - PASS in `0.6s`: migration applied, the stale-stop guard updated `0` rows, exactly one open interval remained at `2026-07-15T00:00:00Z`, and a second open interval raised `unique_violation`.
