@@ -29,7 +29,7 @@ type OMRSettingsProvider interface {
 }
 
 type LeaderboardProjector interface {
-	ProjectAttempt(context.Context, leaderboarddomain.ProjectionInput) (*leaderboarddomain.ProjectionUpdate, error)
+	DispatchAttempt(context.Context, uuid.UUID) (*leaderboarddomain.ProjectionUpdate, error)
 	RecordProjectionFailure(context.Context, uuid.UUID, error) error
 }
 
@@ -178,7 +178,7 @@ func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examS
 }
 
 func (uc *ExamAttemptUseCase) transitionExpiredAttempt(ctx context.Context, attempt *domain.ExamAttempt) (*domain.ExamAttempt, error) {
-	if attempt == nil || attempt.Status != domain.StatusInProgress || !uc.now().After(attempt.ExpiresAt) {
+	if attempt == nil || attempt.Status != domain.StatusInProgress || uc.now().Before(attempt.ExpiresAt) {
 		return attempt, nil
 	}
 	changed, err := uc.attempts.MarkAttemptTimeout(ctx, attempt.ID)
@@ -504,10 +504,22 @@ func (uc *ExamAttemptUseCase) Submit(ctx context.Context, userID, attemptID uuid
 	attempt.WrongCount = result.WrongCount
 	attempt.UnansweredCount = result.UnansweredCount
 
-	if err := uc.attempts.UpdateAttemptSubmitted(ctx, attempt, answers); err != nil {
+	transition, err := uc.attempts.UpdateAttemptSubmitted(ctx, attempt, answers, false)
+	if err != nil {
 		return nil, err
 	}
-	competitionUpdate := uc.projectAttemptNonBlocking(ctx, attempt)
+	persisted, err := uc.attempts.FindByIDForUser(ctx, attemptID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if persisted == nil {
+		return nil, apperrors.ErrAttemptNotFound
+	}
+	attempt = persisted
+	var competitionUpdate *leaderboarddomain.ProjectionUpdate
+	if transition != attemptrepo.AttemptTransitionUnchanged {
+		competitionUpdate = uc.projectAttemptNonBlocking(ctx, attempt)
+	}
 
 	_ = uc.cache.ClearAttempt(ctx, attemptID.String())
 	_ = uc.resultCache.DeleteByIndex(ctx, appcache.IndexAttemptResult(attemptID.String()))
@@ -524,15 +536,11 @@ func (uc *ExamAttemptUseCase) projectAttemptNonBlocking(ctx context.Context, att
 	}
 	deliveryCtx, cancel := leaderboardProjectionContext(ctx)
 	defer cancel()
-	input, err := leaderboardProjectionInput(attempt)
+	update, err := uc.leaderboard.DispatchAttempt(deliveryCtx, attempt.ID)
 	if err == nil {
-		var update *leaderboarddomain.ProjectionUpdate
-		update, err = uc.leaderboard.ProjectAttempt(deliveryCtx, input)
-		if err == nil {
-			return update
-		}
+		return update
 	}
-	uc.recordProjectionFailure(deliveryCtx, attempt.ID, err)
+	log.Printf("leaderboard projection deferred attempt_id=%s err=%v", attempt.ID, err)
 	return nil
 }
 

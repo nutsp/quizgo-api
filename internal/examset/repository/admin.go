@@ -35,6 +35,7 @@ var examSetSortColumns = map[string]string{
 }
 
 type AdminRepository interface {
+	LifecycleStopOutbox
 	List(ctx context.Context, filter AdminFilter) (pagination.PaginatedList[domain.ExamSet], error)
 	Create(ctx context.Context, set *domain.ExamSet) error
 	Update(ctx context.Context, set *domain.ExamSet) error
@@ -197,8 +198,14 @@ func (r *adminRepository) Delete(ctx context.Context, id uuid.UUID) (bool, error
 		if err != nil {
 			return err
 		}
-		var attemptCount int64
-		if err := tx.Table("exam_attempts").Where("exam_set_id = ?", id).Count(&attemptCount).Error; err != nil {
+		var hasImmutableReferences bool
+		if err := tx.Raw(`
+			SELECT EXISTS (SELECT 1 FROM exam_attempts WHERE exam_set_id = ?)
+				OR EXISTS (SELECT 1 FROM leaderboard_season_exam_sets WHERE exam_set_id = ?)
+				OR EXISTS (SELECT 1 FROM leaderboard_scores WHERE exam_set_id = ?)
+				OR EXISTS (SELECT 1 FROM leaderboard_exam_set_stop_events WHERE exam_set_id = ?)
+				OR EXISTS (SELECT 1 FROM exam_set_lifecycle_stop_events WHERE exam_set_id = ?)
+		`, id, id, id, id, id).Scan(&hasImmutableReferences).Error; err != nil {
 			return err
 		}
 		transitionAt := time.Now().UTC()
@@ -207,10 +214,11 @@ func (r *adminRepository) Delete(ctx context.Context, id uuid.UUID) (bool, error
 				return err
 			}
 		}
-		if attemptCount > 0 {
+		if hasImmutableReferences || isEligibleLifecycleState(before.Status, before.IsActive) {
 			deactivated = true
 			return tx.Model(&ExamSetModel{}).Where("id = ?", id).Updates(map[string]any{
 				"is_active":  false,
+				"status":     domain.StatusArchived,
 				"updated_at": transitionAt,
 			}).Error
 		}

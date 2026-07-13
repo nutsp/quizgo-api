@@ -102,6 +102,7 @@ func main() {
 			&questionrepo.ExamSetQuestionModel{},
 			&attemptrepo.ExamAttemptModel{},
 			&attemptrepo.ExamAnswerModel{},
+			&attemptrepo.ProjectionOutboxModel{},
 			&leaderboardrepo.SeasonModel{},
 			&leaderboardrepo.ExamSetStopEventModel{},
 			&leaderboardrepo.SeasonExamSetModel{},
@@ -145,12 +146,14 @@ func main() {
 	userRepository := userrepo.NewPostgresRepository(db)
 	trackRepository := trackrepo.NewPostgresRepository(db)
 	examSetRepository := examsetrepo.NewPostgresRepository(db)
+	examSetAdminRepo := examsetrepo.NewAdminRepository(db)
 	questionRepository := questionrepo.NewPostgresRepository(db)
 	attemptRepository := attemptrepo.NewPostgresRepository(db)
 	attemptCache := attemptrepo.NewRedisRepository(rdb.Runtime)
 	settingsRepository := settingsrepo.NewPostgresRepository(db)
 	leaderboardRepository := leaderboardrepo.NewPostgresRepository(db)
 	leaderboardProjector := leaderboarduc.NewProjector(leaderboardRepository)
+	leaderboardDispatcher := leaderboarduc.NewOutboxDispatcher(attemptRepository, examSetAdminRepo, leaderboardProjector, leaderboarduc.OutboxDispatcherConfig{})
 
 	authUseCase := authuc.NewAuthUseCase(userRepository, cfg)
 	oauthRepository := oauthrepo.NewPostgresRepository(db)
@@ -172,7 +175,7 @@ func main() {
 		runtimeLocks,
 		cacheInvalidator,
 		settingsUseCase,
-		leaderboardProjector,
+		leaderboardDispatcher,
 	)
 	homeUseCase := homeuc.NewHomeUseCase(trackRepository, examSetRepository, attemptRepository, entitlementUseCase, contentCache)
 
@@ -201,7 +204,6 @@ func main() {
 	profilehttp.NewHandler(profileUseCase).RegisterRoutes(api, authMiddleware)
 
 	trackAdminRepo := trackrepo.NewAdminRepository(db)
-	examSetAdminRepo := examsetrepo.NewAdminRepository(db)
 	subjectAdminRepo := subjectrepo.NewSubjectAdminRepository(db)
 	tagAdminRepo := tagrepo.NewTagAdminRepository(db)
 	questionAdminRepo := questionrepo.NewQuestionAdminRepository(db, tagAdminRepo)
@@ -266,9 +268,22 @@ func main() {
 		}
 	}()
 
+	dispatcherCtx, stopDispatcher := context.WithCancel(context.Background())
+	dispatcherDone := make(chan struct{})
+	go func() {
+		defer close(dispatcherDone)
+		leaderboardDispatcher.Run(dispatcherCtx)
+	}()
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
+	stopDispatcher()
+	select {
+	case <-dispatcherDone:
+	case <-time.After(5 * time.Second):
+		log.Printf("leaderboard dispatcher shutdown timed out")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

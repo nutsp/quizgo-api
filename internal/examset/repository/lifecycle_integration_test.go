@@ -14,6 +14,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
+	attemptrepo "virtual-exam-api/internal/examattempt/repository"
 )
 
 func TestLifecycleStopEventModelMatchesOutboxContract(t *testing.T) {
@@ -88,6 +89,75 @@ func TestPostgresHardDeleteAfterDeactivateIsNotSuppressed(t *testing.T) {
 	}
 }
 
+func TestPostgresDeletePreservesImmutableLeaderboardHistory(t *testing.T) {
+	db := openExamSetLifecycleIntegrationDB(t)
+	repo := NewAdminRepository(db)
+	examSetID := uuid.New()
+	trackID := uuid.New()
+	seasonID := uuid.New()
+	base := time.Date(2026, 7, 14, 3, 0, 0, 0, time.UTC)
+	mustExamSetLifecycleExec(t, db, `INSERT INTO exam_tracks (id) VALUES (?)`, trackID)
+	mustExamSetLifecycleExec(t, db, `
+		INSERT INTO exam_sets (id, exam_track_id, status, is_active, published_at, created_at, updated_at)
+		VALUES (?, ?, 'published', true, ?, ?, ?)
+	`, examSetID, trackID, base, base, base)
+	mustExamSetLifecycleExec(t, db, `
+		INSERT INTO leaderboard_seasons (id, exam_track_id, year, month, starts_at, ends_at, status)
+		VALUES (?, ?, 2026, 7, ?, ?, 'active')
+	`, seasonID, trackID, base.Add(-time.Hour), base.Add(30*24*time.Hour))
+	mustExamSetLifecycleExec(t, db, `
+		INSERT INTO leaderboard_season_exam_sets (id, season_id, exam_set_id, joined_at)
+		VALUES (?, ?, ?, ?)
+	`, uuid.New(), seasonID, examSetID, base)
+
+	deactivated, err := repo.Delete(t.Context(), examSetID)
+	if err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if !deactivated {
+		t.Fatal("Delete() deactivated = false, want history-preserving soft delete")
+	}
+	var state struct {
+		Status   string
+		IsActive bool
+	}
+	if err := db.Table("exam_sets").Select("status", "is_active").Where("id = ?", examSetID).Scan(&state).Error; err != nil {
+		t.Fatal(err)
+	}
+	if state.Status != "archived" || state.IsActive {
+		t.Fatalf("preserved state = %s/%v, want archived/false", state.Status, state.IsActive)
+	}
+	var historyCount int64
+	if err := db.Table("leaderboard_season_exam_sets").Where("exam_set_id = ?", examSetID).Count(&historyCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if historyCount != 1 {
+		t.Fatalf("history rows = %d, want 1", historyCount)
+	}
+}
+
+func TestAutoMigrateOutboxModelsKeepPendingPartialIndexes(t *testing.T) {
+	db := openExamSetLifecycleIntegrationDB(t)
+	if err := db.Migrator().DropTable("leaderboard_attempt_projection_outbox", "exam_set_lifecycle_stop_events"); err != nil {
+		t.Fatalf("drop migrated outboxes: %v", err)
+	}
+	if err := db.AutoMigrate(&LifecycleStopEventModel{}, &attemptrepo.ProjectionOutboxModel{}); err != nil {
+		t.Fatalf("AutoMigrate outboxes: %v", err)
+	}
+	for _, indexName := range []string{
+		"exam_set_lifecycle_stop_events_pending_idx",
+		"leaderboard_attempt_projection_outbox_pending_idx",
+	} {
+		var indexDef string
+		if err := db.Raw(`SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND indexname = ?`, indexName).Scan(&indexDef).Error; err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(strings.ToLower(indexDef), "where (delivered_at is null)") {
+			t.Fatalf("index %s = %q, want delivered_at partial predicate", indexName, indexDef)
+		}
+	}
+}
+
 func openExamSetLifecycleIntegrationDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	dsn := os.Getenv("LEADERBOARD_POSTGRES_DSN")
@@ -120,8 +190,11 @@ func openExamSetLifecycleIntegrationDB(t *testing.T) *gorm.DB {
 		_ = adminSQL.Close()
 	})
 
+	mustExamSetLifecycleExec(t, db, `CREATE TABLE users (id uuid PRIMARY KEY)`)
+	mustExamSetLifecycleExec(t, db, `CREATE TABLE exam_tracks (id uuid PRIMARY KEY)`)
 	mustExamSetLifecycleExec(t, db, `CREATE TABLE exam_sets (
 		id uuid PRIMARY KEY,
+		exam_track_id uuid,
 		status varchar(50) NOT NULL,
 		is_active boolean NOT NULL,
 		published_at timestamptz,
@@ -135,13 +208,15 @@ func openExamSetLifecycleIntegrationDB(t *testing.T) *gorm.DB {
 	if !ok {
 		t.Fatal("locate integration test")
 	}
-	migrationPath := filepath.Join(filepath.Dir(currentFile), "../../../migrations/000024_exam_set_lifecycle_stop_events.up.sql")
-	migration, err := os.ReadFile(migrationPath)
-	if err != nil {
-		t.Fatalf("read migration 000024: %v", err)
-	}
-	if err := db.Exec(string(migration)).Error; err != nil {
-		t.Fatalf("apply migration 000024: %v", err)
+	for _, migrationNumber := range []string{"000023_monthly_leaderboards", "000024_exam_set_lifecycle_stop_events", "000025_leaderboard_projection_dispatch"} {
+		migrationPath := filepath.Join(filepath.Dir(currentFile), "../../../migrations/"+migrationNumber+".up.sql")
+		migration, err := os.ReadFile(migrationPath)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", migrationNumber, err)
+		}
+		if err := db.Exec(string(migration)).Error; err != nil {
+			t.Fatalf("apply migration %s: %v", migrationNumber, err)
+		}
 	}
 	return db
 }

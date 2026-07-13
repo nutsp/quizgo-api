@@ -18,11 +18,18 @@ func TestPostgresMarkAttemptTimeoutReportsTransitionOnce(t *testing.T) {
 	db := openAttemptTimeoutIntegrationDB(t)
 	repo := NewPostgresRepository(db)
 	attemptID := uuid.New()
+	trackID := uuid.New()
 	startedAt := time.Date(2026, 7, 14, 1, 0, 0, 0, time.UTC)
+	if err := db.Exec(`INSERT INTO exam_tracks (id, code) VALUES (?, 'police')`, trackID).Error; err != nil {
+		t.Fatalf("insert track: %v", err)
+	}
 	if err := db.Exec(`
-		INSERT INTO exam_attempts (id, status, started_at, expires_at, created_at, updated_at)
-		VALUES (?, 'in_progress', ?, ?, ?, ?)
-	`, attemptID, startedAt, startedAt.Add(time.Hour), startedAt, startedAt).Error; err != nil {
+		INSERT INTO exam_attempts (
+			id, user_id, exam_track_id, exam_set_id, status,
+			started_at, expires_at, created_at, updated_at
+		)
+		VALUES (?, ?, ?, ?, 'in_progress', ?, ?, ?, ?)
+	`, attemptID, uuid.New(), trackID, uuid.New(), startedAt, startedAt.Add(time.Hour), startedAt, startedAt).Error; err != nil {
 		t.Fatalf("insert attempt: %v", err)
 	}
 
@@ -69,14 +76,39 @@ func openAttemptTimeoutIntegrationDB(t *testing.T) *gorm.DB {
 	})
 	if err := db.Exec(`CREATE TABLE exam_attempts (
 		id uuid PRIMARY KEY,
+		user_id uuid,
+		exam_track_id uuid,
+		exam_set_id uuid,
 		status varchar(50) NOT NULL,
 		started_at timestamptz NOT NULL,
 		submitted_at timestamptz,
 		expires_at timestamptz NOT NULL,
+		duration_seconds int,
+		score numeric(10,2) DEFAULT 0,
+		total_score numeric(10,2) DEFAULT 0,
+		score_percent numeric(10,2) DEFAULT 0,
+		correct_count int DEFAULT 0,
+		wrong_count int DEFAULT 0,
+		unanswered_count int DEFAULT 0,
 		created_at timestamptz NOT NULL,
 		updated_at timestamptz NOT NULL
 	)`).Error; err != nil {
 		t.Fatalf("create attempts table: %v", err)
+	}
+	if err := db.Exec(`CREATE TABLE exam_tracks (id uuid PRIMARY KEY, code text NOT NULL)`).Error; err != nil {
+		t.Fatalf("create tracks table: %v", err)
+	}
+	if err := db.Exec(`CREATE TABLE leaderboard_attempt_projection_outbox (
+		attempt_id uuid PRIMARY KEY,
+		user_id uuid,
+		exam_set_id uuid,
+		exam_track_id uuid,
+		track_code text,
+		submitted_at timestamptz,
+		points numeric(6,1),
+		duration_seconds int
+	)`).Error; err != nil {
+		t.Fatalf("create projection outbox: %v", err)
 	}
 	return db
 }

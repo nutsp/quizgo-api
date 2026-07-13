@@ -148,6 +148,28 @@ func (s *lifecycleSetStore) MarkLifecycleStopDelivered(_ context.Context, examSe
 	return nil
 }
 
+func (s *lifecycleSetStore) ClaimLifecycleStops(_ context.Context, request examsetrepo.LifecycleClaimRequest) ([]examsetrepo.LifecycleStopEvent, error) {
+	events := make([]examsetrepo.LifecycleStopEvent, 0, len(s.pendingStops))
+	for i := range s.pendingStops {
+		if request.ExamSetID == nil || s.pendingStops[i].ExamSetID == *request.ExamSetID {
+			s.pendingStops[i].ClaimToken = request.Token
+			events = append(events, s.pendingStops[i])
+		}
+	}
+	return events, nil
+}
+
+func (s *lifecycleSetStore) MarkLifecycleStopClaimDelivered(_ context.Context, examSetID uuid.UUID, stoppedAt time.Time, _ uuid.UUID, _ time.Time) (bool, error) {
+	if err := s.MarkLifecycleStopDelivered(context.Background(), examSetID, stoppedAt); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *lifecycleSetStore) RetryLifecycleStop(_ context.Context, _ uuid.UUID, _ time.Time, _ uuid.UUID, _ time.Time, _ error) (bool, error) {
+	return true, nil
+}
+
 type lifecycleSetReader struct {
 	examsetrepo.Repository
 	store *lifecycleSetStore

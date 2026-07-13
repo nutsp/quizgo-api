@@ -82,6 +82,7 @@ type ExamAnswerModel struct {
 func (ExamAnswerModel) TableName() string { return "exam_answers" }
 
 type Repository interface {
+	ProjectionOutbox
 	CreateAttemptWithAnswers(ctx context.Context, attempt *domain.ExamAttempt, answers []domain.ExamAnswer) error
 	FindByID(ctx context.Context, id uuid.UUID) (*domain.ExamAttempt, error)
 	FindByIDForUser(ctx context.Context, id, userID uuid.UUID) (*domain.ExamAttempt, error)
@@ -92,7 +93,7 @@ type Repository interface {
 	ListAnswersByAttemptID(ctx context.Context, attemptID uuid.UUID) ([]domain.ExamAnswer, error)
 	UpsertAnswer(ctx context.Context, answer *domain.ExamAnswer) error
 	ClearAnswer(ctx context.Context, attemptID uuid.UUID, questionNo int) error
-	UpdateAttemptSubmitted(ctx context.Context, attempt *domain.ExamAttempt, answers []domain.ExamAnswer) error
+	UpdateAttemptSubmitted(ctx context.Context, attempt *domain.ExamAttempt, answers []domain.ExamAnswer, allowAfterDeadline bool) (AttemptTransition, error)
 	MarkAttemptTimeout(ctx context.Context, attemptID uuid.UUID) (changed bool, err error)
 	CountCompletedByUser(ctx context.Context, userID uuid.UUID) (int64, error)
 	AverageScorePercentByUser(ctx context.Context, userID uuid.UUID) (float64, error)
@@ -289,15 +290,23 @@ func (r *postgresRepository) FindUserActivityForExamSet(ctx context.Context, use
 }
 
 func (r *postgresRepository) MarkAttemptTimeout(ctx context.Context, attemptID uuid.UUID) (bool, error) {
-	now := time.Now().UTC()
-	result := r.db.WithContext(ctx).Model(&ExamAttemptModel{}).
-		Where("id = ? AND status = ?", attemptID, domain.StatusInProgress).
-		Updates(map[string]any{
-			"status":       domain.StatusTimeout,
-			"submitted_at": now,
-			"updated_at":   now,
-		})
-	return result.RowsAffected == 1, result.Error
+	changed := false
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		now := time.Now().UTC()
+		result := tx.Model(&ExamAttemptModel{}).
+			Where("id = ? AND status = ?", attemptID, domain.StatusInProgress).
+			Updates(map[string]any{
+				"status":       domain.StatusTimeout,
+				"submitted_at": now,
+				"updated_at":   now,
+			})
+		if result.Error != nil || result.RowsAffected == 0 {
+			return result.Error
+		}
+		changed = true
+		return enqueueAttemptProjection(tx, attemptID)
+	})
+	return changed, err
 }
 
 func (r *postgresRepository) FindLatestInProgress(ctx context.Context, userID uuid.UUID) (*domain.ExamAttempt, error) {
@@ -352,8 +361,51 @@ func (r *postgresRepository) ClearAnswer(ctx context.Context, attemptID uuid.UUI
 		}).Error
 }
 
-func (r *postgresRepository) UpdateAttemptSubmitted(ctx context.Context, attempt *domain.ExamAttempt, answers []domain.ExamAnswer) error {
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+func (r *postgresRepository) UpdateAttemptSubmitted(ctx context.Context, attempt *domain.ExamAttempt, answers []domain.ExamAnswer, allowAfterDeadline bool) (AttemptTransition, error) {
+	transition := AttemptTransitionUnchanged
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if attempt.SubmittedAt == nil {
+			return errors.New("submitted attempt is missing submitted_at")
+		}
+		model := toAttemptModel(attempt)
+		effectiveTransitionAt := gorm.Expr("GREATEST(?::timestamptz, CURRENT_TIMESTAMP)", *attempt.SubmittedAt)
+		result := tx.Model(&ExamAttemptModel{}).
+			Where("id = ? AND status = ? AND (? OR expires_at > GREATEST(?::timestamptz, CURRENT_TIMESTAMP))", attempt.ID, domain.StatusInProgress, allowAfterDeadline, *attempt.SubmittedAt).
+			Updates(map[string]any{
+				"status":           domain.StatusSubmitted,
+				"submitted_at":     effectiveTransitionAt,
+				"duration_seconds": model.DurationSeconds,
+				"score":            model.Score,
+				"total_score":      model.TotalScore,
+				"score_percent":    model.ScorePercent,
+				"correct_count":    model.CorrectCount,
+				"wrong_count":      model.WrongCount,
+				"unanswered_count": model.UnansweredCount,
+				"updated_at":       effectiveTransitionAt,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 && !allowAfterDeadline {
+			result = tx.Model(&ExamAttemptModel{}).
+				Where("id = ? AND status = ? AND expires_at <= GREATEST(?::timestamptz, CURRENT_TIMESTAMP)", attempt.ID, domain.StatusInProgress, *attempt.SubmittedAt).
+				Updates(map[string]any{
+					"status":       domain.StatusTimeout,
+					"submitted_at": effectiveTransitionAt,
+					"updated_at":   effectiveTransitionAt,
+				})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected == 1 {
+				transition = AttemptTransitionTimedOut
+				return enqueueAttemptProjection(tx, attempt.ID)
+			}
+		}
+		if result.RowsAffected == 0 {
+			return nil
+		}
+		transition = AttemptTransitionSubmitted
 		for _, a := range answers {
 			if err := tx.Model(&ExamAnswerModel{}).
 				Where("attempt_id = ? AND question_id = ?", a.AttemptID, a.QuestionID).
@@ -364,20 +416,9 @@ func (r *postgresRepository) UpdateAttemptSubmitted(ctx context.Context, attempt
 				return err
 			}
 		}
-		model := toAttemptModel(attempt)
-		return tx.Model(&ExamAttemptModel{}).Where("id = ?", attempt.ID).Updates(map[string]any{
-			"status":            model.Status,
-			"submitted_at":      model.SubmittedAt,
-			"duration_seconds":  model.DurationSeconds,
-			"score":             model.Score,
-			"total_score":       model.TotalScore,
-			"score_percent":     model.ScorePercent,
-			"correct_count":     model.CorrectCount,
-			"wrong_count":       model.WrongCount,
-			"unanswered_count":  model.UnansweredCount,
-			"updated_at":        time.Now().UTC(),
-		}).Error
+		return enqueueAttemptProjection(tx, attempt.ID)
 	})
+	return transition, err
 }
 
 func (r *postgresRepository) CountCompletedByUser(ctx context.Context, userID uuid.UUID) (int64, error) {

@@ -32,11 +32,18 @@ type projectionRecorder struct {
 	failureCtxErrs []error
 }
 
-func (r *projectionRecorder) ProjectAttempt(ctx context.Context, input leaderboarddomain.ProjectionInput) (*leaderboarddomain.ProjectionUpdate, error) {
+func (r *projectionRecorder) DispatchAttempt(ctx context.Context, _ uuid.UUID) (*leaderboarddomain.ProjectionUpdate, error) {
+	input := leaderboarddomain.ProjectionInput{}
+	if r.store != nil && r.store.current != nil {
+		input, _ = leaderboardProjectionInput(r.store.current)
+	}
 	r.inputs = append(r.inputs, input)
 	r.projectCtxErrs = append(r.projectCtxErrs, ctx.Err())
 	if r.store != nil && r.store.current != nil {
 		r.statesAtCall = append(r.statesAtCall, r.store.current.Status)
+	}
+	if r.err != nil {
+		_ = r.RecordProjectionFailure(ctx, input.AttemptID, r.err)
 	}
 	return r.update, r.err
 }
@@ -58,6 +65,8 @@ type projectionAttemptStore struct {
 	findLatest             *domain.ExamAttempt
 	failReloadAfterTimeout bool
 	cancelAfterSubmit      context.CancelFunc
+	submitTransition       *attemptrepo.AttemptTransition
+	persistedAfterSubmit   *domain.ExamAttempt
 }
 
 func (s *projectionAttemptStore) FindByIDForUser(_ context.Context, attemptID, userID uuid.UUID) (*domain.ExamAttempt, error) {
@@ -83,7 +92,17 @@ func (s *projectionAttemptStore) ListAnswersByAttemptID(context.Context, uuid.UU
 	return append([]domain.ExamAnswer(nil), s.answers...), nil
 }
 
-func (s *projectionAttemptStore) UpdateAttemptSubmitted(_ context.Context, attempt *domain.ExamAttempt, answers []domain.ExamAnswer) error {
+func (s *projectionAttemptStore) UpdateAttemptSubmitted(_ context.Context, attempt *domain.ExamAttempt, answers []domain.ExamAnswer, _ bool) (attemptrepo.AttemptTransition, error) {
+	if s.submitTransition != nil {
+		if s.persistedAfterSubmit != nil {
+			copy := *s.persistedAfterSubmit
+			s.current = &copy
+		}
+		return *s.submitTransition, nil
+	}
+	if s.current.Status != domain.StatusInProgress {
+		return attemptrepo.AttemptTransitionUnchanged, nil
+	}
 	s.submittedWrites++
 	copy := *attempt
 	s.current = &copy
@@ -91,7 +110,7 @@ func (s *projectionAttemptStore) UpdateAttemptSubmitted(_ context.Context, attem
 	if s.cancelAfterSubmit != nil {
 		s.cancelAfterSubmit()
 	}
-	return nil
+	return attemptrepo.AttemptTransitionSubmitted, nil
 }
 
 func (s *projectionAttemptStore) MarkAttemptTimeout(_ context.Context, attemptID uuid.UUID) (bool, error) {
@@ -168,6 +187,9 @@ func (r *projectionQuestions) GetCorrectChoicesByQuestionIDs(context.Context, []
 }
 
 func newProjectionAttemptUseCase(store *projectionAttemptStore, projector LeaderboardProjector) *ExamAttemptUseCase {
+	if recorder, ok := projector.(*projectionRecorder); ok && recorder.store == nil {
+		recorder.store = store
+	}
 	set := &examsetdomain.ExamSet{
 		ID:              store.current.ExamSetID,
 		ExamTrackID:     store.current.ExamTrackID,
@@ -296,6 +318,33 @@ func TestLeaderboardAlreadySubmittedRetryDoesNotProjectAgain(t *testing.T) {
 	}
 }
 
+func TestLeaderboardSubmitRaceUsesPersistedTimeoutState(t *testing.T) {
+	attempt := projectionAttempt(domain.StatusInProgress)
+	timedOut := *attempt
+	timedOut.Status = domain.StatusTimeout
+	submittedAt := projectionFixtureNow()
+	timedOut.SubmittedAt = &submittedAt
+	transition := attemptrepo.AttemptTransitionUnchanged
+	store := &projectionAttemptStore{
+		current:              attempt,
+		submitTransition:     &transition,
+		persistedAfterSubmit: &timedOut,
+	}
+	projector := &projectionRecorder{}
+	uc := newProjectionAttemptUseCase(store, projector)
+
+	response, err := uc.Submit(context.Background(), attempt.UserID, attempt.ID)
+	if err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	if response.Status != domain.StatusTimeout || response.ScorePercent != 0 {
+		t.Fatalf("response = %#v, want persisted timeout", response)
+	}
+	if len(projector.inputs) != 0 {
+		t.Fatalf("projection calls = %d, want 0 for race loser", len(projector.inputs))
+	}
+}
+
 func TestLeaderboardExpiredAttemptProjectsTimeoutExactlyOnce(t *testing.T) {
 	attempt := projectionAttempt(domain.StatusInProgress)
 	attempt.StartedAt = projectionFixtureNow().Add(-2 * time.Hour)
@@ -335,6 +384,22 @@ func TestLeaderboardConcurrentTimeoutObserversNotifyOnce(t *testing.T) {
 	}
 	if store.timeoutWrites != 1 || len(projector.inputs) != 1 {
 		t.Fatalf("timeout writes/project calls = %d/%d, want 1/1", store.timeoutWrites, len(projector.inputs))
+	}
+}
+
+func TestLeaderboardCountdownExpiresAtExactDeadline(t *testing.T) {
+	attempt := projectionAttempt(domain.StatusInProgress)
+	attempt.ExpiresAt = projectionFixtureNow()
+	store := &projectionAttemptStore{current: attempt}
+	projector := &projectionRecorder{}
+	uc := newProjectionAttemptUseCase(store, projector)
+
+	persisted, err := uc.transitionExpiredAttempt(context.Background(), attempt)
+	if err != nil {
+		t.Fatalf("transitionExpiredAttempt() error = %v", err)
+	}
+	if persisted.Status != domain.StatusTimeout || store.timeoutWrites != 1 {
+		t.Fatalf("deadline state/writes = %s/%d, want timeout/1", persisted.Status, store.timeoutWrites)
 	}
 }
 

@@ -284,16 +284,30 @@ func (uc *AdminUseCase) deliverPendingLeaderboardStops(ctx context.Context, exam
 	}
 	deliveryCtx, cancel := leaderboardLifecycleContext(ctx)
 	defer cancel()
-	events, err := uc.sets.ListPendingLifecycleStops(deliveryCtx, examSetID)
+	now := time.Now().UTC()
+	token := uuid.New()
+	events, err := uc.sets.ClaimLifecycleStops(deliveryCtx, examsetrepo.LifecycleClaimRequest{
+		Token: token, ExamSetID: &examSetID, Limit: 20,
+		Now: now, LeaseBefore: now.Add(-30 * time.Second),
+	})
 	if err != nil {
 		return err
 	}
 	for _, event := range events {
 		if err := uc.leaderboard.OnExamSetStopped(deliveryCtx, event.ExamSetID, event.StoppedAt.UTC()); err != nil {
+			maintenanceCtx, maintenanceCancel := leaderboardLifecycleContext(ctx)
+			_, _ = uc.sets.RetryLifecycleStop(maintenanceCtx, event.ExamSetID, event.StoppedAt, event.ClaimToken, now.Add(5*time.Second), err)
+			maintenanceCancel()
 			return err
 		}
-		if err := uc.sets.MarkLifecycleStopDelivered(deliveryCtx, event.ExamSetID, event.StoppedAt); err != nil {
+		maintenanceCtx, maintenanceCancel := leaderboardLifecycleContext(ctx)
+		marked, err := uc.sets.MarkLifecycleStopClaimDelivered(maintenanceCtx, event.ExamSetID, event.StoppedAt, event.ClaimToken, time.Now().UTC())
+		maintenanceCancel()
+		if err != nil {
 			return err
+		}
+		if !marked {
+			return errors.New("lifecycle stop claim was lost before acknowledgement")
 		}
 	}
 	return nil
