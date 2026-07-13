@@ -18,6 +18,8 @@ CREATE TABLE leaderboard_season_exam_sets (
     exam_set_id uuid NOT NULL REFERENCES exam_sets(id),
     joined_at timestamptz NOT NULL,
     stopped_at timestamptz,
+    CONSTRAINT leaderboard_season_exam_sets_interval_check
+        CHECK (stopped_at IS NULL OR stopped_at >= joined_at),
     CONSTRAINT leaderboard_season_exam_sets_interval_key
         UNIQUE (season_id, exam_set_id, joined_at)
 );
@@ -31,8 +33,10 @@ CREATE TABLE leaderboard_scores (
     user_id uuid NOT NULL REFERENCES users(id),
     exam_set_id uuid NOT NULL REFERENCES exam_sets(id),
     attempt_id uuid NOT NULL REFERENCES exam_attempts(id),
-    points numeric(6,1) NOT NULL,
-    duration_seconds int NOT NULL,
+    points numeric(6,1) NOT NULL
+        CONSTRAINT leaderboard_scores_points_check CHECK (points >= 0 AND points <= 100),
+    duration_seconds int NOT NULL
+        CONSTRAINT leaderboard_scores_duration_seconds_check CHECK (duration_seconds >= 0),
     achieved_at timestamptz NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),

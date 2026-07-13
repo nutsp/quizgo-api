@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -167,6 +168,82 @@ func TestProjectAttemptClampsAndRoundsPoints(t *testing.T) {
 	}
 }
 
+func TestProjectAttemptRejectsInvalidCandidateValues(t *testing.T) {
+	tests := []struct {
+		name     string
+		points   float64
+		duration int
+	}{
+		{"not-a-number points", math.NaN(), 800},
+		{"positive infinite points", math.Inf(1), 800},
+		{"negative infinite points", math.Inf(-1), 800},
+		{"negative duration", 80, -1},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newProjectionFixture()
+			projector := NewProjector(fixture)
+
+			_, err := projector.ProjectAttempt(context.Background(), domain.ProjectionInput{
+				AttemptID:   uuid.New(),
+				UserID:      fixture.userID,
+				ExamSetID:   fixture.examSetID,
+				ExamTrackID: fixture.trackID,
+				TrackCode:   "math",
+				SubmittedAt: at(12),
+				Candidate:   candidate(test.points, test.duration, at(12)),
+			})
+			if err == nil {
+				t.Fatal("ProjectAttempt() error = nil, want invalid candidate error")
+			}
+			if fixture.scoreWrites != 0 {
+				t.Errorf("score writes = %d, want 0", fixture.scoreWrites)
+			}
+			if fixture.ensureCalls != 0 {
+				t.Errorf("ensure calls = %d, want 0", fixture.ensureCalls)
+			}
+		})
+	}
+}
+
+func TestProjectAttemptEnrollsActiveSetAtBangkokMonthRollover(t *testing.T) {
+	fixture := newProjectionFixture()
+	fixture.intervals = nil
+	fixture.enrollActiveOnEnsure = true
+	projector := NewProjector(fixture)
+	submittedAt := at(12)
+
+	got, err := projector.ProjectAttempt(context.Background(), domain.ProjectionInput{
+		AttemptID:   uuid.New(),
+		UserID:      fixture.userID,
+		ExamSetID:   fixture.examSetID,
+		ExamTrackID: fixture.trackID,
+		TrackCode:   "math",
+		SubmittedAt: submittedAt,
+		Candidate:   candidate(88, 700, submittedAt),
+	})
+	if err != nil {
+		t.Fatalf("ProjectAttempt() error = %v", err)
+	}
+	if got.TotalPoints != 88 {
+		t.Errorf("TotalPoints = %.1f, want 88", got.TotalPoints)
+	}
+	if fixture.ensureCalls != 1 {
+		t.Fatalf("ensure calls = %d, want 1", fixture.ensureCalls)
+	}
+	if len(fixture.intervals) != 1 {
+		t.Fatalf("intervals = %d, want 1", len(fixture.intervals))
+	}
+	window, err := domain.BangkokSeasonWindow(submittedAt)
+	if err != nil {
+		t.Fatalf("BangkokSeasonWindow() error = %v", err)
+	}
+	if !fixture.intervals[0].joinedAt.Equal(window.StartsAt) {
+		t.Errorf("joined at = %s, want season start %s", fixture.intervals[0].joinedAt, window.StartsAt)
+	}
+}
+
 func TestProjectorManagesSeasonEnrollmentLifecycle(t *testing.T) {
 	fixture := newProjectionFixture()
 	fixture.intervals = nil
@@ -176,7 +253,7 @@ func TestProjectorManagesSeasonEnrollmentLifecycle(t *testing.T) {
 	if err := projector.OnExamSetPublished(context.Background(), fixture.trackID, fixture.examSetID, publishedAt); err != nil {
 		t.Fatalf("OnExamSetPublished() error = %v", err)
 	}
-	if err := projector.OnExamSetPublished(context.Background(), fixture.trackID, fixture.examSetID, at(10)); err != nil {
+	if err := projector.OnExamSetPublished(context.Background(), fixture.trackID, fixture.examSetID, publishedAt); err != nil {
 		t.Fatalf("repeated OnExamSetPublished() error = %v", err)
 	}
 	if len(fixture.intervals) != 1 {
@@ -206,7 +283,7 @@ func TestProjectorManagesSeasonEnrollmentLifecycle(t *testing.T) {
 	if err := projector.OnExamSetStopped(context.Background(), fixture.examSetID, stoppedAt); err != nil {
 		t.Fatalf("OnExamSetStopped() error = %v", err)
 	}
-	if err := projector.OnExamSetStopped(context.Background(), fixture.examSetID, at(13)); err != nil {
+	if err := projector.OnExamSetStopped(context.Background(), fixture.examSetID, stoppedAt); err != nil {
 		t.Fatalf("repeated OnExamSetStopped() error = %v", err)
 	}
 	if fixture.intervals[0].stoppedAt == nil || !fixture.intervals[0].stoppedAt.Equal(stoppedAt) {
@@ -233,7 +310,7 @@ func TestProjectorManagesSeasonEnrollmentLifecycle(t *testing.T) {
 	if err := projector.OnExamSetPublished(context.Background(), fixture.trackID, fixture.examSetID, republishedAt); err != nil {
 		t.Fatalf("republished OnExamSetPublished() error = %v", err)
 	}
-	if err := projector.OnExamSetPublished(context.Background(), fixture.trackID, fixture.examSetID, at(16)); err != nil {
+	if err := projector.OnExamSetPublished(context.Background(), fixture.trackID, fixture.examSetID, republishedAt); err != nil {
 		t.Fatalf("repeated republished OnExamSetPublished() error = %v", err)
 	}
 	if len(fixture.intervals) != 2 {
@@ -257,6 +334,77 @@ func TestProjectorManagesSeasonEnrollmentLifecycle(t *testing.T) {
 	}
 	if afterRepublish.TotalPoints != 90 || len(fixture.bestScores) != 1 {
 		t.Errorf("republished score total/rows = %.1f/%d, want 90/1", afterRepublish.TotalPoints, len(fixture.bestScores))
+	}
+}
+
+func TestProjectorJoinsNewSetAtPublishTimeWhenCreatingSeason(t *testing.T) {
+	fixture := newProjectionFixture()
+	fixture.intervals = nil
+	fixture.enrollActiveOnEnsure = true
+	projector := NewProjector(fixture)
+	publishedAt := at(15)
+
+	if err := projector.OnExamSetPublished(context.Background(), fixture.trackID, fixture.examSetID, publishedAt); err != nil {
+		t.Fatalf("OnExamSetPublished() error = %v", err)
+	}
+	if len(fixture.intervals) != 1 {
+		t.Fatalf("intervals = %d, want only the publish-time interval", len(fixture.intervals))
+	}
+	if !fixture.intervals[0].joinedAt.Equal(publishedAt) {
+		t.Errorf("joined at = %s, want publish time %s", fixture.intervals[0].joinedAt, publishedAt)
+	}
+}
+
+func TestProjectorLifecycleUsesEventTimeForStaleRetries(t *testing.T) {
+	fixture := newProjectionFixture()
+	fixture.intervals = []eligibilityInterval{{joinedAt: at(9)}}
+	projector := NewProjector(fixture)
+	republishedAt := at(15)
+
+	if err := projector.OnExamSetPublished(context.Background(), fixture.trackID, fixture.examSetID, republishedAt); err != nil {
+		t.Fatalf("republish error = %v", err)
+	}
+	if len(fixture.intervals) != 2 {
+		t.Fatalf("intervals after republish = %d, want 2", len(fixture.intervals))
+	}
+	if fixture.intervals[0].stoppedAt == nil || !fixture.intervals[0].stoppedAt.Equal(republishedAt) {
+		t.Errorf("older interval stopped at = %v, want %s", fixture.intervals[0].stoppedAt, republishedAt)
+	}
+	if fixture.intervals[1].stoppedAt != nil || !fixture.intervals[1].joinedAt.Equal(republishedAt) {
+		t.Errorf("new interval = %+v, want open at %s", fixture.intervals[1], republishedAt)
+	}
+
+	if err := projector.OnExamSetStopped(context.Background(), fixture.examSetID, at(12)); err != nil {
+		t.Fatalf("delayed stop error = %v", err)
+	}
+	if fixture.intervals[1].stoppedAt != nil {
+		t.Errorf("delayed stop closed newer interval at %v", fixture.intervals[1].stoppedAt)
+	}
+
+	for _, retryAt := range []time.Time{republishedAt, at(10)} {
+		if err := projector.OnExamSetPublished(context.Background(), fixture.trackID, fixture.examSetID, retryAt); err != nil {
+			t.Fatalf("publish retry at %s error = %v", retryAt, err)
+		}
+	}
+	if len(fixture.intervals) != 2 || fixture.intervals[1].stoppedAt != nil {
+		t.Errorf("publish retries changed intervals = %+v", fixture.intervals)
+	}
+
+	if err := projector.OnExamSetStopped(context.Background(), fixture.examSetID, at(20)); err != nil {
+		t.Fatalf("stop error = %v", err)
+	}
+	if err := projector.OnExamSetStopped(context.Background(), fixture.examSetID, at(20)); err != nil {
+		t.Fatalf("stop retry error = %v", err)
+	}
+	if fixture.intervals[1].stoppedAt == nil || !fixture.intervals[1].stoppedAt.Equal(at(20)) {
+		t.Errorf("new interval stopped at = %v, want %s", fixture.intervals[1].stoppedAt, at(20))
+	}
+
+	if err := projector.OnExamSetPublished(context.Background(), fixture.trackID, fixture.examSetID, republishedAt); err != nil {
+		t.Fatalf("historical publish retry error = %v", err)
+	}
+	if len(fixture.intervals) != 2 {
+		t.Errorf("historical publish retry reopened interval count = %d, want 2", len(fixture.intervals))
 	}
 }
 

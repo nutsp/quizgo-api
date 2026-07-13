@@ -27,6 +27,8 @@ type projectionFixture struct {
 	stopCalls   int
 	joinedWith  time.Time
 	stoppedWith time.Time
+
+	enrollActiveOnEnsure bool
 }
 
 type eligibilityInterval struct {
@@ -55,6 +57,24 @@ func (f *projectionFixture) EnsureSeason(_ context.Context, trackID uuid.UUID, w
 	if trackID != f.trackID {
 		return nil, errors.New("unexpected track ID")
 	}
+	if f.enrollActiveOnEnsure && len(f.intervals) == 0 {
+		f.intervals = append(f.intervals, eligibilityInterval{joinedAt: window.StartsAt})
+	}
+	return &leaderboardrepo.SeasonRow{
+		ID:          f.seasonID,
+		ExamTrackID: f.trackID,
+		Year:        window.Year,
+		Month:       window.Month,
+		StartsAt:    window.StartsAt,
+		EndsAt:      window.EndsAt,
+	}, nil
+}
+
+func (f *projectionFixture) EnsureSeasonForPublish(_ context.Context, trackID, examSetID uuid.UUID, window domain.SeasonWindow) (*leaderboardrepo.SeasonRow, error) {
+	f.ensureCalls++
+	if trackID != f.trackID || examSetID != f.examSetID {
+		return nil, errors.New("unexpected track or exam set ID")
+	}
 	return &leaderboardrepo.SeasonRow{
 		ID:          f.seasonID,
 		ExamTrackID: f.trackID,
@@ -72,9 +92,21 @@ func (f *projectionFixture) JoinExamSet(_ context.Context, seasonID, examSetID u
 	}
 	f.joinedWith = joinedAt
 	for _, interval := range f.intervals {
-		if interval.stoppedAt == nil {
+		if interval.joinedAt.Equal(joinedAt) {
 			return nil
 		}
+	}
+	for i := len(f.intervals) - 1; i >= 0; i-- {
+		interval := &f.intervals[i]
+		if interval.stoppedAt != nil {
+			continue
+		}
+		if !interval.joinedAt.Before(joinedAt) {
+			return nil
+		}
+		stoppedAt := joinedAt
+		interval.stoppedAt = &stoppedAt
+		break
 	}
 	f.intervals = append(f.intervals, eligibilityInterval{joinedAt: joinedAt})
 	return nil
@@ -87,7 +119,7 @@ func (f *projectionFixture) StopExamSet(_ context.Context, examSetID uuid.UUID, 
 	}
 	f.stoppedWith = stoppedAt
 	for i := len(f.intervals) - 1; i >= 0; i-- {
-		if f.intervals[i].stoppedAt == nil {
+		if f.intervals[i].stoppedAt == nil && !f.intervals[i].joinedAt.After(stoppedAt) {
 			stoppedAtCopy := stoppedAt
 			f.intervals[i].stoppedAt = &stoppedAtCopy
 			break

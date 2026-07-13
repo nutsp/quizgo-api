@@ -21,6 +21,13 @@ func TestSeasonExamSetModelDeclaresIntervalKeys(t *testing.T) {
 	t.Parallel()
 
 	model := parseModelSchema(t, &SeasonExamSetModel{})
+	checks := model.ParseCheckConstraints()
+	assertCheckConstraint(
+		t,
+		checks,
+		"leaderboard_season_exam_sets_interval_check",
+		"stopped_at IS NULL OR stopped_at >= joined_at",
+	)
 	if model.PrioritizedPrimaryField == nil || model.PrioritizedPrimaryField.Name != "ID" {
 		t.Fatalf("primary key = %v, want ID", model.PrioritizedPrimaryField)
 	}
@@ -39,6 +46,24 @@ func TestSeasonExamSetModelDeclaresIntervalKeys(t *testing.T) {
 		"leaderboard_season_exam_sets_one_open_idx",
 		"stopped_at IS NULL",
 		"SeasonID", "ExamSetID",
+	)
+}
+
+func TestScoreModelDeclaresValueChecks(t *testing.T) {
+	t.Parallel()
+
+	checks := parseModelSchema(t, &ScoreModel{}).ParseCheckConstraints()
+	assertCheckConstraint(
+		t,
+		checks,
+		"leaderboard_scores_points_check",
+		"points >= 0 AND points <= 100",
+	)
+	assertCheckConstraint(
+		t,
+		checks,
+		"leaderboard_scores_duration_seconds_check",
+		"duration_seconds >= 0",
 	)
 }
 

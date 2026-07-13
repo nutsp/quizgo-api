@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -93,6 +94,7 @@ type ExamTrackUserRankRow struct {
 
 type Repository interface {
 	EnsureSeason(ctx context.Context, examTrackID uuid.UUID, window domain.SeasonWindow) (*SeasonRow, error)
+	EnsureSeasonForPublish(ctx context.Context, examTrackID, examSetID uuid.UUID, window domain.SeasonWindow) (*SeasonRow, error)
 	JoinExamSet(ctx context.Context, seasonID, examSetID uuid.UUID, joinedAt time.Time) error
 	StopExamSet(ctx context.Context, examSetID uuid.UUID, stoppedAt time.Time) error
 	GetEligibleSeason(ctx context.Context, examSetID uuid.UUID, submittedAt time.Time) (*SeasonRow, error)
@@ -119,40 +121,171 @@ func NewPostgresRepository(db *gorm.DB) Repository {
 	return &postgresRepository{db: db}
 }
 
+const insertSeasonSQL = `
+	INSERT INTO leaderboard_seasons (
+		id, exam_track_id, year, month, starts_at, ends_at, status
+	)
+	VALUES (?, ?, ?, ?, ?, ?, 'active')
+	ON CONFLICT (exam_track_id, year, month) DO NOTHING
+	RETURNING id, exam_track_id, year, month, starts_at, ends_at
+`
+
+const findSeasonSQL = `
+	SELECT id, exam_track_id, year, month, starts_at, ends_at
+	FROM leaderboard_seasons
+	WHERE exam_track_id = ? AND year = ? AND month = ?
+`
+
+const enrollSeasonExamSetsSQL = `
+	INSERT INTO leaderboard_season_exam_sets (id, season_id, exam_set_id, joined_at)
+	SELECT gen_random_uuid(), ?, id, ?
+	FROM exam_sets
+	WHERE exam_track_id = ?
+		AND status = ?
+		AND is_active = true
+`
+
+const enrollSeasonExamSetsForPublishSQL = enrollSeasonExamSetsSQL + `
+		AND id <> ?
+`
+
 func (r *postgresRepository) EnsureSeason(ctx context.Context, examTrackID uuid.UUID, window domain.SeasonWindow) (*SeasonRow, error) {
+	return r.ensureSeason(ctx, examTrackID, window, nil)
+}
+
+func (r *postgresRepository) EnsureSeasonForPublish(
+	ctx context.Context,
+	examTrackID, examSetID uuid.UUID,
+	window domain.SeasonWindow,
+) (*SeasonRow, error) {
+	return r.ensureSeason(ctx, examTrackID, window, &examSetID)
+}
+
+func (r *postgresRepository) ensureSeason(
+	ctx context.Context,
+	examTrackID uuid.UUID,
+	window domain.SeasonWindow,
+	excludedExamSetID *uuid.UUID,
+) (*SeasonRow, error) {
 	var row SeasonRow
-	err := r.db.WithContext(ctx).Raw(`
-		INSERT INTO leaderboard_seasons (
-			id, exam_track_id, year, month, starts_at, ends_at, status
-		)
-		VALUES (?, ?, ?, ?, ?, ?, 'active')
-		ON CONFLICT (exam_track_id, year, month) DO UPDATE SET
-			starts_at = EXCLUDED.starts_at,
-			ends_at = EXCLUDED.ends_at,
-			updated_at = now()
-		RETURNING id, exam_track_id, year, month, starts_at, ends_at
-	`, uuid.New(), examTrackID, window.Year, window.Month, window.StartsAt, window.EndsAt).Scan(&row).Error
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		insert := tx.Raw(
+			insertSeasonSQL,
+			uuid.New(), examTrackID, window.Year, window.Month, window.StartsAt, window.EndsAt,
+		).Scan(&row)
+		if insert.Error != nil {
+			return insert.Error
+		}
+		if row.ID == uuid.Nil {
+			return tx.Raw(findSeasonSQL, examTrackID, window.Year, window.Month).Scan(&row).Error
+		}
+
+		enrollmentSQL := enrollSeasonExamSetsSQL
+		enrollmentArgs := []any{row.ID, row.StartsAt, examTrackID, examsetdomain.StatusPublished}
+		if excludedExamSetID != nil {
+			enrollmentSQL = enrollSeasonExamSetsForPublishSQL
+			enrollmentArgs = append(enrollmentArgs, *excludedExamSetID)
+		}
+		return tx.Exec(enrollmentSQL, enrollmentArgs...).Error
+	})
 	if err != nil {
 		return nil, err
 	}
 	return &row, nil
 }
 
+const acquireExamSetTransitionLockSQL = `
+	SELECT pg_advisory_xact_lock(hashtextextended(CAST(? AS text), 0))
+`
+
+const findExactExamSetIntervalSQL = `
+	SELECT EXISTS (
+		SELECT 1
+		FROM leaderboard_season_exam_sets
+		WHERE season_id = ? AND exam_set_id = ? AND joined_at = ?
+	)
+`
+
+const findOpenExamSetIntervalSQL = `
+	SELECT id, joined_at
+	FROM leaderboard_season_exam_sets
+	WHERE season_id = ? AND exam_set_id = ? AND stopped_at IS NULL
+	FOR UPDATE
+`
+
+const closeOpenExamSetIntervalSQL = `
+	UPDATE leaderboard_season_exam_sets
+	SET stopped_at = ?
+	WHERE id = ? AND stopped_at IS NULL AND joined_at < ?
+`
+
+const insertSeasonExamSetIntervalSQL = `
+	INSERT INTO leaderboard_season_exam_sets (id, season_id, exam_set_id, joined_at)
+	VALUES (?, ?, ?, ?)
+`
+
+const stopOpenExamSetIntervalsSQL = `
+	UPDATE leaderboard_season_exam_sets
+	SET stopped_at = ?
+	WHERE exam_set_id = ?
+		AND stopped_at IS NULL
+		AND joined_at <= ?
+`
+
 func (r *postgresRepository) JoinExamSet(ctx context.Context, seasonID, examSetID uuid.UUID, joinedAt time.Time) error {
-	return r.db.WithContext(ctx).Exec(`
-		INSERT INTO leaderboard_season_exam_sets (id, season_id, exam_set_id, joined_at)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT DO NOTHING
-	`, uuid.New(), seasonID, examSetID, joinedAt).Error
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(acquireExamSetTransitionLockSQL, examSetID).Error; err != nil {
+			return err
+		}
+
+		var exactIntervalExists bool
+		if err := tx.Raw(
+			findExactExamSetIntervalSQL,
+			seasonID, examSetID, joinedAt,
+		).Scan(&exactIntervalExists).Error; err != nil {
+			return err
+		}
+		if exactIntervalExists {
+			return nil
+		}
+
+		var openInterval struct {
+			ID       uuid.UUID
+			JoinedAt time.Time
+		}
+		if err := tx.Raw(
+			findOpenExamSetIntervalSQL,
+			seasonID, examSetID,
+		).Scan(&openInterval).Error; err != nil {
+			return err
+		}
+		if openInterval.ID != uuid.Nil {
+			if !openInterval.JoinedAt.Before(joinedAt) {
+				return nil
+			}
+			closed := tx.Exec(closeOpenExamSetIntervalSQL, joinedAt, openInterval.ID, joinedAt)
+			if closed.Error != nil {
+				return closed.Error
+			}
+			if closed.RowsAffected != 1 {
+				return fmt.Errorf("close leaderboard enrollment interval: affected %d rows", closed.RowsAffected)
+			}
+		}
+
+		return tx.Exec(
+			insertSeasonExamSetIntervalSQL,
+			uuid.New(), seasonID, examSetID, joinedAt,
+		).Error
+	})
 }
 
 func (r *postgresRepository) StopExamSet(ctx context.Context, examSetID uuid.UUID, stoppedAt time.Time) error {
-	return r.db.WithContext(ctx).Exec(`
-		UPDATE leaderboard_season_exam_sets
-		SET stopped_at = ?
-		WHERE exam_set_id = ?
-			AND stopped_at IS NULL
-	`, stoppedAt, examSetID).Error
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(acquireExamSetTransitionLockSQL, examSetID).Error; err != nil {
+			return err
+		}
+		return tx.Exec(stopOpenExamSetIntervalsSQL, stoppedAt, examSetID, stoppedAt).Error
+	})
 }
 
 func (r *postgresRepository) GetEligibleSeason(ctx context.Context, examSetID uuid.UUID, submittedAt time.Time) (*SeasonRow, error) {

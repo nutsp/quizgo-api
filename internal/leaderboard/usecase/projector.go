@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"math"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 
 type ProjectorRepository interface {
 	EnsureSeason(context.Context, uuid.UUID, domain.SeasonWindow) (*leaderboardrepo.SeasonRow, error)
+	EnsureSeasonForPublish(context.Context, uuid.UUID, uuid.UUID, domain.SeasonWindow) (*leaderboardrepo.SeasonRow, error)
 	JoinExamSet(context.Context, uuid.UUID, uuid.UUID, time.Time) error
 	StopExamSet(context.Context, uuid.UUID, time.Time) error
 	GetEligibleSeason(context.Context, uuid.UUID, time.Time) (*leaderboardrepo.SeasonRow, error)
@@ -30,12 +32,28 @@ func NewProjector(repo ProjectorRepository) *Projector {
 }
 
 func (p *Projector) ProjectAttempt(ctx context.Context, input domain.ProjectionInput) (*domain.ProjectionUpdate, error) {
+	if err := validateProjectionCandidate(input.Candidate); err != nil {
+		return nil, err
+	}
 	input.Candidate.Points = normalizeProjectedPoints(input.Candidate.Points)
 	result := &domain.ProjectionUpdate{TrackCode: input.TrackCode}
 
 	season, err := p.repo.GetEligibleSeason(ctx, input.ExamSetID, input.SubmittedAt)
 	if err != nil {
 		return nil, err
+	}
+	if season == nil {
+		window, err := domain.BangkokSeasonWindow(input.SubmittedAt)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.repo.EnsureSeason(ctx, input.ExamTrackID, window); err != nil {
+			return nil, err
+		}
+		season, err = p.repo.GetEligibleSeason(ctx, input.ExamSetID, input.SubmittedAt)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if season == nil {
 		return result, nil
@@ -92,7 +110,7 @@ func (p *Projector) OnExamSetPublished(ctx context.Context, examTrackID, examSet
 	if err != nil {
 		return err
 	}
-	season, err := p.repo.EnsureSeason(ctx, examTrackID, window)
+	season, err := p.repo.EnsureSeasonForPublish(ctx, examTrackID, examSetID, window)
 	if err != nil {
 		return err
 	}
@@ -110,4 +128,14 @@ func (p *Projector) RecordProjectionFailure(ctx context.Context, attemptID uuid.
 func normalizeProjectedPoints(points float64) float64 {
 	points = max(0, min(100, points))
 	return math.Round(points*10) / 10
+}
+
+func validateProjectionCandidate(candidate domain.ScoreCandidate) error {
+	if math.IsNaN(candidate.Points) || math.IsInf(candidate.Points, 0) {
+		return errors.New("leaderboard projection points must be finite")
+	}
+	if candidate.DurationSeconds < 0 {
+		return errors.New("leaderboard projection duration must not be negative")
+	}
+	return nil
 }
