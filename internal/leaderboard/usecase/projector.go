@@ -14,6 +14,7 @@ import (
 type ProjectorRepository interface {
 	EnsureSeason(context.Context, uuid.UUID, domain.SeasonWindow) (*leaderboardrepo.SeasonRow, error)
 	EnsureSeasonForPublish(context.Context, uuid.UUID, uuid.UUID, domain.SeasonWindow) (*leaderboardrepo.SeasonRow, error)
+	PublishExamSet(context.Context, uuid.UUID, uuid.UUID, domain.SeasonWindow, time.Time) (*leaderboardrepo.SeasonRow, error)
 	JoinExamSet(context.Context, uuid.UUID, uuid.UUID, time.Time) error
 	StopExamSet(context.Context, uuid.UUID, time.Time) error
 	GetEligibleSeason(context.Context, uuid.UUID, time.Time) (*leaderboardrepo.SeasonRow, error)
@@ -90,11 +91,8 @@ func (p *Projector) OnExamSetPublished(ctx context.Context, examTrackID, examSet
 	if err != nil {
 		return err
 	}
-	season, err := p.repo.EnsureSeasonForPublish(ctx, examTrackID, examSetID, window)
-	if err != nil {
-		return err
-	}
-	return p.repo.JoinExamSet(ctx, season.ID, examSetID, publishedAt)
+	_, err = p.repo.PublishExamSet(ctx, examTrackID, examSetID, window, publishedAt)
+	return err
 }
 
 func (p *Projector) OnExamSetStopped(ctx context.Context, examSetID uuid.UUID, stoppedAt time.Time) error {

@@ -50,6 +50,7 @@ type ExamSet struct {
 	AnswerSheetLayout AnswerSheetLayoutConfig
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+	PublishedAt     *time.Time
 	ExamTrack       *ExamTrackRef
 }
 

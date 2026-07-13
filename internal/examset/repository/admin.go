@@ -135,13 +135,14 @@ func (r *adminRepository) Create(ctx context.Context, set *domain.ExamSet) error
 		AnswerSheetShowCandidateInfo: set.AnswerSheetLayout.ShowCandidateInfo,
 		CreatedAt:       set.CreatedAt,
 		UpdatedAt:       set.UpdatedAt,
+		PublishedAt:     set.PublishedAt,
 	}
 	return r.db.WithContext(ctx).Create(&model).Error
 }
 
 func (r *adminRepository) Update(ctx context.Context, set *domain.ExamSet) error {
 	set.UpdatedAt = time.Now().UTC()
-	return r.db.WithContext(ctx).Model(&ExamSetModel{}).Where("id = ?", set.ID).Updates(map[string]any{
+	updates := map[string]any{
 		"exam_track_id":     set.ExamTrackID,
 		"code":              strings.ToLower(set.Code),
 		"title":             set.Title,
@@ -168,7 +169,11 @@ func (r *adminRepository) Update(ctx context.Context, set *domain.ExamSet) error
 		"answer_sheet_show_instructions":      set.AnswerSheetLayout.ShowInstructions,
 		"answer_sheet_show_candidate_info":    set.AnswerSheetLayout.ShowCandidateInfo,
 		"updated_at":        set.UpdatedAt,
-	}).Error
+	}
+	if set.IsActive {
+		updates["published_at"] = publicationActivationTimestamp(set.UpdatedAt)
+	}
+	return r.db.WithContext(ctx).Model(&ExamSetModel{}).Where("id = ?", set.ID).Updates(updates).Error
 }
 
 func (r *adminRepository) Delete(ctx context.Context, id uuid.UUID) (bool, error) {
@@ -195,18 +200,38 @@ func (r *adminRepository) UpdateTotalQuestions(ctx context.Context, examSetID uu
 }
 
 func (r *adminRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status string, isActive bool) error {
-	return r.db.WithContext(ctx).Model(&ExamSetModel{}).Where("id = ?", id).Updates(map[string]any{
+	now := time.Now().UTC()
+	updates := map[string]any{
 		"status":     status,
 		"is_active":  isActive,
-		"updated_at": time.Now().UTC(),
-	}).Error
+		"updated_at": now,
+	}
+	if status == domain.StatusPublished && isActive {
+		updates["published_at"] = gorm.Expr(`CASE
+			WHEN status <> ? OR is_active = false OR published_at IS NULL THEN ?
+			ELSE published_at
+		END`, domain.StatusPublished, now)
+	}
+	return r.db.WithContext(ctx).Model(&ExamSetModel{}).Where("id = ?", id).Updates(updates).Error
 }
 
 func (r *adminRepository) UpdateIsActive(ctx context.Context, id uuid.UUID, isActive bool) error {
-	return r.db.WithContext(ctx).Model(&ExamSetModel{}).Where("id = ?", id).Updates(map[string]any{
+	now := time.Now().UTC()
+	updates := map[string]any{
 		"is_active":  isActive,
-		"updated_at": time.Now().UTC(),
-	}).Error
+		"updated_at": now,
+	}
+	if isActive {
+		updates["published_at"] = publicationActivationTimestamp(now)
+	}
+	return r.db.WithContext(ctx).Model(&ExamSetModel{}).Where("id = ?", id).Updates(updates).Error
+}
+
+func publicationActivationTimestamp(transitionAt time.Time) any {
+	return gorm.Expr(`CASE
+		WHEN status = ? AND (is_active = false OR published_at IS NULL) THEN ?
+		ELSE published_at
+	END`, domain.StatusPublished, transitionAt)
 }
 
 func normalizePagination(page, limit int) (int, int) {

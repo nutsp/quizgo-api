@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"math"
 	"testing"
 	"time"
@@ -130,6 +131,51 @@ func TestProjectAttemptRetryRepairsMissingAggregate(t *testing.T) {
 	}
 	if got.ImprovedBestScore {
 		t.Error("ImprovedBestScore = true, want false for an identical retry")
+	}
+}
+
+func TestProjectAttemptUsesClosedHistoricalIntervalAfterUnpublish(t *testing.T) {
+	fixture := newProjectionFixture()
+	fixture.published = false
+	projector := NewProjector(fixture)
+
+	got, err := projector.ProjectAttempt(context.Background(), domain.ProjectionInput{
+		AttemptID:   uuid.New(),
+		UserID:      fixture.userID,
+		ExamSetID:   fixture.examSetID,
+		ExamTrackID: fixture.trackID,
+		TrackCode:   "math",
+		SubmittedAt: at(12),
+		Candidate:   candidate(92, 700, at(12)),
+	})
+	if err != nil {
+		t.Fatalf("ProjectAttempt() error = %v", err)
+	}
+	if got.SeasonID == "" || got.TotalPoints != 92 {
+		t.Fatalf("historical projection season/points = %q/%.1f, want eligible/92", got.SeasonID, got.TotalPoints)
+	}
+}
+
+func TestProjectAttemptReturnsRetryableErrorForOpenIntervalAfterUnpublish(t *testing.T) {
+	fixture := newProjectionFixture()
+	fixture.intervals = []eligibilityInterval{{joinedAt: at(9)}}
+	fixture.published = false
+	projector := NewProjector(fixture)
+
+	_, err := projector.ProjectAttempt(context.Background(), domain.ProjectionInput{
+		AttemptID:   uuid.New(),
+		UserID:      fixture.userID,
+		ExamSetID:   fixture.examSetID,
+		ExamTrackID: fixture.trackID,
+		TrackCode:   "math",
+		SubmittedAt: at(12),
+		Candidate:   candidate(92, 700, at(12)),
+	})
+	if !errors.Is(err, leaderboardrepo.ErrLifecycleStatePending) {
+		t.Fatalf("ProjectAttempt() error = %v, want retryable lifecycle error", err)
+	}
+	if fixture.scoreWrites != 0 {
+		t.Errorf("score writes = %d, want 0 while stop lifecycle is pending", fixture.scoreWrites)
 	}
 }
 
@@ -352,6 +398,12 @@ func TestProjectorJoinsNewSetAtPublishTimeWhenCreatingSeason(t *testing.T) {
 	}
 	if !fixture.intervals[0].joinedAt.Equal(publishedAt) {
 		t.Errorf("joined at = %s, want publish time %s", fixture.intervals[0].joinedAt, publishedAt)
+	}
+	if fixture.publishCalls != 1 {
+		t.Errorf("atomic publish calls = %d, want 1", fixture.publishCalls)
+	}
+	if fixture.ensureCalls != 0 || fixture.joinCalls != 0 {
+		t.Errorf("split ensure/join calls = %d/%d, want 0/0", fixture.ensureCalls, fixture.joinCalls)
 	}
 }
 

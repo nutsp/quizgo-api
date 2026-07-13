@@ -2,6 +2,8 @@ package repository
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -44,6 +46,44 @@ type BestScoreProjection struct {
 	ScoreUpdate  *BestScoreUpdate
 	Entry        *EntryRow
 	CurrentRank  *UserRankRow
+}
+
+var (
+	ErrLifecycleStatePending = errors.New("leaderboard lifecycle state is pending")
+	projectionTxOptions      = &sql.TxOptions{Isolation: sql.LevelRepeatableRead}
+)
+
+var reconcileLifecycleSchemaSQL = []string{
+	`CREATE EXTENSION IF NOT EXISTS btree_gist`,
+	`DO $$
+	BEGIN
+		IF NOT EXISTS (
+			SELECT 1
+			FROM pg_constraint
+			WHERE conname = 'leaderboard_season_exam_sets_no_overlap'
+				AND conrelid = 'leaderboard_season_exam_sets'::regclass
+		) THEN
+			ALTER TABLE leaderboard_season_exam_sets
+			ADD CONSTRAINT leaderboard_season_exam_sets_no_overlap
+			EXCLUDE USING gist (
+				season_id WITH =,
+				exam_set_id WITH =,
+				tstzrange(joined_at, stopped_at, '[)') WITH &&
+			);
+		END IF;
+	END $$`,
+}
+
+// ReconcileLifecycleSchema restores constraints that GORM cannot express.
+func ReconcileLifecycleSchema(db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		for _, statement := range reconcileLifecycleSchemaSQL {
+			if err := tx.Exec(statement).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 type ExamSetContextRow struct {
@@ -103,6 +143,7 @@ type ExamTrackUserRankRow struct {
 type Repository interface {
 	EnsureSeason(ctx context.Context, examTrackID uuid.UUID, window domain.SeasonWindow) (*SeasonRow, error)
 	EnsureSeasonForPublish(ctx context.Context, examTrackID, examSetID uuid.UUID, window domain.SeasonWindow) (*SeasonRow, error)
+	PublishExamSet(ctx context.Context, examTrackID, examSetID uuid.UUID, window domain.SeasonWindow, publishedAt time.Time) (*SeasonRow, error)
 	JoinExamSet(ctx context.Context, seasonID, examSetID uuid.UUID, joinedAt time.Time) error
 	StopExamSet(ctx context.Context, examSetID uuid.UUID, stoppedAt time.Time) error
 	GetEligibleSeason(ctx context.Context, examSetID uuid.UUID, submittedAt time.Time) (*SeasonRow, error)
@@ -205,12 +246,22 @@ const findRolloverExamSetStateSQL = `
 `
 
 const findBootstrapExamSetStateSQL = `
-	SELECT updated_at
+	SELECT published_at
 	FROM exam_sets
 	WHERE id = ?
 		AND exam_track_id = ?
 		AND status = ?
 		AND is_active = true
+`
+
+const acquireSeasonLifecycleLockSQL = `
+	SELECT pg_advisory_xact_lock(
+		hashtextextended(
+			CAST(? AS text) || ':' || CAST(CAST(? AS integer) AS text) || ':' ||
+				CAST(CAST(? AS integer) AS text),
+			2
+		)
+	)
 `
 
 func (r *postgresRepository) EnsureSeason(ctx context.Context, examTrackID uuid.UUID, window domain.SeasonWindow) (*SeasonRow, error) {
@@ -225,6 +276,97 @@ func (r *postgresRepository) EnsureSeasonForPublish(
 	return r.ensureSeason(ctx, examTrackID, window, &examSetID)
 }
 
+func (r *postgresRepository) PublishExamSet(
+	ctx context.Context,
+	examTrackID, examSetID uuid.UUID,
+	_ domain.SeasonWindow,
+	_ time.Time,
+) (*SeasonRow, error) {
+	state, err := loadExamSetPublicationState(r.db.WithContext(ctx), examSetID, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateExamSetPublishState(state, examTrackID); err != nil {
+		return nil, err
+	}
+	if !state.currentlyPublished() {
+		return r.rejectStalePublish(ctx, examTrackID, examSetID)
+	}
+	if state.PublishedAt == nil {
+		return nil, fmt.Errorf("%w: published exam set %s has no publication timestamp", ErrLifecycleStatePending, examSetID)
+	}
+	window, err := domain.BangkokSeasonWindow(*state.PublishedAt)
+	if err != nil {
+		return nil, err
+	}
+
+	var row SeasonRow
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(
+			acquireSeasonLifecycleLockSQL,
+			examTrackID,
+			window.Year,
+			window.Month,
+		).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(acquireExamSetTransitionLockSQL, examSetID).Error; err != nil {
+			return err
+		}
+		lockedState, err := loadExamSetPublicationState(tx, examSetID, true)
+		if err != nil {
+			return err
+		}
+		if err := validateExamSetPublishState(lockedState, examTrackID); err != nil {
+			return err
+		}
+		if !lockedState.currentlyPublished() {
+			return nil
+		}
+		if lockedState.PublishedAt == nil {
+			return fmt.Errorf("%w: published exam set %s has no publication timestamp", ErrLifecycleStatePending, examSetID)
+		}
+		lockedWindow, err := domain.BangkokSeasonWindow(*lockedState.PublishedAt)
+		if err != nil {
+			return err
+		}
+		if lockedWindow.Year != window.Year || lockedWindow.Month != window.Month {
+			return fmt.Errorf("%w: exam set %s publication activation changed", ErrLifecycleStatePending, examSetID)
+		}
+		if err := r.ensureSeasonInTransaction(tx, examTrackID, window, &examSetID, &row); err != nil {
+			return err
+		}
+		return publishExamSetInterval(tx, row.ID, examSetID, *lockedState.PublishedAt)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+func (r *postgresRepository) rejectStalePublish(
+	ctx context.Context,
+	examTrackID, examSetID uuid.UUID,
+) (*SeasonRow, error) {
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(acquireExamSetTransitionLockSQL, examSetID).Error; err != nil {
+			return err
+		}
+		state, err := loadExamSetPublicationState(tx, examSetID, true)
+		if err != nil {
+			return err
+		}
+		if err := validateExamSetPublishState(state, examTrackID); err != nil {
+			return err
+		}
+		if state.currentlyPublished() {
+			return fmt.Errorf("%w: exam set %s publication activation changed", ErrLifecycleStatePending, examSetID)
+		}
+		return nil
+	})
+	return nil, err
+}
+
 func (r *postgresRepository) ensureSeason(
 	ctx context.Context,
 	examTrackID uuid.UUID,
@@ -233,23 +375,40 @@ func (r *postgresRepository) ensureSeason(
 ) (*SeasonRow, error) {
 	var row SeasonRow
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		insert := tx.Raw(
-			insertSeasonSQL,
-			uuid.New(), examTrackID, window.Year, window.Month, window.StartsAt, window.EndsAt,
-		).Scan(&row)
-		if insert.Error != nil {
-			return insert.Error
+		if err := tx.Exec(
+			acquireSeasonLifecycleLockSQL,
+			examTrackID,
+			window.Year,
+			window.Month,
+		).Error; err != nil {
+			return err
 		}
-		if row.ID == uuid.Nil {
-			return tx.Raw(findSeasonSQL, examTrackID, window.Year, window.Month).Scan(&row).Error
-		}
-
-		return r.enrollSeasonExamSets(tx, row, excludedExamSetID)
+		return r.ensureSeasonInTransaction(tx, examTrackID, window, excludedExamSetID, &row)
 	})
 	if err != nil {
 		return nil, err
 	}
 	return &row, nil
+}
+
+func (r *postgresRepository) ensureSeasonInTransaction(
+	tx *gorm.DB,
+	examTrackID uuid.UUID,
+	window domain.SeasonWindow,
+	excludedExamSetID *uuid.UUID,
+	row *SeasonRow,
+) error {
+	insert := tx.Raw(
+		insertSeasonSQL,
+		uuid.New(), examTrackID, window.Year, window.Month, window.StartsAt, window.EndsAt,
+	).Scan(row)
+	if insert.Error != nil {
+		return insert.Error
+	}
+	if row.ID == uuid.Nil {
+		return tx.Raw(findSeasonSQL, examTrackID, window.Year, window.Month).Scan(row).Error
+	}
+	return r.enrollSeasonExamSets(tx, *row, excludedExamSetID)
 }
 
 func (r *postgresRepository) enrollSeasonExamSets(
@@ -334,22 +493,22 @@ func effectiveSeasonJoinTime(
 		return season.StartsAt, stillPublished, nil
 	}
 
-	var stateUpdatedAt time.Time
+	var publishedAt time.Time
 	if err := tx.Raw(
 		findBootstrapExamSetStateSQL,
 		examSetID,
 		season.ExamTrackID,
 		examsetdomain.StatusPublished,
-	).Scan(&stateUpdatedAt).Error; err != nil {
+	).Scan(&publishedAt).Error; err != nil {
 		return time.Time{}, false, err
 	}
-	if stateUpdatedAt.IsZero() {
+	if publishedAt.IsZero() {
 		return time.Time{}, false, nil
 	}
-	if stateUpdatedAt.Before(season.StartsAt) {
-		stateUpdatedAt = season.StartsAt
+	if publishedAt.Before(season.StartsAt) {
+		publishedAt = season.StartsAt
 	}
-	return stateUpdatedAt, true, nil
+	return publishedAt, true, nil
 }
 
 const acquireExamSetTransitionLockSQL = `
@@ -359,14 +518,6 @@ const acquireExamSetTransitionLockSQL = `
 const acquireSeasonUserProjectionLockSQL = `
 	SELECT pg_advisory_xact_lock(
 		hashtextextended(CAST(? AS text) || ':' || CAST(? AS text), 1)
-	)
-`
-
-const findPublishedActiveExamSetSQL = `
-	SELECT EXISTS (
-		SELECT 1
-		FROM exam_sets
-		WHERE id = ? AND status = ? AND is_active = true
 	)
 `
 
@@ -382,6 +533,15 @@ const findOpenExamSetIntervalSQL = `
 	SELECT id, joined_at
 	FROM leaderboard_season_exam_sets
 	WHERE season_id = ? AND exam_set_id = ? AND stopped_at IS NULL
+	FOR UPDATE
+`
+
+const findLatestExamSetIntervalSQL = `
+	SELECT id, joined_at, stopped_at
+	FROM leaderboard_season_exam_sets
+	WHERE season_id = ? AND exam_set_id = ?
+	ORDER BY joined_at DESC
+	LIMIT 1
 	FOR UPDATE
 `
 
@@ -409,33 +569,43 @@ func (r *postgresRepository) JoinExamSet(ctx context.Context, seasonID, examSetI
 		if err := tx.Exec(acquireExamSetTransitionLockSQL, examSetID).Error; err != nil {
 			return err
 		}
+		return publishExamSetInterval(tx, seasonID, examSetID, joinedAt)
+	})
+}
 
-		var exactIntervalExists bool
-		if err := tx.Raw(
-			findExactExamSetIntervalSQL,
-			seasonID, examSetID, joinedAt,
-		).Scan(&exactIntervalExists).Error; err != nil {
-			return err
+func publishExamSetInterval(tx *gorm.DB, seasonID, examSetID uuid.UUID, joinedAt time.Time) error {
+	var exactIntervalExists bool
+	if err := tx.Raw(
+		findExactExamSetIntervalSQL,
+		seasonID, examSetID, joinedAt,
+	).Scan(&exactIntervalExists).Error; err != nil {
+		return err
+	}
+	if exactIntervalExists {
+		return nil
+	}
+
+	var latestInterval struct {
+		ID        uuid.UUID
+		JoinedAt  time.Time
+		StoppedAt *time.Time
+	}
+	if err := tx.Raw(
+		findLatestExamSetIntervalSQL,
+		seasonID, examSetID,
+	).Scan(&latestInterval).Error; err != nil {
+		return err
+	}
+	if latestInterval.ID != uuid.Nil {
+		latestBoundary := latestInterval.JoinedAt
+		if latestInterval.StoppedAt != nil {
+			latestBoundary = *latestInterval.StoppedAt
 		}
-		if exactIntervalExists {
+		if !latestBoundary.Before(joinedAt) {
 			return nil
 		}
-
-		var openInterval struct {
-			ID       uuid.UUID
-			JoinedAt time.Time
-		}
-		if err := tx.Raw(
-			findOpenExamSetIntervalSQL,
-			seasonID, examSetID,
-		).Scan(&openInterval).Error; err != nil {
-			return err
-		}
-		if openInterval.ID != uuid.Nil {
-			if !openInterval.JoinedAt.Before(joinedAt) {
-				return nil
-			}
-			closed := tx.Exec(closeOpenExamSetIntervalSQL, joinedAt, openInterval.ID, joinedAt)
+		if latestInterval.StoppedAt == nil {
+			closed := tx.Exec(closeOpenExamSetIntervalSQL, joinedAt, latestInterval.ID, joinedAt)
 			if closed.Error != nil {
 				return closed.Error
 			}
@@ -443,12 +613,12 @@ func (r *postgresRepository) JoinExamSet(ctx context.Context, seasonID, examSetI
 				return fmt.Errorf("close leaderboard enrollment interval: affected %d rows", closed.RowsAffected)
 			}
 		}
+	}
 
-		return tx.Exec(
-			insertSeasonExamSetIntervalSQL,
-			uuid.New(), seasonID, examSetID, joinedAt,
-		).Error
-	})
+	return tx.Exec(
+		insertSeasonExamSetIntervalSQL,
+		uuid.New(), seasonID, examSetID, joinedAt,
+	).Error
 }
 
 func (r *postgresRepository) StopExamSet(ctx context.Context, examSetID uuid.UUID, stoppedAt time.Time) error {
@@ -464,25 +634,127 @@ func (r *postgresRepository) GetEligibleSeason(ctx context.Context, examSetID uu
 	return getEligibleSeason(r.db.WithContext(ctx), examSetID, submittedAt)
 }
 
+type eligibleSeasonIntervalRow struct {
+	SeasonRow
+	IntervalStoppedAt *time.Time
+}
+
+type examSetPublicationStateRow struct {
+	ID          uuid.UUID
+	ExamTrackID uuid.UUID
+	Status      string
+	IsActive    bool
+	PublishedAt *time.Time
+}
+
+func (s examSetPublicationStateRow) currentlyPublished() bool {
+	return s.Status == examsetdomain.StatusPublished && s.IsActive
+}
+
+const findExamSetPublicationStateSQL = `
+	SELECT id, exam_track_id, status, is_active, published_at
+	FROM exam_sets
+	WHERE id = ?
+`
+
+const findExamSetPublicationStateForShareSQL = `
+	SELECT id, exam_track_id, status, is_active, published_at
+	FROM exam_sets
+	WHERE id = ?
+	FOR SHARE
+`
+
+func loadExamSetPublicationState(
+	db *gorm.DB,
+	examSetID uuid.UUID,
+	forShare bool,
+) (*examSetPublicationStateRow, error) {
+	query := findExamSetPublicationStateSQL
+	if forShare {
+		query = findExamSetPublicationStateForShareSQL
+	}
+	var state examSetPublicationStateRow
+	result := db.Raw(query, examSetID).Scan(&state)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 || state.ID == uuid.Nil {
+		return nil, gorm.ErrRecordNotFound
+	}
+	return &state, nil
+}
+
+func validateExamSetPublishState(state *examSetPublicationStateRow, examTrackID uuid.UUID) error {
+	if state.ExamTrackID != examTrackID {
+		return fmt.Errorf(
+			"exam set %s belongs to track %s, not %s",
+			state.ID,
+			state.ExamTrackID,
+			examTrackID,
+		)
+	}
+	return nil
+}
+
+const findEligibleSeasonIntervalSQL = `
+	SELECT
+		s.id,
+		s.exam_track_id,
+		s.year,
+		s.month,
+		s.starts_at,
+		s.ends_at,
+		ses.stopped_at AS interval_stopped_at
+	FROM leaderboard_seasons s
+	JOIN leaderboard_season_exam_sets ses ON ses.season_id = s.id
+	WHERE s.status = 'active'
+		AND ? >= s.starts_at
+		AND ? < s.ends_at
+		AND ses.exam_set_id = ?
+		AND ? >= ses.joined_at
+		AND (ses.stopped_at IS NULL OR ? < ses.stopped_at)
+	ORDER BY s.starts_at DESC, ses.joined_at DESC
+	LIMIT 1
+`
+
+const findSeasonForExamSetAtSQL = `
+	SELECT s.id, s.exam_track_id, s.year, s.month, s.starts_at, s.ends_at
+	FROM leaderboard_seasons s
+	JOIN exam_sets es ON es.exam_track_id = s.exam_track_id
+	WHERE es.id = ?
+		AND s.status = 'active'
+		AND ? >= s.starts_at
+		AND ? < s.ends_at
+	ORDER BY s.starts_at DESC
+	LIMIT 1
+`
+
 func getEligibleSeason(db *gorm.DB, examSetID uuid.UUID, submittedAt time.Time) (*SeasonRow, error) {
-	var row SeasonRow
-	err := db.Raw(`
-		SELECT s.id, s.exam_track_id, s.year, s.month, s.starts_at, s.ends_at
-		FROM leaderboard_seasons s
-		WHERE s.status = 'active'
-			AND ? >= s.starts_at
-			AND ? < s.ends_at
-			AND EXISTS (
-				SELECT 1
-				FROM leaderboard_season_exam_sets ses
-				WHERE ses.season_id = s.id
-					AND ses.exam_set_id = ?
-					AND ? >= ses.joined_at
-					AND (ses.stopped_at IS NULL OR ? < ses.stopped_at)
-			)
-		ORDER BY s.starts_at DESC
-		LIMIT 1
-	`, submittedAt, submittedAt, examSetID, submittedAt, submittedAt).Scan(&row).Error
+	row, err := getEligibleSeasonInterval(db, examSetID, submittedAt)
+	if err != nil {
+		return nil, err
+	}
+	if row == nil {
+		return nil, nil
+	}
+	season := row.SeasonRow
+	return &season, nil
+}
+
+func getEligibleSeasonInterval(
+	db *gorm.DB,
+	examSetID uuid.UUID,
+	submittedAt time.Time,
+) (*eligibleSeasonIntervalRow, error) {
+	var row eligibleSeasonIntervalRow
+	err := db.Raw(
+		findEligibleSeasonIntervalSQL,
+		submittedAt,
+		submittedAt,
+		examSetID,
+		submittedAt,
+		submittedAt,
+	).Scan(&row).Error
 	if err != nil {
 		return nil, err
 	}
@@ -504,19 +776,11 @@ func (r *postgresRepository) ProjectBestScore(
 			return err
 		}
 
-		var currentlyPublished bool
-		if err := tx.Raw(
-			findPublishedActiveExamSetSQL,
-			examSetID,
-			examsetdomain.StatusPublished,
-		).Scan(&currentlyPublished).Error; err != nil {
+		publicationState, err := loadExamSetPublicationState(tx, examSetID, true)
+		if err != nil {
 			return err
 		}
-		if !currentlyPublished {
-			return nil
-		}
-
-		season, err := getEligibleSeason(tx, examSetID, submittedAt)
+		season, err := resolveProjectionSeason(tx, examSetID, submittedAt, *publicationState)
 		if err != nil {
 			return err
 		}
@@ -549,11 +813,84 @@ func (r *postgresRepository) ProjectBestScore(
 		}
 		projection.CurrentRank, err = getUserRank(tx, season.ID, userID)
 		return err
-	})
+	}, projectionTxOptions)
 	if err != nil {
 		return nil, err
 	}
 	return projection, nil
+}
+
+func resolveProjectionSeason(
+	tx *gorm.DB,
+	examSetID uuid.UUID,
+	submittedAt time.Time,
+	publicationState examSetPublicationStateRow,
+) (*SeasonRow, error) {
+	eligible, err := getEligibleSeasonInterval(tx, examSetID, submittedAt)
+	if err != nil {
+		return nil, err
+	}
+	if eligible != nil {
+		if eligible.IntervalStoppedAt == nil && !publicationState.currentlyPublished() {
+			return nil, ErrLifecycleStatePending
+		}
+		season := eligible.SeasonRow
+		return &season, nil
+	}
+
+	var season SeasonRow
+	if err := tx.Raw(
+		findSeasonForExamSetAtSQL,
+		examSetID,
+		submittedAt,
+		submittedAt,
+	).Scan(&season).Error; err != nil {
+		return nil, err
+	}
+	if season.ID == uuid.Nil {
+		return nil, nil
+	}
+
+	if !publicationState.currentlyPublished() {
+		if publicationState.PublishedAt == nil || submittedAt.Before(*publicationState.PublishedAt) {
+			return nil, nil
+		}
+		var intervalCount int64
+		if err := tx.Raw(`
+			SELECT COUNT(*)
+			FROM leaderboard_season_exam_sets
+			WHERE season_id = ? AND exam_set_id = ?
+		`, season.ID, examSetID).Scan(&intervalCount).Error; err != nil {
+			return nil, err
+		}
+		if intervalCount == 0 {
+			return nil, ErrLifecycleStatePending
+		}
+		return nil, nil
+	}
+	if publicationState.PublishedAt == nil {
+		return nil, ErrLifecycleStatePending
+	}
+
+	joinedAt := *publicationState.PublishedAt
+	if joinedAt.Before(season.StartsAt) {
+		joinedAt = season.StartsAt
+	}
+	if submittedAt.Before(joinedAt) {
+		return nil, nil
+	}
+	if err := publishExamSetInterval(tx, season.ID, examSetID, joinedAt); err != nil {
+		return nil, fmt.Errorf("%w: self-heal publish interval: %v", ErrLifecycleStatePending, err)
+	}
+	eligible, err = getEligibleSeasonInterval(tx, examSetID, submittedAt)
+	if err != nil {
+		return nil, err
+	}
+	if eligible == nil {
+		return nil, ErrLifecycleStatePending
+	}
+	resolved := eligible.SeasonRow
+	return &resolved, nil
 }
 
 func (r *postgresRepository) UpsertBestScore(

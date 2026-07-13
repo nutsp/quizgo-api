@@ -114,6 +114,12 @@ func main() {
 			&entrepo.EntitlementModel{},
 			&settingsrepo.SystemSettingModel{},
 		)
+		if err := examsetrepo.ReconcilePublicationState(db); err != nil {
+			log.Fatalf("reconcile exam set publication state: %v", err)
+		}
+		if err := leaderboardrepo.ReconcileLifecycleSchema(db); err != nil {
+			log.Fatalf("reconcile leaderboard lifecycle schema: %v", err)
+		}
 	}
 
 	if cfg.AutoSeed {

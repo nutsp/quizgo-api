@@ -36,6 +36,9 @@ func main() {
 		&attemptrepo.ExamAttemptModel{},
 		&attemptrepo.ExamAnswerModel{},
 	)
+	if err := examsetrepo.ReconcilePublicationState(db); err != nil {
+		log.Fatalf("reconcile exam set publication state: %v", err)
+	}
 
 	if err := seed.Run(context.Background(), db); err != nil {
 		log.Fatalf("seed: %v", err)

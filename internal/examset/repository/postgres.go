@@ -41,6 +41,7 @@ type ExamSetModel struct {
 	AnswerSheetShowCandidateInfo     bool   `gorm:"not null;default:true"`
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+	PublishedAt     *time.Time
 
 	ExamTrack ExamTrackJoin `gorm:"foreignKey:ExamTrackID;references:ID"`
 }
@@ -54,6 +55,18 @@ type ExamTrackJoin struct {
 func (ExamTrackJoin) TableName() string { return "exam_tracks" }
 
 func (ExamSetModel) TableName() string { return "exam_sets" }
+
+const reconcilePublishedAtSQL = `
+	UPDATE exam_sets
+	SET published_at = COALESCE(updated_at, created_at)
+	WHERE status = 'published' AND published_at IS NULL
+`
+
+// ReconcilePublicationState gives databases managed by AutoMigrate the same
+// conservative legacy backfill as the SQL migration.
+func ReconcilePublicationState(db *gorm.DB) error {
+	return db.Exec(reconcilePublishedAtSQL).Error
+}
 
 type Repository interface {
 	List(ctx context.Context, filter domain.ListFilter) (*domain.PaginatedResult, error)
@@ -200,6 +213,7 @@ func toDomain(m *ExamSetModel) domain.ExamSet {
 		),
 		CreatedAt:       m.CreatedAt,
 		UpdatedAt:       m.UpdatedAt,
+		PublishedAt:     m.PublishedAt,
 	}
 	if m.ExamTrack.Code != "" {
 		set.ExamTrack = &domain.ExamTrackRef{Code: m.ExamTrack.Code, Name: m.ExamTrack.Name}

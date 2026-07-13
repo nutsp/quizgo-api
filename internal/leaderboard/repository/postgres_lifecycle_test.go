@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"database/sql"
+	"os"
 	"strings"
 	"testing"
 )
@@ -26,9 +28,24 @@ func TestLifecycleSQLSerializesTransitionsAndGuardsEventTime(t *testing.T) {
 	if !strings.Contains(acquireSeasonUserProjectionLockSQL, "pg_advisory_xact_lock") {
 		t.Error("projection SQL does not serialize score and aggregate writes per season/user")
 	}
-	for _, fragment := range []string{"status = ?", "is_active = true"} {
-		if !strings.Contains(findPublishedActiveExamSetSQL, fragment) {
-			t.Errorf("projection publication recheck SQL missing %q", fragment)
+	for _, fragment := range []string{"status", "is_active", "published_at", "FOR SHARE"} {
+		if !strings.Contains(findExamSetPublicationStateForShareSQL, fragment) {
+			t.Errorf("projection publication state SQL missing %q", fragment)
+		}
+	}
+}
+
+func TestApplicationReconcileRestoresIntervalOverlapConstraint(t *testing.T) {
+	t.Parallel()
+	joined := strings.Join(reconcileLifecycleSchemaSQL, "\n")
+	for _, fragment := range []string{
+		"CREATE EXTENSION IF NOT EXISTS btree_gist",
+		"leaderboard_season_exam_sets_no_overlap",
+		"EXCLUDE USING gist",
+		"tstzrange(joined_at, stopped_at, '[)') WITH &&",
+	} {
+		if !strings.Contains(joined, fragment) {
+			t.Errorf("application lifecycle reconciliation SQL missing %q", fragment)
 		}
 	}
 }
@@ -56,7 +73,7 @@ func TestEnsureSeasonSQLUsesPriorIntervalsAndExplicitBootstrapState(t *testing.T
 			t.Errorf("bootstrap enrollment SQL missing %q", fragment)
 		}
 	}
-	if !strings.Contains(findBootstrapExamSetStateSQL, "updated_at") {
+	if !strings.Contains(findBootstrapExamSetStateSQL, "published_at") {
 		t.Error("bootstrap enrollment does not derive an effective time from persisted set state")
 	}
 	for name, query := range map[string]string{
@@ -66,5 +83,41 @@ func TestEnsureSeasonSQLUsesPriorIntervalsAndExplicitBootstrapState(t *testing.T
 		if !strings.Contains(query, "id <> ?") {
 			t.Errorf("%s season creation does not exclude the newly published set", name)
 		}
+	}
+}
+
+func TestLifecycleSQLUsesAuthoritativePublicationTimeAndRejectsOverlaps(t *testing.T) {
+	t.Parallel()
+
+	if !strings.Contains(findBootstrapExamSetStateSQL, "published_at") {
+		t.Error("bootstrap state does not use authoritative published_at")
+	}
+	for _, fragment := range []string{"ORDER BY joined_at DESC", "stopped_at", "FOR UPDATE"} {
+		if !strings.Contains(findLatestExamSetIntervalSQL, fragment) {
+			t.Errorf("latest interval SQL missing %q", fragment)
+		}
+	}
+
+	migration, err := os.ReadFile("../../../migrations/000023_monthly_leaderboards.up.sql")
+	if err != nil {
+		t.Fatalf("read migration: %v", err)
+	}
+	text := string(migration)
+	for _, fragment := range []string{
+		"ADD COLUMN IF NOT EXISTS published_at",
+		"status = 'published'",
+		"EXCLUDE USING gist",
+		"tstzrange(joined_at, stopped_at, '[)') WITH &&",
+	} {
+		if !strings.Contains(text, fragment) {
+			t.Errorf("migration missing %q", fragment)
+		}
+	}
+}
+
+func TestProjectionTransactionUsesRepeatableReadSnapshot(t *testing.T) {
+	t.Parallel()
+	if projectionTxOptions.Isolation != sql.LevelRepeatableRead {
+		t.Fatalf("projection isolation = %v, want repeatable read", projectionTxOptions.Isolation)
 	}
 }

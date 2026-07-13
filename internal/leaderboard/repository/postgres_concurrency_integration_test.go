@@ -2,7 +2,7 @@ package repository_test
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -16,6 +16,8 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
+	examsetdomain "virtual-exam-api/internal/examset/domain"
+	examsetrepo "virtual-exam-api/internal/examset/repository"
 	"virtual-exam-api/internal/leaderboard/domain"
 	leaderboardrepo "virtual-exam-api/internal/leaderboard/repository"
 	leaderboardusecase "virtual-exam-api/internal/leaderboard/usecase"
@@ -23,12 +25,7 @@ import (
 
 const postgresRaceBound = 5 * time.Second
 
-type postgresEnsureResult struct {
-	season *leaderboardrepo.SeasonRow
-	err    error
-}
-
-func TestPostgresInitialBootstrapUsesPersistedPublicationStateTime(t *testing.T) {
+func TestPostgresInitialBootstrapUsesAuthoritativePublicationTime(t *testing.T) {
 	db := openLeaderboardIntegrationDB(t)
 	repo := leaderboardrepo.NewPostgresRepository(db)
 	ctx, cancel := context.WithTimeout(t.Context(), postgresRaceBound)
@@ -37,13 +34,14 @@ func TestPostgresInitialBootstrapUsesPersistedPublicationStateTime(t *testing.T)
 	trackID := uuid.New()
 	examSetID := uuid.New()
 	window := mustBangkokWindow(t, time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC))
-	effectivePublishedAt := window.StartsAt.Add(48 * time.Hour)
+	publishedAt := window.StartsAt.Add(48 * time.Hour)
+	unrelatedEditAt := publishedAt.Add(24 * time.Hour)
 
 	mustExec(t, db, `INSERT INTO exam_tracks (id) VALUES (?)`, trackID)
 	mustExec(t, db, `
-		INSERT INTO exam_sets (id, exam_track_id, status, is_active, created_at, updated_at)
-		VALUES (?, ?, 'published', true, ?, ?)
-	`, examSetID, trackID, window.StartsAt.Add(-time.Hour), effectivePublishedAt)
+		INSERT INTO exam_sets (id, exam_track_id, status, is_active, published_at, created_at, updated_at)
+		VALUES (?, ?, 'published', true, ?, ?, ?)
+	`, examSetID, trackID, publishedAt, window.StartsAt.Add(-time.Hour), unrelatedEditAt)
 
 	season, err := repo.EnsureSeason(ctx, trackID, window)
 	if err != nil {
@@ -57,92 +55,142 @@ func TestPostgresInitialBootstrapUsesPersistedPublicationStateTime(t *testing.T)
 	`, season.ID, examSetID).Scan(&joinedAt).Error; err != nil {
 		t.Fatalf("read bootstrap enrollment: %v", err)
 	}
-	if !joinedAt.Equal(effectivePublishedAt) {
-		t.Errorf("bootstrap joined_at = %s, want %s", joinedAt, effectivePublishedAt)
+	if !joinedAt.Equal(publishedAt) {
+		t.Errorf("bootstrap joined_at = %s, want %s", joinedAt, publishedAt)
 	}
 }
 
-func TestPostgresRolloverWaitsForStopAndDoesNotBackdateEnrollment(t *testing.T) {
+func TestPostgresApplicationReconcileBackfillsAndRestoresExclusion(t *testing.T) {
 	db := openLeaderboardIntegrationDB(t)
-	repo := leaderboardrepo.NewPostgresRepository(db)
-	ctx, cancel := context.WithTimeout(t.Context(), postgresRaceBound)
-	defer cancel()
-
 	trackID := uuid.New()
 	examSetID := uuid.New()
-	previousWindow := mustBangkokWindow(t, time.Date(2026, time.June, 15, 12, 0, 0, 0, time.UTC))
-	currentWindow := mustBangkokWindow(t, time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC))
-	previousSeasonID := uuid.New()
+	seasonID := uuid.New()
+	window := mustBangkokWindow(t, time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC))
+	createdAt := window.StartsAt.Add(time.Hour)
+	updatedAt := createdAt.Add(2 * time.Hour)
 
 	mustExec(t, db, `INSERT INTO exam_tracks (id) VALUES (?)`, trackID)
 	mustExec(t, db, `
 		INSERT INTO exam_sets (id, exam_track_id, status, is_active, created_at, updated_at)
 		VALUES (?, ?, 'published', true, ?, ?)
-	`, examSetID, trackID, previousWindow.StartsAt, previousWindow.StartsAt)
+	`, examSetID, trackID, createdAt, updatedAt)
+	mustExec(t, db, `
+		INSERT INTO leaderboard_seasons (id, exam_track_id, year, month, starts_at, ends_at, status)
+		VALUES (?, ?, ?, ?, ?, ?, 'active')
+	`, seasonID, trackID, window.Year, window.Month, window.StartsAt, window.EndsAt)
+	mustExec(t, db, `
+		ALTER TABLE leaderboard_season_exam_sets
+		DROP CONSTRAINT leaderboard_season_exam_sets_no_overlap
+	`)
+
+	if err := examsetrepo.ReconcilePublicationState(db); err != nil {
+		t.Fatalf("ReconcilePublicationState() error = %v", err)
+	}
+	if err := leaderboardrepo.ReconcileLifecycleSchema(db); err != nil {
+		t.Fatalf("ReconcileLifecycleSchema() error = %v", err)
+	}
+	if got := readExamSetPublishedAt(t, db, examSetID); !got.Equal(updatedAt) {
+		t.Errorf("backfilled published_at = %s, want conservative updated_at %s", got, updatedAt)
+	}
+
+	firstStart := window.StartsAt.Add(4 * time.Hour)
+	firstStop := firstStart.Add(4 * time.Hour)
+	mustExec(t, db, `
+		INSERT INTO leaderboard_season_exam_sets (id, season_id, exam_set_id, joined_at, stopped_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, uuid.New(), seasonID, examSetID, firstStart, firstStop)
+	err := db.Exec(`
+		INSERT INTO leaderboard_season_exam_sets (id, season_id, exam_set_id, joined_at, stopped_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, uuid.New(), seasonID, examSetID, firstStart.Add(time.Hour), firstStop.Add(-time.Hour)).Error
+	if err == nil || !strings.Contains(err.Error(), "leaderboard_season_exam_sets_no_overlap") {
+		t.Fatalf("overlapping interval error = %v, want restored exclusion constraint", err)
+	}
+}
+
+func TestPostgresPublishVsProjectionSelfHealsCommittedStatusGap(t *testing.T) {
+	db := openLeaderboardIntegrationDB(t)
+	repo := leaderboardrepo.NewPostgresRepository(db)
+	setRepo := examsetrepo.NewAdminRepository(db)
+	projector := leaderboardusecase.NewProjector(repo)
+	ctx, cancel := context.WithTimeout(t.Context(), postgresRaceBound)
+	defer cancel()
+
+	trackID := uuid.New()
+	examSetID := uuid.New()
+	userID := uuid.New()
+	attemptID := uuid.New()
+	window := mustBangkokWindow(t, time.Now())
+	seasonID := uuid.New()
+
+	mustExec(t, db, `INSERT INTO exam_tracks (id) VALUES (?)`, trackID)
+	mustExec(t, db, `
+		INSERT INTO exam_sets (id, exam_track_id, status, is_active, created_at, updated_at)
+		VALUES (?, ?, 'draft', false, ?, ?)
+	`, examSetID, trackID, window.StartsAt, window.StartsAt)
+	mustExec(t, db, `INSERT INTO users (id) VALUES (?)`, userID)
+	mustExec(t, db, `INSERT INTO exam_attempts (id, exam_set_id) VALUES (?, ?)`, attemptID, examSetID)
 	mustExec(t, db, `
 		INSERT INTO leaderboard_seasons (
 			id, exam_track_id, year, month, starts_at, ends_at, status
 		) VALUES (?, ?, ?, ?, ?, ?, 'active')
-	`, previousSeasonID, trackID, previousWindow.Year, previousWindow.Month, previousWindow.StartsAt, previousWindow.EndsAt)
-	mustExec(t, db, `
-		INSERT INTO leaderboard_season_exam_sets (id, season_id, exam_set_id, joined_at)
-		VALUES (?, ?, ?, ?)
-	`, uuid.New(), previousSeasonID, examSetID, previousWindow.StartsAt)
+	`, seasonID, trackID, window.Year, window.Month, window.StartsAt, window.EndsAt)
 
-	blocker := beginBlockedPublicationTransition(t, ctx, db, examSetID, "draft")
-	stopResult := make(chan error, 1)
-	go func() {
-		stopResult <- repo.StopExamSet(ctx, examSetID, currentWindow.StartsAt)
-	}()
-	assertStillBlocked(t, "stop", stopResult)
-
-	ensureResults := make(chan postgresEnsureResult, 1)
-	go func() {
-		season, err := repo.EnsureSeason(ctx, trackID, currentWindow)
-		ensureResults <- postgresEnsureResult{season: season, err: err}
-	}()
-
-	ensureCompletedBeforeTransition := false
-	var ensured postgresEnsureResult
-	select {
-	case ensured = <-ensureResults:
-		ensureCompletedBeforeTransition = true
-	case <-time.After(150 * time.Millisecond):
+	if err := setRepo.UpdateStatus(ctx, examSetID, examsetdomain.StatusPublished, true); err != nil {
+		t.Fatalf("commit published status: %v", err)
+	}
+	var publishedAt time.Time
+	if err := db.Raw(`SELECT published_at FROM exam_sets WHERE id = ?`, examSetID).Scan(&publishedAt).Error; err != nil {
+		t.Fatalf("read published_at: %v", err)
+	}
+	if publishedAt.IsZero() {
+		t.Fatal("published_at was not persisted atomically with published status")
+	}
+	submittedAt := publishedAt
+	if submittedAt.Before(window.StartsAt) || !submittedAt.Before(window.EndsAt) {
+		t.Fatalf("test publication %s is outside the current Bangkok season", publishedAt)
 	}
 
-	if err := blocker.Commit(); err != nil {
-		t.Fatalf("commit blocked publication transition: %v", err)
+	update, err := projector.ProjectAttempt(ctx, domain.ProjectionInput{
+		AttemptID: attemptID, UserID: userID, ExamSetID: examSetID, ExamTrackID: trackID,
+		TrackCode: "integration-track", SubmittedAt: submittedAt,
+		Candidate: domain.ScoreCandidate{Points: 91.2, DurationSeconds: 600, AchievedAt: submittedAt},
+	})
+	if err != nil {
+		t.Fatalf("ProjectAttempt() during status-to-hook gap error = %v", err)
 	}
-	if err := awaitError(t, "stop", stopResult); err != nil {
-		t.Fatalf("StopExamSet() error = %v", err)
+	if update.SeasonID != seasonID.String() || update.TotalPoints != 91.2 {
+		t.Fatalf("gap projection season/points = %q/%.1f, want %s/91.2", update.SeasonID, update.TotalPoints, seasonID)
 	}
-	if !ensureCompletedBeforeTransition {
-		ensured = awaitEnsureResult(t, ensureResults)
+	retryHookAt := window.EndsAt.Add(time.Hour)
+	if err := projector.OnExamSetPublished(ctx, trackID, examSetID, retryHookAt); err != nil {
+		t.Fatalf("later publish hook retry: %v", err)
 	}
-	if ensured.err != nil {
-		t.Fatalf("EnsureSeason() error = %v", ensured.err)
+	var intervalState struct {
+		Count    int64
+		JoinedAt time.Time
 	}
-	if ensureCompletedBeforeTransition {
-		t.Error("EnsureSeason() completed while the lifecycle advisory lock was held")
-	}
-
-	var intervalCount int64
 	if err := db.Raw(`
-		SELECT COUNT(*)
-		FROM leaderboard_season_exam_sets ses
-		JOIN leaderboard_seasons s ON s.id = ses.season_id
-		WHERE s.exam_track_id = ? AND s.year = ? AND s.month = ? AND ses.exam_set_id = ?
-	`, trackID, currentWindow.Year, currentWindow.Month, examSetID).Scan(&intervalCount).Error; err != nil {
-		t.Fatalf("count rollover intervals: %v", err)
+		SELECT COUNT(*) AS count, MIN(joined_at) AS joined_at
+		FROM leaderboard_season_exam_sets
+		WHERE exam_set_id = ?
+	`, examSetID).Scan(&intervalState).Error; err != nil {
+		t.Fatalf("read interval state: %v", err)
 	}
-	if intervalCount != 0 {
-		t.Errorf("current-season intervals = %d, want 0 after stop won rollover", intervalCount)
+	if intervalState.Count != 1 || !intervalState.JoinedAt.Equal(publishedAt) {
+		t.Errorf(
+			"interval state = %d at %s, want one interval at persisted publication %s",
+			intervalState.Count,
+			intervalState.JoinedAt,
+			publishedAt,
+		)
 	}
 }
 
-func TestPostgresProjectionWaitsForStopAndRechecksPublicationState(t *testing.T) {
+func TestPostgresStopVsProjectionRetriesEligiblePreStopAttempt(t *testing.T) {
 	db := openLeaderboardIntegrationDB(t)
 	repo := leaderboardrepo.NewPostgresRepository(db)
+	setRepo := examsetrepo.NewAdminRepository(db)
 	projector := leaderboardusecase.NewProjector(repo)
 	ctx, cancel := context.WithTimeout(t.Context(), postgresRaceBound)
 	defer cancel()
@@ -153,15 +201,17 @@ func TestPostgresProjectionWaitsForStopAndRechecksPublicationState(t *testing.T)
 	attemptID := uuid.New()
 	window := mustBangkokWindow(t, time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC))
 	seasonID := uuid.New()
-	submittedAt := window.StartsAt.Add(12 * time.Hour)
+	publishedAt := window.StartsAt
+	submittedAt := window.StartsAt.Add(11 * time.Hour)
+	stoppedAt := window.StartsAt.Add(12 * time.Hour)
 
 	mustExec(t, db, `INSERT INTO exam_tracks (id) VALUES (?)`, trackID)
 	mustExec(t, db, `
-		INSERT INTO exam_sets (id, exam_track_id, status, is_active, created_at, updated_at)
-		VALUES (?, ?, 'published', true, ?, ?)
-	`, examSetID, trackID, window.StartsAt, window.StartsAt)
+		INSERT INTO exam_sets (id, exam_track_id, status, is_active, published_at, created_at, updated_at)
+		VALUES (?, ?, 'published', true, ?, ?, ?)
+	`, examSetID, trackID, publishedAt, window.StartsAt, window.StartsAt)
 	mustExec(t, db, `INSERT INTO users (id) VALUES (?)`, userID)
-	mustExec(t, db, `INSERT INTO exam_attempts (id) VALUES (?)`, attemptID)
+	mustExec(t, db, `INSERT INTO exam_attempts (id, exam_set_id) VALUES (?, ?)`, attemptID, examSetID)
 	mustExec(t, db, `
 		INSERT INTO leaderboard_seasons (
 			id, exam_track_id, year, month, starts_at, ends_at, status
@@ -172,77 +222,233 @@ func TestPostgresProjectionWaitsForStopAndRechecksPublicationState(t *testing.T)
 		VALUES (?, ?, ?, ?)
 	`, uuid.New(), seasonID, examSetID, window.StartsAt)
 
-	blocker := beginBlockedPublicationTransition(t, ctx, db, examSetID, "draft")
-	stopResult := make(chan error, 1)
-	go func() {
-		stopResult <- repo.StopExamSet(ctx, examSetID, submittedAt)
-	}()
-	assertStillBlocked(t, "stop", stopResult)
+	if err := setRepo.UpdateStatus(ctx, examSetID, examsetdomain.StatusDraft, true); err != nil {
+		t.Fatalf("commit unpublished status: %v", err)
+	}
+	input := domain.ProjectionInput{
+		AttemptID: attemptID, UserID: userID, ExamSetID: examSetID, ExamTrackID: trackID,
+		TrackCode: "integration-track", SubmittedAt: submittedAt,
+		Candidate: domain.ScoreCandidate{Points: 91.2, DurationSeconds: 600, AchievedAt: submittedAt},
+	}
+	if _, err := projector.ProjectAttempt(ctx, input); !errors.Is(err, leaderboardrepo.ErrLifecycleStatePending) {
+		t.Fatalf("projection during stop gap error = %v, want retryable lifecycle error", err)
+	}
+	if err := projector.OnExamSetStopped(ctx, examSetID, stoppedAt); err != nil {
+		t.Fatalf("delayed stop hook: %v", err)
+	}
+	update, err := projector.ProjectAttempt(ctx, input)
+	if err != nil {
+		t.Fatalf("eligible pre-stop retry error = %v", err)
+	}
+	if update.SeasonID != seasonID.String() || update.TotalPoints != 91.2 {
+		t.Fatalf("pre-stop retry season/points = %q/%.1f, want %s/91.2", update.SeasonID, update.TotalPoints, seasonID)
+	}
+}
 
-	type projectionResult struct {
-		update *domain.ProjectionUpdate
-		err    error
-	}
-	projectionResults := make(chan projectionResult, 1)
-	go func() {
-		update, err := projector.ProjectAttempt(ctx, domain.ProjectionInput{
-			AttemptID:   attemptID,
-			UserID:      userID,
-			ExamSetID:   examSetID,
-			ExamTrackID: trackID,
-			TrackCode:   "integration-track",
-			SubmittedAt: submittedAt,
-			Candidate: domain.ScoreCandidate{
-				Points:          91.2,
-				DurationSeconds: 600,
-				AchievedAt:      submittedAt,
-			},
-		})
-		projectionResults <- projectionResult{update: update, err: err}
-	}()
+func TestPostgresPublishRollsBackSeasonWhenIntervalWriteFails(t *testing.T) {
+	db := openLeaderboardIntegrationDB(t)
+	projector := leaderboardusecase.NewProjector(leaderboardrepo.NewPostgresRepository(db))
+	ctx, cancel := context.WithTimeout(t.Context(), postgresRaceBound)
+	defer cancel()
 
-	projectionCompletedBeforeTransition := false
-	var projected projectionResult
-	select {
-	case projected = <-projectionResults:
-		projectionCompletedBeforeTransition = true
-	case <-time.After(150 * time.Millisecond):
-	}
+	trackID := uuid.New()
+	examSetID := uuid.New()
+	publishedAt := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	mustExec(t, db, `INSERT INTO exam_tracks (id) VALUES (?)`, trackID)
+	mustExec(t, db, `
+		INSERT INTO exam_sets (id, exam_track_id, status, is_active, published_at)
+		VALUES (?, ?, 'published', true, ?)
+	`, examSetID, trackID, publishedAt)
+	mustExec(t, db, `
+		CREATE FUNCTION reject_leaderboard_interval() RETURNS trigger AS $$
+		BEGIN
+			RAISE EXCEPTION 'forced interval failure';
+		END;
+		$$ LANGUAGE plpgsql
+	`)
+	mustExec(t, db, `
+		CREATE TRIGGER reject_leaderboard_interval
+		BEFORE INSERT ON leaderboard_season_exam_sets
+		FOR EACH ROW EXECUTE FUNCTION reject_leaderboard_interval()
+	`)
 
-	if err := blocker.Commit(); err != nil {
-		t.Fatalf("commit blocked publication transition: %v", err)
+	err := projector.OnExamSetPublished(ctx, trackID, examSetID, publishedAt)
+	if err == nil {
+		t.Fatal("OnExamSetPublished() error = nil, want forced interval failure")
 	}
-	if err := awaitError(t, "stop", stopResult); err != nil {
-		t.Fatalf("StopExamSet() error = %v", err)
+	if !strings.Contains(err.Error(), "forced interval failure") {
+		t.Fatalf("OnExamSetPublished() error = %v, want injected interval failure", err)
 	}
-	if !projectionCompletedBeforeTransition {
-		select {
-		case projected = <-projectionResults:
-		case <-time.After(postgresRaceBound):
-			t.Fatal("ProjectAttempt() did not finish within the bounded wait")
+	var seasonCount int64
+	if err := db.Raw(`SELECT COUNT(*) FROM leaderboard_seasons WHERE exam_track_id = ?`, trackID).Scan(&seasonCount).Error; err != nil {
+		t.Fatalf("count seasons: %v", err)
+	}
+	if seasonCount != 0 {
+		t.Errorf("season rows = %d, want 0 after atomic publish rollback", seasonCount)
+	}
+}
+
+func TestPostgresPublishRejectsStaleEventsAndPreservesExactRepublish(t *testing.T) {
+	db := openLeaderboardIntegrationDB(t)
+	projector := leaderboardusecase.NewProjector(leaderboardrepo.NewPostgresRepository(db))
+	ctx, cancel := context.WithTimeout(t.Context(), postgresRaceBound)
+	defer cancel()
+
+	trackID := uuid.New()
+	examSetID := uuid.New()
+	window := mustBangkokWindow(t, time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC))
+	seasonID := uuid.New()
+	firstPublishedAt := window.StartsAt.Add(8 * time.Hour)
+	republishedAt := window.StartsAt.Add(14 * time.Hour)
+	stoppedAt := window.StartsAt.Add(20 * time.Hour)
+	mustExec(t, db, `INSERT INTO exam_tracks (id) VALUES (?)`, trackID)
+	mustExec(t, db, `
+		INSERT INTO exam_sets (id, exam_track_id, status, is_active, published_at)
+		VALUES (?, ?, 'published', true, ?)
+	`, examSetID, trackID, republishedAt)
+	mustExec(t, db, `
+		INSERT INTO leaderboard_seasons (id, exam_track_id, year, month, starts_at, ends_at, status)
+		VALUES (?, ?, ?, ?, ?, ?, 'active')
+	`, seasonID, trackID, window.Year, window.Month, window.StartsAt, window.EndsAt)
+	mustExec(t, db, `
+		INSERT INTO leaderboard_season_exam_sets (id, season_id, exam_set_id, joined_at)
+		VALUES (?, ?, ?, ?)
+	`, uuid.New(), seasonID, examSetID, firstPublishedAt)
+
+	if err := projector.OnExamSetPublished(ctx, trackID, examSetID, republishedAt); err != nil {
+		t.Fatalf("republish: %v", err)
+	}
+	if err := projector.OnExamSetStopped(ctx, examSetID, stoppedAt); err != nil {
+		t.Fatalf("stop republished interval: %v", err)
+	}
+	for _, retryAt := range []time.Time{firstPublishedAt.Add(time.Hour), republishedAt} {
+		if err := projector.OnExamSetPublished(ctx, trackID, examSetID, retryAt); err != nil {
+			t.Fatalf("stale/exact publish at %s: %v", retryAt, err)
 		}
 	}
-	if projected.err != nil {
-		t.Fatalf("ProjectAttempt() error = %v", projected.err)
+
+	type intervalRow struct {
+		JoinedAt  time.Time
+		StoppedAt *time.Time
 	}
-	if projectionCompletedBeforeTransition {
-		t.Error("ProjectAttempt() completed while the lifecycle advisory lock was held")
+	var intervals []intervalRow
+	if err := db.Raw(`
+		SELECT joined_at, stopped_at
+		FROM leaderboard_season_exam_sets
+		WHERE season_id = ? AND exam_set_id = ?
+		ORDER BY joined_at
+	`, seasonID, examSetID).Scan(&intervals).Error; err != nil {
+		t.Fatalf("list intervals: %v", err)
 	}
-	if projected.update == nil {
-		t.Fatal("ProjectAttempt() update = nil")
+	if len(intervals) != 2 {
+		t.Fatalf("intervals = %d, want 2 after stale/exact retries", len(intervals))
 	}
-	if projected.update.SeasonID != "" {
-		t.Errorf("ProjectAttempt() season = %q, want no eligible season after stop", projected.update.SeasonID)
+	if intervals[0].StoppedAt == nil || !intervals[0].StoppedAt.Equal(republishedAt) {
+		t.Errorf("first stopped_at = %v, want exact republish %s", intervals[0].StoppedAt, republishedAt)
+	}
+	if intervals[1].StoppedAt == nil || !intervals[1].StoppedAt.Equal(stoppedAt) {
+		t.Errorf("second stopped_at = %v, want %s", intervals[1].StoppedAt, stoppedAt)
+	}
+	if err := db.Exec(`
+		INSERT INTO leaderboard_season_exam_sets (id, season_id, exam_set_id, joined_at, stopped_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, uuid.New(), seasonID, examSetID, republishedAt.Add(-time.Hour), republishedAt.Add(time.Hour)).Error; err == nil {
+		t.Fatal("overlapping interval insert succeeded, want database rejection")
+	}
+}
+
+func TestPostgresExamSetPublicationTimestampTracksEveryActivationPath(t *testing.T) {
+	db := openLeaderboardIntegrationDB(t)
+	repo := examsetrepo.NewAdminRepository(db)
+	ctx, cancel := context.WithTimeout(t.Context(), postgresRaceBound)
+	defer cancel()
+
+	trackID := uuid.New()
+	examSetID := uuid.New()
+	mustExec(t, db, `INSERT INTO exam_tracks (id) VALUES (?)`, trackID)
+	mustExec(t, db, `
+		INSERT INTO exam_sets (id, exam_track_id, code, title, status, is_active)
+		VALUES (?, ?, 'publication-state', 'Publication state', 'draft', false)
+	`, examSetID, trackID)
+
+	if err := repo.UpdateStatus(ctx, examSetID, examsetdomain.StatusPublished, true); err != nil {
+		t.Fatalf("publish through UpdateStatus: %v", err)
+	}
+	first := readExamSetPublishedAt(t, db, examSetID)
+	if first.IsZero() {
+		t.Fatal("first published_at is zero")
+	}
+	if err := repo.UpdateStatus(ctx, examSetID, examsetdomain.StatusPublished, true); err != nil {
+		t.Fatalf("retry published status: %v", err)
+	}
+	if got := readExamSetPublishedAt(t, db, examSetID); !got.Equal(first) {
+		t.Errorf("publish retry changed published_at from %s to %s", first, got)
+	}
+	if err := repo.UpdateStatus(ctx, examSetID, examsetdomain.StatusDraft, true); err != nil {
+		t.Fatalf("unpublish before republish: %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	if err := repo.UpdateStatus(ctx, examSetID, examsetdomain.StatusPublished, true); err != nil {
+		t.Fatalf("republish from draft: %v", err)
+	}
+	explicitRepublish := readExamSetPublishedAt(t, db, examSetID)
+	if !explicitRepublish.After(first) {
+		t.Errorf("draft-to-published republish timestamp = %s, want after %s", explicitRepublish, first)
 	}
 
-	for _, table := range []string{"leaderboard_scores", "leaderboard_entries"} {
-		var count int64
-		if err := db.Raw("SELECT COUNT(*) FROM " + table).Scan(&count).Error; err != nil {
-			t.Fatalf("count %s: %v", table, err)
-		}
-		if count != 0 {
-			t.Errorf("%s rows = %d, want 0", table, count)
-		}
+	set := &examsetdomain.ExamSet{
+		ID: examSetID, ExamTrackID: trackID, Code: "publication-state", Title: "Edited",
+		DurationMinutes: 60, TotalQuestions: 10, PassingScore: 70,
+		Difficulty: examsetdomain.DifficultyMedium, AccessType: examsetdomain.AccessFree,
+		Currency: "THB", Mode: examsetdomain.ModePractice, IsActive: true,
+		AnswerSheetLayout: examsetdomain.DefaultAnswerSheetLayout(),
+	}
+	if err := repo.Update(ctx, set); err != nil {
+		t.Fatalf("unrelated Update: %v", err)
+	}
+	if got := readExamSetPublishedAt(t, db, examSetID); !got.Equal(explicitRepublish) {
+		t.Errorf("unrelated update changed published_at from %s to %s", explicitRepublish, got)
+	}
+
+	if err := repo.UpdateIsActive(ctx, examSetID, false); err != nil {
+		t.Fatalf("deactivate through UpdateIsActive: %v", err)
+	}
+	if got := readExamSetPublishedAt(t, db, examSetID); !got.Equal(explicitRepublish) {
+		t.Errorf("deactivation changed published_at from %s to %s", explicitRepublish, got)
+	}
+	time.Sleep(2 * time.Millisecond)
+	if err := repo.UpdateIsActive(ctx, examSetID, true); err != nil {
+		t.Fatalf("reactivate through UpdateIsActive: %v", err)
+	}
+	second := readExamSetPublishedAt(t, db, examSetID)
+	if !second.After(explicitRepublish) {
+		t.Errorf("UpdateIsActive reactivation published_at = %s, want after %s", second, explicitRepublish)
+	}
+
+	set.IsActive = false
+	if err := repo.Update(ctx, set); err != nil {
+		t.Fatalf("deactivate through Update: %v", err)
+	}
+	if got := readExamSetPublishedAt(t, db, examSetID); !got.Equal(second) {
+		t.Errorf("general deactivation changed published_at from %s to %s", second, got)
+	}
+	time.Sleep(2 * time.Millisecond)
+	set.IsActive = true
+	if err := repo.Update(ctx, set); err != nil {
+		t.Fatalf("reactivate through Update: %v", err)
+	}
+	third := readExamSetPublishedAt(t, db, examSetID)
+	if !third.After(second) {
+		t.Errorf("Update reactivation published_at = %s, want after %s", third, second)
+	}
+
+	mustExec(t, db, `INSERT INTO exam_attempts (id, exam_set_id) VALUES (?, ?)`, uuid.New(), examSetID)
+	deactivated, err := repo.Delete(ctx, examSetID)
+	if err != nil || !deactivated {
+		t.Fatalf("soft Delete() = %t, %v, want true, nil", deactivated, err)
+	}
+	if got := readExamSetPublishedAt(t, db, examSetID); !got.Equal(third) {
+		t.Errorf("soft delete changed published_at from %s to %s", third, got)
 	}
 }
 
@@ -394,6 +600,9 @@ func TestPostgresProjectionRollsBackScoreWhenEntryRebuildFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("ProjectAttempt() error = nil, want forced aggregate rebuild failure")
 	}
+	if !strings.Contains(err.Error(), "forced entry rebuild failure") {
+		t.Fatalf("ProjectAttempt() error = %v, want injected entry rebuild failure", err)
+	}
 
 	for _, table := range []string{"leaderboard_scores", "leaderboard_entries"} {
 		var count int64
@@ -449,15 +658,38 @@ func openLeaderboardIntegrationDB(t *testing.T) *gorm.DB {
 	for _, statement := range []string{
 		`CREATE TABLE exam_tracks (id uuid PRIMARY KEY)`,
 		`CREATE TABLE exam_sets (
-			id uuid PRIMARY KEY,
-			exam_track_id uuid NOT NULL REFERENCES exam_tracks(id),
-			status varchar(50) NOT NULL,
-			is_active boolean NOT NULL,
-			created_at timestamptz NOT NULL DEFAULT now(),
-			updated_at timestamptz NOT NULL DEFAULT now()
-		)`,
+				id uuid PRIMARY KEY,
+				exam_track_id uuid NOT NULL REFERENCES exam_tracks(id),
+				code varchar(100) NOT NULL DEFAULT '',
+				title varchar(255) NOT NULL DEFAULT '',
+				description text NOT NULL DEFAULT '',
+				cover_image_url text,
+				duration_minutes int NOT NULL DEFAULT 1,
+				total_questions int NOT NULL DEFAULT 1,
+				passing_score int NOT NULL DEFAULT 0,
+				difficulty varchar(50) NOT NULL DEFAULT 'easy',
+				access_type varchar(50) NOT NULL DEFAULT 'free',
+				allow_single_purchase boolean NOT NULL DEFAULT false,
+				price_amount numeric NOT NULL DEFAULT 0,
+				original_price_amount numeric,
+				currency varchar(10) NOT NULL DEFAULT 'THB',
+				sale_price_amount numeric,
+				mode varchar(50) NOT NULL DEFAULT 'practice',
+				is_official boolean NOT NULL DEFAULT false,
+				is_featured boolean NOT NULL DEFAULT false,
+				status varchar(50) NOT NULL,
+				is_active boolean NOT NULL,
+				answer_sheet_block_columns int NOT NULL DEFAULT 2,
+				answer_sheet_questions_per_block int NOT NULL DEFAULT 10,
+				answer_sheet_choice_label_style varchar(20) NOT NULL DEFAULT 'thai',
+				answer_sheet_show_header boolean NOT NULL DEFAULT true,
+				answer_sheet_show_instructions boolean NOT NULL DEFAULT true,
+				answer_sheet_show_candidate_info boolean NOT NULL DEFAULT true,
+				created_at timestamptz NOT NULL DEFAULT now(),
+				updated_at timestamptz NOT NULL DEFAULT now()
+			)`,
 		`CREATE TABLE users (id uuid PRIMARY KEY)`,
-		`CREATE TABLE exam_attempts (id uuid PRIMARY KEY)`,
+		`CREATE TABLE exam_attempts (id uuid PRIMARY KEY, exam_set_id uuid REFERENCES exam_sets(id))`,
 	} {
 		mustExec(t, testDB, statement)
 	}
@@ -489,82 +721,6 @@ func dsnWithSearchPath(dsn, schemaName string) string {
 	return fmt.Sprintf("%s search_path=%s", dsn, schemaName)
 }
 
-func beginBlockedPublicationTransition(
-	t *testing.T,
-	ctx context.Context,
-	db *gorm.DB,
-	examSetID uuid.UUID,
-	status string,
-) *sql.Tx {
-	t.Helper()
-
-	sqlDB, err := db.DB()
-	if err != nil {
-		t.Fatalf("access sql.DB: %v", err)
-	}
-	connection, err := sqlDB.Conn(ctx)
-	if err != nil {
-		t.Fatalf("reserve blocker connection: %v", err)
-	}
-	t.Cleanup(func() { _ = connection.Close() })
-
-	tx, err := connection.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatalf("begin blocker transaction: %v", err)
-	}
-	t.Cleanup(func() { _ = tx.Rollback() })
-	if _, err := tx.ExecContext(
-		ctx,
-		`SELECT pg_advisory_xact_lock(hashtextextended(CAST($1 AS text), 0))`,
-		examSetID,
-	); err != nil {
-		t.Fatalf("acquire blocker advisory lock: %v", err)
-	}
-	if _, err := tx.ExecContext(
-		ctx,
-		`UPDATE exam_sets SET status = $1, updated_at = now() WHERE id = $2`,
-		status,
-		examSetID,
-	); err != nil {
-		t.Fatalf("stage publication state transition: %v", err)
-	}
-	return tx
-}
-
-func assertStillBlocked(t *testing.T, operation string, results <-chan error) {
-	t.Helper()
-	select {
-	case err := <-results:
-		t.Fatalf("%s completed before lock release: %v", operation, err)
-	case <-time.After(75 * time.Millisecond):
-	}
-}
-
-func awaitError(t *testing.T, operation string, results <-chan error) error {
-	t.Helper()
-	select {
-	case err := <-results:
-		return err
-	case <-time.After(postgresRaceBound):
-		t.Fatalf("%s did not finish within the bounded wait", operation)
-		return nil
-	}
-}
-
-func awaitEnsureResult(
-	t *testing.T,
-	results <-chan postgresEnsureResult,
-) postgresEnsureResult {
-	t.Helper()
-	select {
-	case result := <-results:
-		return result
-	case <-time.After(postgresRaceBound):
-		t.Fatal("EnsureSeason() did not finish within the bounded wait")
-		return postgresEnsureResult{}
-	}
-}
-
 func mustBangkokWindow(t *testing.T, instant time.Time) domain.SeasonWindow {
 	t.Helper()
 	window, err := domain.BangkokSeasonWindow(instant)
@@ -579,4 +735,13 @@ func mustExec(t *testing.T, db *gorm.DB, query string, args ...any) {
 	if err := db.Exec(query, args...).Error; err != nil {
 		t.Fatalf("execute integration fixture SQL: %v", err)
 	}
+}
+
+func readExamSetPublishedAt(t *testing.T, db *gorm.DB, examSetID uuid.UUID) time.Time {
+	t.Helper()
+	var publishedAt time.Time
+	if err := db.Raw(`SELECT published_at FROM exam_sets WHERE id = ?`, examSetID).Scan(&publishedAt).Error; err != nil {
+		t.Fatalf("read exam set published_at: %v", err)
+	}
+	return publishedAt
 }

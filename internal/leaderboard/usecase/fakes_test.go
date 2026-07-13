@@ -21,15 +21,39 @@ type projectionFixture struct {
 	bestScores map[uuid.UUID]domain.ScoreCandidate
 	entries    map[uuid.UUID]leaderboardrepo.EntryRow
 
-	scoreWrites int
-	ensureCalls int
-	joinCalls   int
-	stopCalls   int
-	joinedWith  time.Time
-	stoppedWith time.Time
-	published   bool
+	scoreWrites  int
+	ensureCalls  int
+	publishCalls int
+	joinCalls    int
+	stopCalls    int
+	joinedWith   time.Time
+	stoppedWith  time.Time
+	published    bool
 
 	enrollActiveOnEnsure bool
+}
+
+func (f *projectionFixture) PublishExamSet(
+	_ context.Context,
+	trackID, examSetID uuid.UUID,
+	window domain.SeasonWindow,
+	publishedAt time.Time,
+) (*leaderboardrepo.SeasonRow, error) {
+	f.publishCalls++
+	if trackID != f.trackID || examSetID != f.examSetID {
+		return nil, errors.New("unexpected track or exam set ID")
+	}
+	if err := f.publishInterval(f.seasonID, examSetID, publishedAt); err != nil {
+		return nil, err
+	}
+	return &leaderboardrepo.SeasonRow{
+		ID:          f.seasonID,
+		ExamTrackID: f.trackID,
+		Year:        window.Year,
+		Month:       window.Month,
+		StartsAt:    window.StartsAt,
+		EndsAt:      window.EndsAt,
+	}, nil
 }
 
 type eligibilityInterval struct {
@@ -89,6 +113,10 @@ func (f *projectionFixture) EnsureSeasonForPublish(_ context.Context, trackID, e
 
 func (f *projectionFixture) JoinExamSet(_ context.Context, seasonID, examSetID uuid.UUID, joinedAt time.Time) error {
 	f.joinCalls++
+	return f.publishInterval(seasonID, examSetID, joinedAt)
+}
+
+func (f *projectionFixture) publishInterval(seasonID, examSetID uuid.UUID, joinedAt time.Time) error {
 	if seasonID != f.seasonID || examSetID != f.examSetID {
 		return errors.New("unexpected season or exam set ID")
 	}
@@ -159,13 +187,16 @@ func (f *projectionFixture) ProjectBestScore(
 	candidate domain.ScoreCandidate,
 ) (*leaderboardrepo.BestScoreProjection, error) {
 	projection := &leaderboardrepo.BestScoreProjection{}
-	if !f.published {
-		return projection, nil
-	}
-
 	season, err := f.GetEligibleSeason(ctx, examSetID, submittedAt)
 	if err != nil || season == nil {
 		return projection, err
+	}
+	if !f.published {
+		for _, interval := range f.intervals {
+			if !submittedAt.Before(interval.joinedAt) && interval.stoppedAt == nil {
+				return nil, leaderboardrepo.ErrLifecycleStatePending
+			}
+		}
 	}
 	projection.Season = season
 	projection.PreviousRank, err = f.GetUserRank(ctx, season.ID, userID)

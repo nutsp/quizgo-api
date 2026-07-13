@@ -1,3 +1,16 @@
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+
+ALTER TABLE exam_sets
+ADD COLUMN IF NOT EXISTS published_at timestamptz;
+
+-- Older rows have no immutable publication event. updated_at is a conservative
+-- lower-confidence boundary: later unrelated edits can omit earlier valid attempts,
+-- but will not admit attempts before the last persisted state change.
+UPDATE exam_sets
+SET published_at = COALESCE(updated_at, created_at)
+WHERE status = 'published'
+  AND published_at IS NULL;
+
 CREATE TABLE leaderboard_seasons (
     id uuid PRIMARY KEY,
     exam_track_id uuid NOT NULL REFERENCES exam_tracks(id),
@@ -21,7 +34,13 @@ CREATE TABLE leaderboard_season_exam_sets (
     CONSTRAINT leaderboard_season_exam_sets_interval_check
         CHECK (stopped_at IS NULL OR stopped_at >= joined_at),
     CONSTRAINT leaderboard_season_exam_sets_interval_key
-        UNIQUE (season_id, exam_set_id, joined_at)
+        UNIQUE (season_id, exam_set_id, joined_at),
+    CONSTRAINT leaderboard_season_exam_sets_no_overlap
+        EXCLUDE USING gist (
+            season_id WITH =,
+            exam_set_id WITH =,
+            tstzrange(joined_at, stopped_at, '[)') WITH &&
+        )
 );
 
 CREATE UNIQUE INDEX leaderboard_season_exam_sets_one_open_idx
