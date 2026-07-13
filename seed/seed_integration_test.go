@@ -13,6 +13,7 @@ import (
 	attemptrepo "virtual-exam-api/internal/examattempt/repository"
 	examsetrepo "virtual-exam-api/internal/examset/repository"
 	trackrepo "virtual-exam-api/internal/examtrack/repository"
+	leaderboardrepo "virtual-exam-api/internal/leaderboard/repository"
 	questionrepo "virtual-exam-api/internal/question/repository"
 	userrepo "virtual-exam-api/internal/user/repository"
 )
@@ -50,8 +51,35 @@ func TestPostgresFreshAutoMigrateAndSeedSetsPublicationTimestamp(t *testing.T) {
 		&questionrepo.ExamSetQuestionModel{},
 		&attemptrepo.ExamAttemptModel{},
 		&attemptrepo.ExamAnswerModel{},
+		&leaderboardrepo.SeasonModel{},
+		&leaderboardrepo.ExamSetStopEventModel{},
+		&leaderboardrepo.SeasonExamSetModel{},
+		&leaderboardrepo.ScoreModel{},
+		&leaderboardrepo.EntryModel{},
+		&leaderboardrepo.AwardModel{},
+		&leaderboardrepo.ProjectionFailureModel{},
 	); err != nil {
 		t.Fatalf("fresh AutoMigrate: %v", err)
+	}
+
+	var stopEventColumn struct {
+		IsNullable    string
+		ColumnDefault *string
+	}
+	if err := testDB.Raw(`
+		SELECT is_nullable, column_default
+		FROM information_schema.columns
+		WHERE table_schema = current_schema()
+		  AND table_name = 'leaderboard_exam_set_stop_events'
+		  AND column_name = 'created_at'
+	`).Scan(&stopEventColumn).Error; err != nil {
+		t.Fatalf("inspect stop-event created_at column: %v", err)
+	}
+	if stopEventColumn.IsNullable != "NO" {
+		t.Errorf("stop-event created_at nullable = %q, want NO", stopEventColumn.IsNullable)
+	}
+	if stopEventColumn.ColumnDefault == nil || !strings.Contains(*stopEventColumn.ColumnDefault, "now()") {
+		t.Errorf("stop-event created_at default = %v, want now()", stopEventColumn.ColumnDefault)
 	}
 	if err := Run(t.Context(), testDB); err != nil {
 		t.Fatalf("seed fresh database: %v", err)

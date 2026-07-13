@@ -49,6 +49,22 @@ func TestSeasonExamSetModelDeclaresIntervalKeys(t *testing.T) {
 	)
 }
 
+func TestExamSetStopEventModelDeclaresCreatedAtDefault(t *testing.T) {
+	t.Parallel()
+
+	model := parseModelSchema(t, &ExamSetStopEventModel{})
+	field := model.LookUpField("CreatedAt")
+	if field == nil {
+		t.Fatal("missing CreatedAt field")
+	}
+	if !field.NotNull {
+		t.Error("CreatedAt must be NOT NULL")
+	}
+	if field.DefaultValue != "now()" {
+		t.Errorf("CreatedAt default = %q, want now()", field.DefaultValue)
+	}
+}
+
 func TestScoreModelDeclaresValueChecks(t *testing.T) {
 	t.Parallel()
 

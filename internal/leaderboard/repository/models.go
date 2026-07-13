@@ -30,7 +30,7 @@ func (SeasonModel) TableName() string { return "leaderboard_seasons" }
 type ExamSetStopEventModel struct {
 	ExamSetID uuid.UUID `gorm:"type:uuid;primaryKey"`
 	StoppedAt time.Time `gorm:"primaryKey"`
-	CreatedAt time.Time
+	CreatedAt time.Time `gorm:"not null;default:now()"`
 
 	ExamSet examsetrepo.ExamSetModel `gorm:"foreignKey:ExamSetID;references:ID;constraint:leaderboard_exam_set_stop_events_exam_set_id_fkey,OnDelete:NO ACTION"`
 }
