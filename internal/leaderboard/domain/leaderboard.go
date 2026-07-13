@@ -51,6 +51,36 @@ type ExamSetLeaderboardResponse struct {
 	Pagination      Pagination                `json:"pagination"`
 }
 
+// Deprecated: retained for the legacy track-average API until Task 5 migrates it.
+type ExamTrackLeaderboardEntry struct {
+	Rank                int        `json:"rank"`
+	UserID              string     `json:"user_id"`
+	DisplayName         string     `json:"display_name"`
+	IsCurrentUser       bool       `json:"is_current_user"`
+	AverageScorePercent float64    `json:"average_score_percent"`
+	CompletedExamSets   int        `json:"completed_exam_sets"`
+	PassedExamSets      int        `json:"passed_exam_sets"`
+	PassRatePercent     float64    `json:"pass_rate_percent"`
+	LatestSubmittedAt   *time.Time `json:"latest_submitted_at"`
+}
+
+// Deprecated: retained for the legacy track-average API until Task 5 migrates it.
+type ExamTrackCurrentUserRank struct {
+	Rank                int     `json:"rank"`
+	AverageScorePercent float64 `json:"average_score_percent"`
+	CompletedExamSets   int     `json:"completed_exam_sets"`
+	PassedExamSets      int     `json:"passed_exam_sets"`
+	PassRatePercent     float64 `json:"pass_rate_percent"`
+}
+
+// Deprecated: retained for the legacy track-average API until Task 5 migrates it.
+type ExamTrackLeaderboardResponse struct {
+	ExamTrack       ExamTrackRef                `json:"exam_track"`
+	Leaderboard     []ExamTrackLeaderboardEntry `json:"leaderboard"`
+	CurrentUserRank *ExamTrackCurrentUserRank   `json:"current_user_rank,omitempty"`
+	Pagination      Pagination                  `json:"pagination"`
+}
+
 type SeasonWindow struct {
 	Year     int       `json:"year"`
 	Month    int       `json:"month"`
