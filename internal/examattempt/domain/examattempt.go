@@ -5,6 +5,7 @@ import (
 
 	"github.com/google/uuid"
 	examsetdomain "virtual-exam-api/internal/examset/domain"
+	leaderboarddomain "virtual-exam-api/internal/leaderboard/domain"
 	settingsdomain "virtual-exam-api/internal/settings/domain"
 )
 
@@ -119,16 +120,17 @@ type SaveAnswerResponse struct {
 }
 
 type SubmitResponse struct {
-	AttemptID       string  `json:"attempt_id"`
-	Status          string  `json:"status"`
-	Score           float64 `json:"score"`
-	TotalScore      float64 `json:"total_score"`
-	ScorePercent    float64 `json:"score_percent"`
-	CorrectCount    int     `json:"correct_count"`
-	WrongCount      int     `json:"wrong_count"`
-	UnansweredCount int     `json:"unanswered_count"`
-	DurationSeconds int     `json:"duration_seconds"`
-	Passed          bool    `json:"passed"`
+	AttemptID         string                              `json:"attempt_id"`
+	Status            string                              `json:"status"`
+	Score             float64                             `json:"score"`
+	TotalScore        float64                             `json:"total_score"`
+	ScorePercent      float64                             `json:"score_percent"`
+	CorrectCount      int                                 `json:"correct_count"`
+	WrongCount        int                                 `json:"wrong_count"`
+	UnansweredCount   int                                 `json:"unanswered_count"`
+	DurationSeconds   int                                 `json:"duration_seconds"`
+	Passed            bool                                `json:"passed"`
+	CompetitionUpdate *leaderboarddomain.ProjectionUpdate `json:"competition_update,omitempty"`
 }
 
 type SubjectBreakdown struct {

@@ -148,6 +148,8 @@ func main() {
 	attemptRepository := attemptrepo.NewPostgresRepository(db)
 	attemptCache := attemptrepo.NewRedisRepository(rdb.Runtime)
 	settingsRepository := settingsrepo.NewPostgresRepository(db)
+	leaderboardRepository := leaderboardrepo.NewPostgresRepository(db)
+	leaderboardProjector := leaderboarduc.NewProjector(leaderboardRepository)
 
 	authUseCase := authuc.NewAuthUseCase(userRepository, cfg)
 	oauthRepository := oauthrepo.NewPostgresRepository(db)
@@ -169,6 +171,7 @@ func main() {
 		runtimeLocks,
 		cacheInvalidator,
 		settingsUseCase,
+		leaderboardProjector,
 	)
 	homeUseCase := homeuc.NewHomeUseCase(trackRepository, examSetRepository, attemptRepository, entitlementUseCase, contentCache)
 
@@ -190,7 +193,6 @@ func main() {
 	resultUseCase := resultuc.NewResultUseCase(resultRepository)
 	resulthttp.NewHandler(resultUseCase).RegisterRoutes(api, authMiddleware)
 
-	leaderboardRepository := leaderboardrepo.NewPostgresRepository(db)
 	leaderboardUseCase := leaderboarduc.NewLeaderboardUseCase(leaderboardRepository)
 	leaderboardhttp.NewHandler(leaderboardUseCase).RegisterRoutes(api, authMiddleware)
 
@@ -205,7 +207,7 @@ func main() {
 	setQuestionAdminRepo := questionrepo.NewExamSetQuestionAdminRepository(db)
 
 	trackAdminUC := trackadminuc.NewAdminUseCase(trackAdminRepo, trackRepository, cacheInvalidator)
-	examSetAdminUC := examsetuc.NewAdminUseCase(examSetAdminRepo, examSetRepository, trackRepository, trackAdminRepo, setQuestionAdminRepo, cacheInvalidator)
+	examSetAdminUC := examsetuc.NewAdminUseCase(examSetAdminRepo, examSetRepository, trackRepository, trackAdminRepo, setQuestionAdminRepo, cacheInvalidator, leaderboardProjector)
 	subjectAdminUC := subjectuc.NewSubjectUseCase(subjectAdminRepo)
 	tagAdminUC := taguc.NewTagUseCase(tagAdminRepo)
 	questionAdminUC := questionuc.NewAdminUseCase(questionAdminRepo, setQuestionAdminRepo, subjectAdminRepo, tagAdminUC, examSetRepository, examSetAdminRepo, trackAdminRepo, cacheInvalidator)

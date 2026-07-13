@@ -2,6 +2,8 @@ package usecase
 
 import (
 	"context"
+	"errors"
+	"log"
 	"time"
 
 	"github.com/go-playground/validator/v10"
@@ -14,6 +16,7 @@ import (
 	attemptrepo "virtual-exam-api/internal/examattempt/repository"
 	examsetdomain "virtual-exam-api/internal/examset/domain"
 	examsetrepo "virtual-exam-api/internal/examset/repository"
+	leaderboarddomain "virtual-exam-api/internal/leaderboard/domain"
 	qdomain "virtual-exam-api/internal/question/domain"
 	questionrepo "virtual-exam-api/internal/question/repository"
 	scoringdomain "virtual-exam-api/internal/scoring/domain"
@@ -23,6 +26,11 @@ import (
 
 type OMRSettingsProvider interface {
 	GetOMR(ctx context.Context) (*settingsdomain.OMRAnswerSheetSettings, error)
+}
+
+type LeaderboardProjector interface {
+	ProjectAttempt(context.Context, leaderboarddomain.ProjectionInput) (*leaderboarddomain.ProjectionUpdate, error)
+	RecordProjectionFailure(context.Context, uuid.UUID, error) error
 }
 
 type ExamAttemptUseCase struct {
@@ -36,6 +44,7 @@ type ExamAttemptUseCase struct {
 	runtimeLocks *appcache.RuntimeLocks
 	invalidator  *appcache.Invalidator
 	omrSettings  OMRSettingsProvider
+	leaderboard  LeaderboardProjector
 	validator    *validator.Validate
 }
 
@@ -50,6 +59,7 @@ func NewExamAttemptUseCase(
 	runtimeLocks *appcache.RuntimeLocks,
 	invalidator *appcache.Invalidator,
 	omrSettings OMRSettingsProvider,
+	leaderboard LeaderboardProjector,
 ) *ExamAttemptUseCase {
 	if resultCache == nil {
 		resultCache = appcache.Noop()
@@ -65,6 +75,7 @@ func NewExamAttemptUseCase(
 		runtimeLocks: runtimeLocks,
 		invalidator:  invalidator,
 		omrSettings:  omrSettings,
+		leaderboard:  leaderboard,
 		validator:    validator.New(),
 	}
 }
@@ -94,8 +105,9 @@ func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examS
 	now := time.Now().UTC()
 	if existing != nil {
 		if now.After(existing.ExpiresAt) {
-			_ = uc.attempts.MarkAttemptTimeout(ctx, existing.ID)
-			uc.invalidateUserExams(ctx, userID)
+			if err := uc.timeoutAttempt(ctx, existing); err != nil {
+				return nil, err
+			}
 		} else {
 			return uc.buildStartResponseFromExisting(ctx, existing, set, setQuestions)
 		}
@@ -159,6 +171,20 @@ func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examS
 		Questions:   buildQuestionsForExam(setQuestions),
 		Answers:     map[int]string{},
 	}, nil
+}
+
+func (uc *ExamAttemptUseCase) timeoutAttempt(ctx context.Context, attempt *domain.ExamAttempt) error {
+	if err := uc.attempts.MarkAttemptTimeout(ctx, attempt.ID); err != nil {
+		return err
+	}
+	timedOut, err := uc.attempts.FindByIDForUser(ctx, attempt.ID, attempt.UserID)
+	if err != nil {
+		log.Printf("leaderboard timeout reload failed attempt_id=%s err=%v", attempt.ID, err)
+	} else {
+		uc.projectAttemptNonBlocking(ctx, timedOut)
+	}
+	uc.invalidateUserExams(ctx, attempt.UserID)
+	return nil
 }
 
 func (uc *ExamAttemptUseCase) applyAccessSnapshot(attempt *domain.ExamAttempt, check entdomain.ExamSetAccessResult, now time.Time) {
@@ -458,12 +484,67 @@ func (uc *ExamAttemptUseCase) Submit(ctx context.Context, userID, attemptID uuid
 	if err := uc.attempts.UpdateAttemptSubmitted(ctx, attempt, answers); err != nil {
 		return nil, err
 	}
+	competitionUpdate := uc.projectAttemptNonBlocking(ctx, attempt)
 
 	_ = uc.cache.ClearAttempt(ctx, attemptID.String())
 	_ = uc.resultCache.DeleteByIndex(ctx, appcache.IndexAttemptResult(attemptID.String()))
 	uc.invalidateUserExams(ctx, userID)
 
-	return uc.buildSubmitResponse(attempt), nil
+	response := uc.buildSubmitResponse(attempt)
+	response.CompetitionUpdate = competitionUpdate
+	return response, nil
+}
+
+func (uc *ExamAttemptUseCase) projectAttemptNonBlocking(ctx context.Context, attempt *domain.ExamAttempt) *leaderboarddomain.ProjectionUpdate {
+	if uc.leaderboard == nil || attempt == nil {
+		return nil
+	}
+	input, err := leaderboardProjectionInput(attempt)
+	if err == nil {
+		var update *leaderboarddomain.ProjectionUpdate
+		update, err = uc.leaderboard.ProjectAttempt(ctx, input)
+		if err == nil {
+			return update
+		}
+	}
+	if recordErr := uc.leaderboard.RecordProjectionFailure(ctx, attempt.ID, err); recordErr != nil {
+		log.Printf("leaderboard projection failure record failed attempt_id=%s projection_err=%v record_err=%v", attempt.ID, err, recordErr)
+	} else {
+		log.Printf("leaderboard projection failed attempt_id=%s err=%v", attempt.ID, err)
+	}
+	return nil
+}
+
+func leaderboardProjectionInput(attempt *domain.ExamAttempt) (leaderboarddomain.ProjectionInput, error) {
+	if attempt.SubmittedAt == nil || attempt.SubmittedAt.IsZero() {
+		return leaderboarddomain.ProjectionInput{}, errors.New("submitted attempt is missing submitted_at")
+	}
+	duration := 0
+	if attempt.DurationSeconds != nil {
+		duration = *attempt.DurationSeconds
+	} else {
+		duration = int(attempt.SubmittedAt.Sub(attempt.StartedAt).Seconds())
+		if duration < 0 {
+			duration = 0
+		}
+	}
+	trackCode := ""
+	if attempt.ExamTrack != nil {
+		trackCode = attempt.ExamTrack.Code
+	}
+	return leaderboarddomain.ProjectionInput{
+		AttemptID:   attempt.ID,
+		UserID:      attempt.UserID,
+		ExamSetID:   attempt.ExamSetID,
+		ExamTrackID: attempt.ExamTrackID,
+		TrackCode:   trackCode,
+		SubmittedAt: attempt.SubmittedAt.UTC(),
+		Candidate: leaderboarddomain.ScoreCandidate{
+			Points:          attempt.ScorePercent,
+			DurationSeconds: duration,
+			AchievedAt:      attempt.SubmittedAt.UTC(),
+		},
+	}, nil
 }
 
 func (uc *ExamAttemptUseCase) GetResult(ctx context.Context, userID, attemptID uuid.UUID) (*domain.ResultResponse, error) {

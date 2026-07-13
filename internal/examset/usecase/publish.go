@@ -162,8 +162,18 @@ func (uc *AdminUseCase) Publish(ctx context.Context, id uuid.UUID) (*PublishStat
 	if err := uc.sets.UpdateStatus(ctx, id, domain.StatusPublished, true); err != nil {
 		return nil, err
 	}
+	updated, err := uc.reads.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if updated == nil {
+		return nil, apperrors.ErrExamSetNotFound
+	}
 	if uc.invalidator != nil {
 		uc.invalidator.OnExamSetChanged(ctx, id.String(), set.Code)
+	}
+	if err := uc.notifyLeaderboardPublished(ctx, updated); err != nil {
+		return nil, err
 	}
 	return &PublishStatusResponse{
 		ID:       id.String(),
@@ -182,11 +192,29 @@ func (uc *AdminUseCase) Unpublish(ctx context.Context, id uuid.UUID) (*PublishSt
 	if set == nil {
 		return nil, apperrors.ErrExamSetNotFound
 	}
+	if set.Status == domain.StatusDraft {
+		if err := uc.notifyLeaderboardStopped(ctx, set); err != nil {
+			return nil, err
+		}
+		return &PublishStatusResponse{ID: id.String(), Status: domain.StatusDraft, IsActive: set.IsActive}, nil
+	}
 	if err := uc.sets.UpdateStatus(ctx, id, domain.StatusDraft, set.IsActive); err != nil {
 		return nil, err
 	}
+	updated, err := uc.reads.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if updated == nil {
+		return nil, apperrors.ErrExamSetNotFound
+	}
 	if uc.invalidator != nil {
 		uc.invalidator.OnExamSetChanged(ctx, id.String(), set.Code)
+	}
+	if isLeaderboardEligible(set) {
+		if err := uc.notifyLeaderboardStopped(ctx, updated); err != nil {
+			return nil, err
+		}
 	}
 	return &PublishStatusResponse{
 		ID:     id.String(),
@@ -202,11 +230,29 @@ func (uc *AdminUseCase) Archive(ctx context.Context, id uuid.UUID) (*PublishStat
 	if set == nil {
 		return nil, apperrors.ErrExamSetNotFound
 	}
+	if set.Status == domain.StatusArchived && !set.IsActive {
+		if err := uc.notifyLeaderboardStopped(ctx, set); err != nil {
+			return nil, err
+		}
+		return &PublishStatusResponse{ID: id.String(), Status: domain.StatusArchived}, nil
+	}
 	if err := uc.sets.UpdateStatus(ctx, id, domain.StatusArchived, false); err != nil {
 		return nil, err
 	}
+	updated, err := uc.reads.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if updated == nil {
+		return nil, apperrors.ErrExamSetNotFound
+	}
 	if uc.invalidator != nil {
 		uc.invalidator.OnExamSetChanged(ctx, id.String(), set.Code)
+	}
+	if isLeaderboardEligible(set) {
+		if err := uc.notifyLeaderboardStopped(ctx, updated); err != nil {
+			return nil, err
+		}
 	}
 	return &PublishStatusResponse{
 		ID:       id.String(),
