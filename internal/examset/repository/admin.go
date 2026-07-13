@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"virtual-exam-api/internal/apperrors"
 	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/examset/domain"
 )
@@ -146,6 +147,9 @@ func (r *adminRepository) Update(ctx context.Context, set *domain.ExamSet) error
 		before, err := lockExamSetLifecycleState(tx, set.ID)
 		if err != nil {
 			return err
+		}
+		if isEligibleLifecycleState(before.Status, before.IsActive) && before.ExamTrackID != set.ExamTrackID {
+			return apperrors.ErrInvalidInput
 		}
 		set.UpdatedAt = time.Now().UTC()
 		updates := map[string]any{

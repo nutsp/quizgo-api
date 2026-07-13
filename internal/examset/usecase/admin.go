@@ -155,6 +155,9 @@ func (uc *AdminUseCase) Update(ctx context.Context, id uuid.UUID, input UpdateSe
 	if err != nil {
 		return nil, err
 	}
+	if isLeaderboardEligible(existing) && existing.ExamTrackID != set.ExamTrackID {
+		return nil, apperrors.ErrInvalidInput
+	}
 	set.ID = id
 	set.CreatedAt = existing.CreatedAt
 	set.UpdatedAt = existing.UpdatedAt

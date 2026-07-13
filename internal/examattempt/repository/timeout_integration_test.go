@@ -6,7 +6,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/driver/postgres"
@@ -14,32 +13,127 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-func TestPostgresMarkAttemptTimeoutReportsTransitionOnce(t *testing.T) {
+func TestPostgresMarkAttemptTimeoutUsesDatabaseDeadlineAndFreezesDuration(t *testing.T) {
 	db := openAttemptTimeoutIntegrationDB(t)
 	repo := NewPostgresRepository(db)
-	attemptID := uuid.New()
 	trackID := uuid.New()
-	startedAt := time.Date(2026, 7, 14, 1, 0, 0, 0, time.UTC)
 	if err := db.Exec(`INSERT INTO exam_tracks (id, code) VALUES (?, 'police')`, trackID).Error; err != nil {
 		t.Fatalf("insert track: %v", err)
 	}
+	futureAttemptID := uuid.New()
 	if err := db.Exec(`
 		INSERT INTO exam_attempts (
 			id, user_id, exam_track_id, exam_set_id, status,
 			started_at, expires_at, created_at, updated_at
 		)
-		VALUES (?, ?, ?, ?, 'in_progress', ?, ?, ?, ?)
-	`, attemptID, uuid.New(), trackID, uuid.New(), startedAt, startedAt.Add(time.Hour), startedAt, startedAt).Error; err != nil {
+		VALUES (?, ?, ?, ?, 'in_progress', CURRENT_TIMESTAMP,
+			CURRENT_TIMESTAMP + interval '1 hour', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+	`, futureAttemptID, uuid.New(), trackID, uuid.New()).Error; err != nil {
 		t.Fatalf("insert attempt: %v", err)
 	}
+	changed, err := repo.MarkAttemptTimeout(t.Context(), futureAttemptID)
+	if err != nil || changed {
+		t.Fatalf("future MarkAttemptTimeout() = %t, %v, want false, nil", changed, err)
+	}
+	var futureStatus string
+	var futureOutboxRows int64
+	if err := db.Table("exam_attempts").Select("status").Where("id = ?", futureAttemptID).Scan(&futureStatus).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Table("leaderboard_attempt_projection_outbox").Where("attempt_id = ?", futureAttemptID).Count(&futureOutboxRows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if futureStatus != "in_progress" || futureOutboxRows != 0 {
+		t.Fatalf("future timeout state/outbox = %s/%d, want in_progress/0", futureStatus, futureOutboxRows)
+	}
+	equalityAttemptID := uuid.New()
+	equalityTx := db.Begin()
+	if equalityTx.Error != nil {
+		t.Fatal(equalityTx.Error)
+	}
+	defer equalityTx.Rollback()
+	if err := equalityTx.Exec(`
+		INSERT INTO exam_attempts (
+			id, user_id, exam_track_id, exam_set_id, status,
+			started_at, expires_at, created_at, updated_at
+		)
+		VALUES (?, ?, ?, ?, 'in_progress', CURRENT_TIMESTAMP - interval '30 minutes',
+			CURRENT_TIMESTAMP, CURRENT_TIMESTAMP - interval '30 minutes', CURRENT_TIMESTAMP - interval '30 minutes')
+	`, equalityAttemptID, uuid.New(), trackID, uuid.New()).Error; err != nil {
+		t.Fatalf("insert equality attempt: %v", err)
+	}
+	equalityRepo := NewPostgresRepository(equalityTx)
+	changed, err = equalityRepo.MarkAttemptTimeout(t.Context(), equalityAttemptID)
+	if err != nil || !changed {
+		t.Fatalf("equality MarkAttemptTimeout() = %t, %v, want true, nil", changed, err)
+	}
+	if err := equalityTx.Commit().Error; err != nil {
+		t.Fatal(err)
+	}
 
-	changed, err := repo.MarkAttemptTimeout(t.Context(), attemptID)
+	attemptID := uuid.New()
+	if err := db.Exec(`
+		INSERT INTO exam_attempts (
+			id, user_id, exam_track_id, exam_set_id, status,
+			started_at, expires_at, created_at, updated_at
+		)
+		VALUES (?, ?, ?, ?, 'in_progress', CURRENT_TIMESTAMP - interval '1 hour',
+			CURRENT_TIMESTAMP, CURRENT_TIMESTAMP - interval '1 hour', CURRENT_TIMESTAMP - interval '1 hour')
+	`, attemptID, uuid.New(), trackID, uuid.New()).Error; err != nil {
+		t.Fatalf("insert expired attempt: %v", err)
+	}
+
+	changed, err = repo.MarkAttemptTimeout(t.Context(), attemptID)
 	if err != nil || !changed {
 		t.Fatalf("first MarkAttemptTimeout() = %t, %v, want true, nil", changed, err)
 	}
 	changed, err = repo.MarkAttemptTimeout(t.Context(), attemptID)
 	if err != nil || changed {
 		t.Fatalf("second MarkAttemptTimeout() = %t, %v, want false, nil", changed, err)
+	}
+	var payload struct {
+		AttemptDuration int `gorm:"column:attempt_duration"`
+		OutboxDuration  int `gorm:"column:outbox_duration"`
+	}
+	if err := db.Raw(`
+		SELECT ea.duration_seconds AS attempt_duration,
+			o.duration_seconds AS outbox_duration
+		FROM exam_attempts ea
+		JOIN leaderboard_attempt_projection_outbox o ON o.attempt_id = ea.id
+		WHERE ea.id = ?
+	`, attemptID).Scan(&payload).Error; err != nil {
+		t.Fatal(err)
+	}
+	if payload.AttemptDuration != 3600 || payload.OutboxDuration != 3600 {
+		t.Fatalf("timeout durations = attempt:%d outbox:%d, want 3600/3600", payload.AttemptDuration, payload.OutboxDuration)
+	}
+}
+
+func TestPostgresMarkAttemptTimeoutPreservesPersistedElapsedMode(t *testing.T) {
+	db := openAttemptTimeoutIntegrationDB(t)
+	if err := db.Exec(`ALTER TABLE exam_attempts ADD COLUMN timing_mode text NOT NULL DEFAULT 'countdown'`).Error; err != nil {
+		t.Fatal(err)
+	}
+	repo := NewPostgresRepository(db)
+	trackID := uuid.New()
+	attemptID := uuid.New()
+	if err := db.Exec(`INSERT INTO exam_tracks (id, code) VALUES (?, 'police')`, trackID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`
+		INSERT INTO exam_attempts (
+			id, user_id, exam_track_id, exam_set_id, status, timing_mode,
+			started_at, expires_at, created_at, updated_at
+		) VALUES (?, ?, ?, ?, 'in_progress', 'elapsed',
+			CURRENT_TIMESTAMP - interval '2 hours', CURRENT_TIMESTAMP - interval '1 hour',
+			CURRENT_TIMESTAMP - interval '2 hours', CURRENT_TIMESTAMP - interval '2 hours')
+	`, attemptID, uuid.New(), trackID, uuid.New()).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := repo.MarkAttemptTimeout(t.Context(), attemptID)
+	if err != nil || changed {
+		t.Fatalf("elapsed MarkAttemptTimeout() = %t, %v, want false, nil", changed, err)
 	}
 }
 

@@ -15,7 +15,9 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
+	"virtual-exam-api/internal/apperrors"
 	attemptrepo "virtual-exam-api/internal/examattempt/repository"
+	"virtual-exam-api/internal/examset/domain"
 )
 
 func TestLifecycleEventModelMatchesOutboxContract(t *testing.T) {
@@ -169,6 +171,34 @@ func TestPostgresPublishRollsBackWhenLifecycleEventCannotPersist(t *testing.T) {
 	}
 	if state.Status != "draft" || state.IsActive || state.PublishedAt != nil {
 		t.Fatalf("rolled back state = %+v", state)
+	}
+}
+
+func TestPostgresUpdateRejectsPublishedActiveTrackChangeInsideTransaction(t *testing.T) {
+	db := openExamSetLifecycleIntegrationDB(t)
+	repo := NewAdminRepository(db)
+	examSetID := uuid.New()
+	originalTrackID := uuid.New()
+	newTrackID := uuid.New()
+	base := time.Date(2026, 7, 14, 1, 50, 0, 0, time.UTC)
+	mustExamSetLifecycleExec(t, db, `INSERT INTO exam_tracks (id) VALUES (?), (?)`, originalTrackID, newTrackID)
+	mustExamSetLifecycleExec(t, db, `
+		INSERT INTO exam_sets (id, exam_track_id, status, is_active, published_at, created_at, updated_at)
+		VALUES (?, ?, 'published', true, ?, ?, ?)
+	`, examSetID, originalTrackID, base, base, base)
+
+	err := repo.Update(t.Context(), &domain.ExamSet{
+		ID: examSetID, ExamTrackID: newTrackID, IsActive: true,
+	})
+	if err != apperrors.ErrInvalidInput {
+		t.Fatalf("Update() error = %v, want ErrInvalidInput", err)
+	}
+	var persistedTrackID string
+	if err := db.Table("exam_sets").Select("exam_track_id").Where("id = ?", examSetID).Scan(&persistedTrackID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if persistedTrackID != originalTrackID.String() {
+		t.Fatalf("persisted track = %s, want %s", persistedTrackID, originalTrackID)
 	}
 }
 

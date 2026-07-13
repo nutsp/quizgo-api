@@ -26,6 +26,8 @@ type integrationOutboxProjector struct {
 	publishCalls       int
 	stopCalls          int
 	stopSawPersistence bool
+	publishEntered     chan struct{}
+	releasePublish     <-chan struct{}
 }
 
 func (p *integrationOutboxProjector) ProjectAttempt(_ context.Context, _ domain.ProjectionInput) (*domain.ProjectionUpdate, error) {
@@ -50,6 +52,10 @@ func (p *integrationOutboxProjector) OnExamSetStopped(_ context.Context, examSet
 }
 
 func (p *integrationOutboxProjector) OnExamSetPublished(_ context.Context, trackID, examSetID uuid.UUID, publishedAt time.Time) error {
+	if p.publishEntered != nil {
+		p.publishEntered <- struct{}{}
+		<-p.releasePublish
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.publishCalls++
@@ -60,6 +66,118 @@ func (p *integrationOutboxProjector) OnExamSetPublished(_ context.Context, track
 		return fmt.Errorf("publish callback did not observe persisted event: count=%d err=%v", pending, err)
 	}
 	return nil
+}
+
+func TestPostgresAttemptDispatchWaitsForLifecycleAckAcrossDispatcherInstances(t *testing.T) {
+	db := openOutboxDispatcherIntegrationDB(t)
+	attempts := attemptrepo.NewPostgresRepository(db)
+	lifecycle := examsetrepo.NewAdminRepository(db)
+	now := dispatcherIntegrationTime()
+	examSetID := uuid.New()
+	trackID := uuid.New()
+	eventAt := now.Add(-time.Minute)
+	if err := db.Exec(`
+		INSERT INTO exam_sets (id, exam_track_id, status, is_active, published_at, created_at, updated_at)
+		VALUES (?, ?, 'published', true, ?, ?, ?)
+	`, examSetID, trackID, eventAt, eventAt, eventAt).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`
+		INSERT INTO exam_set_lifecycle_events (
+			exam_set_id, event_type, event_at, exam_track_id, next_attempt_at
+		) VALUES (?, 'published', ?, ?, ?)
+	`, examSetID, eventAt, trackID, eventAt).Error; err != nil {
+		t.Fatal(err)
+	}
+	insertDispatcherAttemptEventForSet(t, db, now, examSetID, trackID)
+
+	publishEntered := make(chan struct{}, 1)
+	releasePublish := make(chan struct{})
+	lifecycleProjector := &integrationOutboxProjector{
+		db: db, publishEntered: publishEntered, releasePublish: releasePublish,
+	}
+	attemptProjector := &integrationOutboxProjector{db: db}
+	config := OutboxDispatcherConfig{Now: func() time.Time { return now }}
+	lifecycleDispatcher := NewOutboxDispatcher(nil, lifecycle, lifecycleProjector, config)
+	attemptDispatcher := NewOutboxDispatcher(attempts, lifecycle, attemptProjector, config)
+
+	lifecycleDone := make(chan error, 1)
+	go func() {
+		_, err := lifecycleDispatcher.DrainOnce(t.Context())
+		lifecycleDone <- err
+	}()
+	<-publishEntered
+
+	count, err := attemptDispatcher.DrainOnce(t.Context())
+	if err != nil || count != 0 || attemptProjector.projectCalls != 0 {
+		t.Fatalf("attempt drain during lifecycle delivery = count:%d projects:%d err:%v, want deferred", count, attemptProjector.projectCalls, err)
+	}
+	close(releasePublish)
+	if err := <-lifecycleDone; err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := attemptDispatcher.DrainOnce(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if attemptProjector.projectCalls != 1 {
+		t.Fatalf("project calls after lifecycle ack = %d, want 1", attemptProjector.projectCalls)
+	}
+}
+
+func TestPostgresAttemptClaimIgnoresLifecycleEventAfterSubmittedAt(t *testing.T) {
+	db := openOutboxDispatcherIntegrationDB(t)
+	attempts := attemptrepo.NewPostgresRepository(db)
+	now := dispatcherIntegrationTime()
+	examSetID := uuid.New()
+	trackID := uuid.New()
+	insertDispatcherAttemptEventForSet(t, db, now, examSetID, trackID)
+	if err := db.Exec(`
+		INSERT INTO exam_set_lifecycle_events (
+			exam_set_id, event_type, event_at, next_attempt_at
+		) VALUES (?, 'stopped', ?, ?)
+	`, examSetID, now.Add(time.Minute), now).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := attempts.ClaimProjectionEvents(t.Context(), attemptrepo.ProjectionClaimRequest{
+		Token: uuid.New(), Now: now, LeaseBefore: now.Add(-time.Minute), Limit: 1,
+	})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("ClaimProjectionEvents() = %+v, %v, want attempt unaffected by later lifecycle event", events, err)
+	}
+}
+
+func TestPostgresAttemptClaimSkipsExamSetWithLifecycleTransitionLock(t *testing.T) {
+	db := openOutboxDispatcherIntegrationDB(t)
+	attempts := attemptrepo.NewPostgresRepository(db)
+	now := dispatcherIntegrationTime()
+	examSetID := uuid.New()
+	insertDispatcherAttemptEventForSet(t, db, now, examSetID, uuid.New())
+
+	transitionTx := db.Begin()
+	if transitionTx.Error != nil {
+		t.Fatal(transitionTx.Error)
+	}
+	defer transitionTx.Rollback()
+	if err := transitionTx.Exec(`SELECT id FROM exam_sets WHERE id = ? FOR UPDATE`, examSetID).Error; err != nil {
+		t.Fatal(err)
+	}
+	events, err := attempts.ClaimProjectionEvents(t.Context(), attemptrepo.ProjectionClaimRequest{
+		Token: uuid.New(), Now: now, LeaseBefore: now.Add(-time.Minute), Limit: 1,
+	})
+	if err != nil || len(events) != 0 {
+		t.Fatalf("claim during lifecycle row lock = %+v, %v, want deferred", events, err)
+	}
+	if err := transitionTx.Rollback().Error; err != nil {
+		t.Fatal(err)
+	}
+	events, err = attempts.ClaimProjectionEvents(t.Context(), attemptrepo.ProjectionClaimRequest{
+		Token: uuid.New(), Now: now, LeaseBefore: now.Add(-time.Minute), Limit: 1,
+	})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("claim after lifecycle row unlock = %+v, %v, want 1", events, err)
+	}
 }
 
 func (*integrationOutboxProjector) RecordProjectionFailure(context.Context, uuid.UUID, error) error {
@@ -234,12 +352,27 @@ func openOutboxDispatcherIntegrationDB(t *testing.T) *gorm.DB {
 
 func insertDispatcherAttemptEvent(t *testing.T, db *gorm.DB, now time.Time) {
 	t.Helper()
+	insertDispatcherAttemptEventForSet(t, db, now, uuid.New(), uuid.New())
+}
+
+func insertDispatcherAttemptEventForSet(t *testing.T, db *gorm.DB, now time.Time, examSetID, trackID uuid.UUID) {
+	t.Helper()
+	if err := db.Exec(`INSERT INTO exam_tracks (id, code) VALUES (?, 'police') ON CONFLICT (id) DO NOTHING`, trackID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`
+		INSERT INTO exam_sets (id, exam_track_id, status, is_active, created_at, updated_at)
+		VALUES (?, ?, 'draft', false, ?, ?)
+		ON CONFLICT (id) DO NOTHING
+	`, examSetID, trackID, now, now).Error; err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Exec(`
 		INSERT INTO leaderboard_attempt_projection_outbox (
 			attempt_id, user_id, exam_set_id, exam_track_id, track_code,
 			submitted_at, points, duration_seconds, next_attempt_at
 		) VALUES (?, ?, ?, ?, 'police', ?, 80, 600, ?)
-	`, uuid.New(), uuid.New(), uuid.New(), uuid.New(), now, now).Error; err != nil {
+	`, uuid.New(), uuid.New(), examSetID, trackID, now, now).Error; err != nil {
 		t.Fatal(err)
 	}
 }

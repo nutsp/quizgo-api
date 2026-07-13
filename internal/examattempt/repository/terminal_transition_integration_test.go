@@ -69,6 +69,9 @@ func TestPostgresSubmittedTransitionDoesNotOverwriteTimeout(t *testing.T) {
 	db := openAttemptProjectionIntegrationDB(t)
 	repo := NewPostgresRepository(db)
 	attempt := insertProjectionAttemptFixture(t, db, projectionTransitionFixtureTime().Add(time.Minute))
+	if err := db.Exec(`UPDATE exam_attempts SET expires_at = CURRENT_TIMESTAMP - interval '1 second' WHERE id = ?`, attempt.ID).Error; err != nil {
+		t.Fatal(err)
+	}
 	if changed, err := repo.MarkAttemptTimeout(t.Context(), attempt.ID); err != nil || !changed {
 		t.Fatalf("MarkAttemptTimeout() = %t, %v", changed, err)
 	}
@@ -87,7 +90,15 @@ func TestPostgresSubmittedTransitionDoesNotOverwriteTimeout(t *testing.T) {
 func TestPostgresConcurrentSubmitAndTimeoutProduceOneTerminalEvent(t *testing.T) {
 	db := openAttemptProjectionIntegrationDB(t)
 	repo := NewPostgresRepository(db)
-	attempt := insertProjectionAttemptFixture(t, db, projectionTransitionFixtureTime().Add(time.Minute))
+	attempt := insertProjectionAttemptFixture(t, db, time.Now().UTC().Add(-time.Minute))
+	if err := db.Exec(`
+		UPDATE exam_attempts
+		SET started_at = CURRENT_TIMESTAMP - interval '10 minutes',
+			expires_at = CURRENT_TIMESTAMP - interval '1 second'
+		WHERE id = ?
+	`, attempt.ID).Error; err != nil {
+		t.Fatal(err)
+	}
 	setSubmittedFixture(attempt, projectionTransitionFixtureTime())
 	blocker := db.Begin()
 	if blocker.Error != nil {
@@ -129,8 +140,10 @@ func TestPostgresConcurrentSubmitAndTimeoutProduceOneTerminalEvent(t *testing.T)
 	if submitErr != nil || timeoutErr != nil {
 		t.Fatalf("concurrent errors submit=%v timeout=%v", submitErr, timeoutErr)
 	}
-	if (submitTransition == AttemptTransitionSubmitted) == timeoutChanged {
-		t.Fatalf("submit transition / timeout changed = %q / %v, want exactly one winner", submitTransition, timeoutChanged)
+	validWinner := (submitTransition == AttemptTransitionTimedOut && !timeoutChanged) ||
+		(submitTransition == AttemptTransitionUnchanged && timeoutChanged)
+	if !validWinner {
+		t.Fatalf("submit transition / timeout changed = %q / %v, want one timeout owner", submitTransition, timeoutChanged)
 	}
 	var status string
 	if err := db.Table("exam_attempts").Select("status").Where("id = ?", attempt.ID).Scan(&status).Error; err != nil {

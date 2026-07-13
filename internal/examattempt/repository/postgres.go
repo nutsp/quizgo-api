@@ -296,17 +296,19 @@ func (r *postgresRepository) FindUserActivityForExamSet(ctx context.Context, use
 func (r *postgresRepository) MarkAttemptTimeout(ctx context.Context, attemptID uuid.UUID) (bool, error) {
 	changed := false
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		now := time.Now().UTC()
 		query := tx.Model(&ExamAttemptModel{}).
-			Where("id = ? AND status = ?", attemptID, domain.StatusInProgress)
+			Where("id = ? AND status = ? AND expires_at <= CURRENT_TIMESTAMP", attemptID, domain.StatusInProgress)
 		if r.hasTimingMode {
 			query = query.Where("COALESCE(timing_mode, 'countdown') <> 'elapsed'")
 		}
 		result := query.
 			Updates(map[string]any{
 				"status":       domain.StatusTimeout,
-				"submitted_at": now,
-				"updated_at":   now,
+				"submitted_at": gorm.Expr("CURRENT_TIMESTAMP"),
+				"duration_seconds": gorm.Expr(`GREATEST(0,
+					FLOOR(EXTRACT(EPOCH FROM (LEAST(CURRENT_TIMESTAMP, expires_at) - started_at)))::integer
+				)`),
+				"updated_at": gorm.Expr("CURRENT_TIMESTAMP"),
 			})
 		if result.Error != nil || result.RowsAffected == 0 {
 			return result.Error

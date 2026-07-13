@@ -118,14 +118,22 @@ func (r *postgresRepository) ClaimProjectionEvents(ctx context.Context, request 
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		return tx.Raw(`
 			WITH pending AS (
-				SELECT attempt_id
-				FROM leaderboard_attempt_projection_outbox
-				WHERE delivered_at IS NULL
-				  AND next_attempt_at <= ?
-				  AND (claimed_at IS NULL OR claimed_at <= ?)
-				  AND (? = '' OR attempt_id::text = ?)
-				ORDER BY next_attempt_at, created_at
-				FOR UPDATE SKIP LOCKED
+				SELECT candidate.attempt_id
+				FROM leaderboard_attempt_projection_outbox candidate
+				JOIN exam_sets exam_set ON exam_set.id = candidate.exam_set_id
+				WHERE candidate.delivered_at IS NULL
+				  AND candidate.next_attempt_at <= ?
+				  AND (candidate.claimed_at IS NULL OR candidate.claimed_at <= ?)
+				  AND (? = '' OR candidate.attempt_id::text = ?)
+				  AND NOT EXISTS (
+					SELECT 1
+					FROM exam_set_lifecycle_events lifecycle
+					WHERE lifecycle.exam_set_id = candidate.exam_set_id
+					  AND lifecycle.delivered_at IS NULL
+					  AND lifecycle.event_at <= candidate.submitted_at
+				  )
+				ORDER BY candidate.next_attempt_at, candidate.created_at
+				FOR UPDATE OF candidate, exam_set SKIP LOCKED
 				LIMIT ?
 			)
 			UPDATE leaderboard_attempt_projection_outbox outbox

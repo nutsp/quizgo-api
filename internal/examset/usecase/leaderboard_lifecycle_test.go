@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"virtual-exam-api/internal/apperrors"
 	"virtual-exam-api/internal/examset/domain"
 	examsetrepo "virtual-exam-api/internal/examset/repository"
 	trackdomain "virtual-exam-api/internal/examtrack/domain"
@@ -416,6 +417,23 @@ func TestLeaderboardGeneralUpdateRetryKeepsStopBoundary(t *testing.T) {
 	}
 	if len(recorder.calls) != 2 || recorder.calls[0].at != stoppedAt || recorder.calls[1].at != stoppedAt {
 		t.Fatalf("update retry timestamps = %#v, want stable boundary", recorder.calls)
+	}
+}
+
+func TestUpdateRejectsTrackChangeWhilePublishedAndActiveBeforeRepositoryWrite(t *testing.T) {
+	set := leaderboardSet()
+	set.Status = domain.StatusPublished
+	store := &lifecycleSetStore{current: set}
+	uc := newLifecycleAdmin(store, &lifecycleRecorder{})
+	input := updateInputFromSet(set)
+	input.ExamTrackID = uuid.NewString()
+
+	_, err := uc.Update(t.Context(), set.ID, input)
+	if err != apperrors.ErrInvalidInput {
+		t.Fatalf("Update() error = %v, want ErrInvalidInput", err)
+	}
+	if store.updateWrites != 0 {
+		t.Fatalf("repository update writes = %d, want 0", store.updateWrites)
 	}
 }
 

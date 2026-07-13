@@ -75,6 +75,17 @@ func (d *OutboxDispatcher) Run(ctx context.Context) {
 func (d *OutboxDispatcher) DrainOnce(ctx context.Context) (int, error) {
 	count := 0
 	var drainErr error
+	if d.lifecycle != nil {
+		events, err := d.claimLifecycleEvents(ctx, nil)
+		if err != nil {
+			drainErr = errors.Join(drainErr, err)
+		} else {
+			for i := range events {
+				count++
+				drainErr = errors.Join(drainErr, d.deliverLifecycle(ctx, events[i]))
+			}
+		}
+	}
 	if d.attempts != nil {
 		events, err := d.claimAttemptEvents(ctx, nil)
 		if err != nil {
@@ -84,17 +95,6 @@ func (d *OutboxDispatcher) DrainOnce(ctx context.Context) (int, error) {
 				count++
 				_, err := d.deliverAttempt(ctx, events[i])
 				drainErr = errors.Join(drainErr, err)
-			}
-		}
-	}
-	if d.lifecycle != nil {
-		events, err := d.claimLifecycleEvents(ctx, nil)
-		if err != nil {
-			drainErr = errors.Join(drainErr, err)
-		} else {
-			for i := range events {
-				count++
-				drainErr = errors.Join(drainErr, d.deliverLifecycle(ctx, events[i]))
 			}
 		}
 	}
