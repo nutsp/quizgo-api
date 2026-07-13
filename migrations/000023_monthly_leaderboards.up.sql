@@ -11,6 +11,13 @@ SET published_at = COALESCE(updated_at, created_at)
 WHERE status = 'published'
   AND published_at IS NULL;
 
+CREATE TABLE leaderboard_exam_set_stop_events (
+    exam_set_id uuid NOT NULL REFERENCES exam_sets(id),
+    stopped_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (exam_set_id, stopped_at)
+);
+
 CREATE TABLE leaderboard_seasons (
     id uuid PRIMARY KEY,
     exam_track_id uuid NOT NULL REFERENCES exam_tracks(id),

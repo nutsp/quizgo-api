@@ -4,4 +4,5 @@ DROP TABLE IF EXISTS leaderboard_entries;
 DROP TABLE IF EXISTS leaderboard_scores;
 DROP TABLE IF EXISTS leaderboard_season_exam_sets;
 DROP TABLE IF EXISTS leaderboard_seasons;
+DROP TABLE IF EXISTS leaderboard_exam_set_stop_events;
 ALTER TABLE exam_sets DROP COLUMN IF EXISTS published_at;

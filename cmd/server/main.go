@@ -102,6 +102,7 @@ func main() {
 			&attemptrepo.ExamAttemptModel{},
 			&attemptrepo.ExamAnswerModel{},
 			&leaderboardrepo.SeasonModel{},
+			&leaderboardrepo.ExamSetStopEventModel{},
 			&leaderboardrepo.SeasonExamSetModel{},
 			&leaderboardrepo.ScoreModel{},
 			&leaderboardrepo.EntryModel{},

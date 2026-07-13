@@ -288,7 +288,7 @@ func TestPostgresPublishRollsBackSeasonWhenIntervalWriteFails(t *testing.T) {
 	}
 }
 
-func TestPostgresPublishRejectsStaleEventsAndPreservesExactRepublish(t *testing.T) {
+func TestPostgresPublishPreservesExactRetriesAndNormalizesLaterRetryClock(t *testing.T) {
 	db := openLeaderboardIntegrationDB(t)
 	projector := leaderboardusecase.NewProjector(leaderboardrepo.NewPostgresRepository(db))
 	ctx, cancel := context.WithTimeout(t.Context(), postgresRaceBound)
@@ -321,9 +321,9 @@ func TestPostgresPublishRejectsStaleEventsAndPreservesExactRepublish(t *testing.
 	if err := projector.OnExamSetStopped(ctx, examSetID, stoppedAt); err != nil {
 		t.Fatalf("stop republished interval: %v", err)
 	}
-	for _, retryAt := range []time.Time{firstPublishedAt.Add(time.Hour), republishedAt} {
+	for _, retryAt := range []time.Time{firstPublishedAt, republishedAt, stoppedAt.Add(time.Hour)} {
 		if err := projector.OnExamSetPublished(ctx, trackID, examSetID, retryAt); err != nil {
-			t.Fatalf("stale/exact publish at %s: %v", retryAt, err)
+			t.Fatalf("publish retry at %s: %v", retryAt, err)
 		}
 	}
 
@@ -341,7 +341,7 @@ func TestPostgresPublishRejectsStaleEventsAndPreservesExactRepublish(t *testing.
 		t.Fatalf("list intervals: %v", err)
 	}
 	if len(intervals) != 2 {
-		t.Fatalf("intervals = %d, want 2 after stale/exact retries", len(intervals))
+		t.Fatalf("intervals = %d, want 2 after exact and later-clock retries", len(intervals))
 	}
 	if intervals[0].StoppedAt == nil || !intervals[0].StoppedAt.Equal(republishedAt) {
 		t.Errorf("first stopped_at = %v, want exact republish %s", intervals[0].StoppedAt, republishedAt)
@@ -354,6 +354,283 @@ func TestPostgresPublishRejectsStaleEventsAndPreservesExactRepublish(t *testing.
 		VALUES (?, ?, ?, ?, ?)
 	`, uuid.New(), seasonID, examSetID, republishedAt.Add(-time.Hour), republishedAt.Add(time.Hour)).Error; err == nil {
 		t.Fatal("overlapping interval insert succeeded, want database rejection")
+	}
+}
+
+func TestPostgresLifecycleHooksReplayInEventTimeOrder(t *testing.T) {
+	t.Run("stop delivered before publish closes the delayed activation", func(t *testing.T) {
+		db := openLeaderboardIntegrationDB(t)
+		projector := leaderboardusecase.NewProjector(leaderboardrepo.NewPostgresRepository(db))
+		ctx, cancel := context.WithTimeout(t.Context(), postgresRaceBound)
+		defer cancel()
+
+		trackID := uuid.New()
+		examSetID := uuid.New()
+		window := mustBangkokWindow(t, time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC))
+		publishedAt := window.StartsAt.Add(9 * time.Hour)
+		stoppedAt := window.StartsAt.Add(12 * time.Hour)
+		mustExec(t, db, `INSERT INTO exam_tracks (id) VALUES (?)`, trackID)
+		mustExec(t, db, `
+			INSERT INTO exam_sets (id, exam_track_id, status, is_active, published_at)
+			VALUES (?, ?, 'draft', false, ?)
+		`, examSetID, trackID, publishedAt)
+
+		if err := projector.OnExamSetStopped(ctx, examSetID, stoppedAt); err != nil {
+			t.Fatalf("stop before publish: %v", err)
+		}
+		if err := projector.OnExamSetPublished(ctx, trackID, examSetID, publishedAt); err != nil {
+			t.Fatalf("delayed publish: %v", err)
+		}
+
+		assertPostgresIntervals(t, db, examSetID, [][2]time.Time{{publishedAt, stoppedAt}})
+		assertPostgresEligibility(t, leaderboardrepo.NewPostgresRepository(db), examSetID, publishedAt, true)
+		assertPostgresEligibility(t, leaderboardrepo.NewPostgresRepository(db), examSetID, stoppedAt, false)
+		assertPostgresEligibility(t, leaderboardrepo.NewPostgresRepository(db), examSetID, stoppedAt.Add(time.Hour), false)
+	})
+
+	t.Run("republish delivered before earlier stop preserves the closed gap", func(t *testing.T) {
+		db := openLeaderboardIntegrationDB(t)
+		projector := leaderboardusecase.NewProjector(leaderboardrepo.NewPostgresRepository(db))
+		ctx, cancel := context.WithTimeout(t.Context(), postgresRaceBound)
+		defer cancel()
+
+		trackID := uuid.New()
+		examSetID := uuid.New()
+		window := mustBangkokWindow(t, time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC))
+		firstPublishedAt := window.StartsAt.Add(9 * time.Hour)
+		firstStoppedAt := window.StartsAt.Add(12 * time.Hour)
+		republishedAt := window.StartsAt.Add(15 * time.Hour)
+		mustExec(t, db, `INSERT INTO exam_tracks (id) VALUES (?)`, trackID)
+		mustExec(t, db, `
+			INSERT INTO exam_sets (id, exam_track_id, status, is_active, published_at)
+			VALUES (?, ?, 'published', true, ?)
+		`, examSetID, trackID, republishedAt)
+
+		if err := projector.OnExamSetPublished(ctx, trackID, examSetID, firstPublishedAt); err != nil {
+			t.Fatalf("first delayed publish: %v", err)
+		}
+		if err := projector.OnExamSetPublished(ctx, trackID, examSetID, republishedAt); err != nil {
+			t.Fatalf("republish before earlier stop: %v", err)
+		}
+		if err := projector.OnExamSetStopped(ctx, examSetID, firstStoppedAt); err != nil {
+			t.Fatalf("delayed earlier stop: %v", err)
+		}
+
+		assertPostgresIntervals(t, db, examSetID, [][2]time.Time{
+			{firstPublishedAt, firstStoppedAt},
+			{republishedAt, time.Time{}},
+		})
+		assertPostgresEligibility(t, leaderboardrepo.NewPostgresRepository(db), examSetID, firstStoppedAt.Add(time.Hour), false)
+		assertPostgresEligibility(t, leaderboardrepo.NewPostgresRepository(db), examSetID, republishedAt, true)
+	})
+}
+
+func TestPostgresRolloverUsesEveryCurrentPublishedSetAndLatestActivation(t *testing.T) {
+	db := openLeaderboardIntegrationDB(t)
+	repo := leaderboardrepo.NewPostgresRepository(db)
+	ctx, cancel := context.WithTimeout(t.Context(), postgresRaceBound)
+	defer cancel()
+
+	trackID := uuid.New()
+	priorWindow := mustBangkokWindow(t, time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC))
+	window := mustBangkokWindow(t, time.Date(2026, time.August, 15, 12, 0, 0, 0, time.UTC))
+	reactivatedSetID := uuid.New()
+	missedHookSetID := uuid.New()
+	stalePriorSetID := uuid.New()
+	reactivatedAt := window.StartsAt.Add(6 * time.Hour)
+	missedHookAt := priorWindow.StartsAt.Add(24 * time.Hour)
+
+	mustExec(t, db, `INSERT INTO exam_tracks (id) VALUES (?)`, trackID)
+	mustExec(t, db, `
+		INSERT INTO exam_sets (id, exam_track_id, status, is_active, published_at) VALUES
+			(?, ?, 'published', true, ?),
+			(?, ?, 'published', true, ?),
+			(?, ?, 'draft', false, ?)
+	`, reactivatedSetID, trackID, reactivatedAt,
+		missedHookSetID, trackID, missedHookAt,
+		stalePriorSetID, trackID, priorWindow.StartsAt)
+	priorSeasonID := uuid.New()
+	mustExec(t, db, `
+		INSERT INTO leaderboard_seasons (id, exam_track_id, year, month, starts_at, ends_at, status)
+		VALUES (?, ?, ?, ?, ?, ?, 'active')
+	`, priorSeasonID, trackID, priorWindow.Year, priorWindow.Month, priorWindow.StartsAt, priorWindow.EndsAt)
+	mustExec(t, db, `
+		INSERT INTO leaderboard_season_exam_sets (id, season_id, exam_set_id, joined_at) VALUES
+			(?, ?, ?, ?),
+			(?, ?, ?, ?)
+	`, uuid.New(), priorSeasonID, reactivatedSetID, priorWindow.StartsAt,
+		uuid.New(), priorSeasonID, stalePriorSetID, priorWindow.StartsAt)
+
+	season, err := repo.EnsureSeason(ctx, trackID, window)
+	if err != nil {
+		t.Fatalf("EnsureSeason() error = %v", err)
+	}
+	type enrollment struct {
+		ExamSetID uuid.UUID
+		JoinedAt  time.Time
+	}
+	var rows []enrollment
+	if err := db.Raw(`
+		SELECT exam_set_id, joined_at
+		FROM leaderboard_season_exam_sets
+		WHERE season_id = ?
+		ORDER BY exam_set_id
+	`, season.ID).Scan(&rows).Error; err != nil {
+		t.Fatalf("read rollover enrollments: %v", err)
+	}
+	got := make(map[uuid.UUID]time.Time, len(rows))
+	for _, row := range rows {
+		got[row.ExamSetID] = row.JoinedAt
+	}
+	if len(got) != 2 {
+		t.Fatalf("rollover enrollments = %v, want both current published sets only", got)
+	}
+	if !got[reactivatedSetID].Equal(reactivatedAt) {
+		t.Errorf("reactivated joined_at = %s, want latest activation %s", got[reactivatedSetID], reactivatedAt)
+	}
+	if !got[missedHookSetID].Equal(window.StartsAt) {
+		t.Errorf("missed-hook joined_at = %s, want season start %s", got[missedHookSetID], window.StartsAt)
+	}
+	if _, exists := got[stalePriorSetID]; exists {
+		t.Error("draft set inherited a stale prior open interval")
+	}
+}
+
+func TestPostgresProjectionRechecksLifecycleAfterCommittedStatusWait(t *testing.T) {
+	db := openLeaderboardIntegrationDB(t)
+	projector := leaderboardusecase.NewProjector(leaderboardrepo.NewPostgresRepository(db))
+	ctx, cancel := context.WithTimeout(t.Context(), postgresRaceBound)
+	defer cancel()
+
+	trackID := uuid.New()
+	examSetID := uuid.New()
+	userID := uuid.New()
+	attemptID := uuid.New()
+	window := mustBangkokWindow(t, time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC))
+	publishedAt := window.StartsAt.Add(8 * time.Hour)
+	submittedAt := window.StartsAt.Add(10 * time.Hour)
+	stoppedAt := window.StartsAt.Add(12 * time.Hour)
+	seasonID := uuid.New()
+	mustExec(t, db, `INSERT INTO exam_tracks (id) VALUES (?)`, trackID)
+	mustExec(t, db, `INSERT INTO exam_sets (id, exam_track_id, status, is_active, published_at) VALUES (?, ?, 'published', true, ?)`, examSetID, trackID, publishedAt)
+	mustExec(t, db, `INSERT INTO users (id) VALUES (?)`, userID)
+	mustExec(t, db, `INSERT INTO exam_attempts (id, exam_set_id) VALUES (?, ?)`, attemptID, examSetID)
+	mustExec(t, db, `INSERT INTO leaderboard_seasons (id, exam_track_id, year, month, starts_at, ends_at, status) VALUES (?, ?, ?, ?, ?, ?, 'active')`, seasonID, trackID, window.Year, window.Month, window.StartsAt, window.EndsAt)
+	mustExec(t, db, `INSERT INTO leaderboard_season_exam_sets (id, season_id, exam_set_id, joined_at) VALUES (?, ?, ?, ?)`, uuid.New(), seasonID, examSetID, publishedAt)
+
+	statusTx := db.WithContext(ctx).Begin()
+	if statusTx.Error != nil {
+		t.Fatalf("begin status transaction: %v", statusTx.Error)
+	}
+	t.Cleanup(func() { _ = statusTx.Rollback().Error })
+	if err := statusTx.Exec(`UPDATE exam_sets SET status = 'draft', updated_at = ? WHERE id = ?`, stoppedAt, examSetID).Error; err != nil {
+		t.Fatalf("update unpublished status: %v", err)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := projector.ProjectAttempt(ctx, domain.ProjectionInput{
+			AttemptID: attemptID, UserID: userID, ExamSetID: examSetID, ExamTrackID: trackID,
+			TrackCode: "integration-track", SubmittedAt: submittedAt,
+			Candidate: domain.ScoreCandidate{Points: 90, DurationSeconds: 600, AchievedAt: submittedAt},
+		})
+		result <- err
+	}()
+	waitForPostgresLockWait(t, db, "FROM exam_sets", "FOR SHARE")
+	if err := statusTx.Commit().Error; err != nil {
+		t.Fatalf("commit unpublished status: %v", err)
+	}
+
+	if err := <-result; !errors.Is(err, leaderboardrepo.ErrLifecycleStatePending) {
+		t.Fatalf("projection after status wait error = %v, want lifecycle pending", err)
+	}
+	if err := projector.OnExamSetStopped(ctx, examSetID, stoppedAt); err != nil {
+		t.Fatalf("apply stop hook: %v", err)
+	}
+}
+
+func TestPostgresProjectionSerializesRankMutationAcrossSeason(t *testing.T) {
+	db := openLeaderboardIntegrationDB(t)
+	projector := leaderboardusecase.NewProjector(leaderboardrepo.NewPostgresRepository(db))
+	ctx, cancel := context.WithTimeout(t.Context(), postgresRaceBound)
+	defer cancel()
+
+	trackID := uuid.New()
+	firstSetID := uuid.New()
+	secondSetID := uuid.New()
+	firstUserID := uuid.New()
+	secondUserID := uuid.New()
+	firstAttemptID := uuid.New()
+	secondAttemptID := uuid.New()
+	seasonID := uuid.New()
+	window := mustBangkokWindow(t, time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC))
+	submittedAt := window.StartsAt.Add(12 * time.Hour)
+	mustExec(t, db, `INSERT INTO exam_tracks (id) VALUES (?)`, trackID)
+	mustExec(t, db, `INSERT INTO exam_sets (id, exam_track_id, status, is_active, published_at) VALUES (?, ?, 'published', true, ?), (?, ?, 'published', true, ?)`, firstSetID, trackID, window.StartsAt, secondSetID, trackID, window.StartsAt)
+	mustExec(t, db, `INSERT INTO users (id) VALUES (?), (?)`, firstUserID, secondUserID)
+	mustExec(t, db, `INSERT INTO exam_attempts (id, exam_set_id) VALUES (?, ?), (?, ?)`, firstAttemptID, firstSetID, secondAttemptID, secondSetID)
+	mustExec(t, db, `INSERT INTO leaderboard_seasons (id, exam_track_id, year, month, starts_at, ends_at, status) VALUES (?, ?, ?, ?, ?, ?, 'active')`, seasonID, trackID, window.Year, window.Month, window.StartsAt, window.EndsAt)
+	mustExec(t, db, `INSERT INTO leaderboard_season_exam_sets (id, season_id, exam_set_id, joined_at) VALUES (?, ?, ?, ?), (?, ?, ?, ?)`, uuid.New(), seasonID, firstSetID, window.StartsAt, uuid.New(), seasonID, secondSetID, window.StartsAt)
+
+	gateKey := time.Now().UnixNano()
+	gateTx := db.WithContext(ctx).Begin()
+	if gateTx.Error != nil {
+		t.Fatalf("begin projection gate: %v", gateTx.Error)
+	}
+	t.Cleanup(func() { _ = gateTx.Rollback().Error })
+	if err := gateTx.Exec(`SELECT pg_advisory_xact_lock(?)`, gateKey).Error; err != nil {
+		t.Fatalf("acquire projection gate: %v", err)
+	}
+	mustExec(t, db, fmt.Sprintf(`
+		CREATE FUNCTION block_first_projection() RETURNS trigger AS $$
+		BEGIN
+			IF NEW.user_id = '%s'::uuid THEN
+				PERFORM pg_advisory_xact_lock(%d);
+			END IF;
+			RETURN NEW;
+		END;
+		$$ LANGUAGE plpgsql
+	`, firstUserID, gateKey))
+	mustExec(t, db, `
+		CREATE TRIGGER block_first_projection
+		BEFORE INSERT ON leaderboard_scores
+		FOR EACH ROW EXECUTE FUNCTION block_first_projection()
+	`)
+
+	type projectionResult struct {
+		update *domain.ProjectionUpdate
+		err    error
+	}
+	project := func(userID, examSetID, attemptID uuid.UUID, points float64, result chan<- projectionResult) {
+		update, err := projector.ProjectAttempt(ctx, domain.ProjectionInput{
+			AttemptID: attemptID, UserID: userID, ExamSetID: examSetID, ExamTrackID: trackID,
+			TrackCode: "integration-track", SubmittedAt: submittedAt,
+			Candidate: domain.ScoreCandidate{Points: points, DurationSeconds: 600, AchievedAt: submittedAt},
+		})
+		result <- projectionResult{update: update, err: err}
+	}
+	firstResult := make(chan projectionResult, 1)
+	secondResult := make(chan projectionResult, 1)
+	go project(firstUserID, firstSetID, firstAttemptID, 90, firstResult)
+	waitForPostgresLockWait(t, db, "INSERT INTO leaderboard_scores")
+	go project(secondUserID, secondSetID, secondAttemptID, 80, secondResult)
+	waitForPostgresLockWait(t, db, "pg_advisory_xact_lock", "hashtextextended")
+	select {
+	case result := <-secondResult:
+		t.Fatalf("second projection completed before season mutation released: update=%+v err=%v", result.update, result.err)
+	default:
+	}
+
+	if err := gateTx.Rollback().Error; err != nil {
+		t.Fatalf("release projection gate: %v", err)
+	}
+	first := <-firstResult
+	second := <-secondResult
+	if first.err != nil || second.err != nil {
+		t.Fatalf("concurrent projection errors = %v / %v", first.err, second.err)
+	}
+	if second.update.CurrentRank != 2 {
+		t.Errorf("second current rank = %d, want 2 after first projection commits", second.update.CurrentRank)
 	}
 }
 
@@ -734,6 +1011,85 @@ func mustExec(t *testing.T, db *gorm.DB, query string, args ...any) {
 	t.Helper()
 	if err := db.Exec(query, args...).Error; err != nil {
 		t.Fatalf("execute integration fixture SQL: %v", err)
+	}
+}
+
+func assertPostgresIntervals(t *testing.T, db *gorm.DB, examSetID uuid.UUID, want [][2]time.Time) {
+	t.Helper()
+	type intervalRow struct {
+		JoinedAt  time.Time
+		StoppedAt *time.Time
+	}
+	var rows []intervalRow
+	if err := db.Raw(`
+		SELECT joined_at, stopped_at
+		FROM leaderboard_season_exam_sets
+		WHERE exam_set_id = ?
+		ORDER BY joined_at
+	`, examSetID).Scan(&rows).Error; err != nil {
+		t.Fatalf("read intervals: %v", err)
+	}
+	if len(rows) != len(want) {
+		t.Fatalf("intervals = %+v, want %d rows", rows, len(want))
+	}
+	for i, row := range rows {
+		if !row.JoinedAt.Equal(want[i][0]) {
+			t.Errorf("interval %d joined_at = %s, want %s", i, row.JoinedAt, want[i][0])
+		}
+		if want[i][1].IsZero() {
+			if row.StoppedAt != nil {
+				t.Errorf("interval %d stopped_at = %s, want open", i, *row.StoppedAt)
+			}
+		} else if row.StoppedAt == nil || !row.StoppedAt.Equal(want[i][1]) {
+			t.Errorf("interval %d stopped_at = %v, want %s", i, row.StoppedAt, want[i][1])
+		}
+	}
+}
+
+func assertPostgresEligibility(
+	t *testing.T,
+	repo leaderboardrepo.Repository,
+	examSetID uuid.UUID,
+	submittedAt time.Time,
+	want bool,
+) {
+	t.Helper()
+	season, err := repo.GetEligibleSeason(t.Context(), examSetID, submittedAt)
+	if err != nil {
+		t.Fatalf("GetEligibleSeason(%s) error = %v", submittedAt, err)
+	}
+	if (season != nil) != want {
+		t.Errorf("GetEligibleSeason(%s) found = %t, want %t", submittedAt, season != nil, want)
+	}
+}
+
+func waitForPostgresLockWait(t *testing.T, db *gorm.DB, queryFragments ...string) {
+	t.Helper()
+	deadline := time.Now().Add(postgresRaceBound)
+	for {
+		query := `
+			SELECT COUNT(*)
+			FROM pg_stat_activity
+			WHERE pid <> pg_backend_pid()
+				AND datname = current_database()
+				AND wait_event_type = 'Lock'
+		`
+		args := make([]any, 0, len(queryFragments))
+		for _, fragment := range queryFragments {
+			query += " AND query ILIKE ?"
+			args = append(args, "%"+fragment+"%")
+		}
+		var count int
+		if err := db.Raw(query, args...).Scan(&count).Error; err != nil {
+			t.Fatalf("inspect PostgreSQL lock waits: %v", err)
+		}
+		if count > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no PostgreSQL lock wait observed for query fragments %q", queryFragments)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

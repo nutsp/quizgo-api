@@ -154,6 +154,7 @@ func Run(ctx context.Context, db *gorm.DB) error {
 
 	questionCountPerSet := 20
 	allQuestions := buildQuestions(subjectByCode)
+	publishedAt := time.Now().UTC()
 
 	for _, def := range setDefs {
 		setID := uuid.New()
@@ -190,6 +191,7 @@ func Run(ctx context.Context, db *gorm.DB) error {
 			IsFeatured:      def.IsFeatured,
 			IsActive:        true,
 			Status:          "published",
+			PublishedAt:     &publishedAt,
 		}
 		if err := db.WithContext(ctx).Create(&set).Error; err != nil {
 			return fmt.Errorf("seed exam set %s: %w", def.Code, err)

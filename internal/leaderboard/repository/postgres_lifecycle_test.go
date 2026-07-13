@@ -13,20 +13,24 @@ func TestLifecycleSQLSerializesTransitionsAndGuardsEventTime(t *testing.T) {
 	if !strings.Contains(acquireExamSetTransitionLockSQL, "pg_advisory_xact_lock") {
 		t.Error("lifecycle lock SQL does not acquire a transaction advisory lock")
 	}
-	if !strings.Contains(findOpenExamSetIntervalSQL, "FOR UPDATE") {
-		t.Error("open interval lookup does not lock the selected row")
+	if !strings.Contains(findContainingExamSetIntervalSQL, "FOR UPDATE") {
+		t.Error("containing interval lookup does not lock the selected row")
 	}
-	if !strings.Contains(closeOpenExamSetIntervalSQL, "joined_at < ?") {
+	if !strings.Contains(closeContainingExamSetIntervalSQL, "joined_at < ?") {
 		t.Error("join close SQL does not guard against a stale publish event")
 	}
-	if !strings.Contains(stopOpenExamSetIntervalsSQL, "joined_at <= ?") {
-		t.Error("stop SQL does not guard against closing a newer interval")
+	if !strings.Contains(stopContainingExamSetIntervalsSQL, "joined_at <= ?") ||
+		!strings.Contains(stopContainingExamSetIntervalsSQL, "stopped_at > ?") {
+		t.Error("stop SQL does not shorten the interval containing the event time")
 	}
 	if strings.Contains(strings.ToUpper(insertSeasonExamSetIntervalSQL), "ON CONFLICT") {
 		t.Error("join insert uses conflict suppression instead of returning unexpected interval conflicts")
 	}
-	if !strings.Contains(acquireSeasonUserProjectionLockSQL, "pg_advisory_xact_lock") {
-		t.Error("projection SQL does not serialize score and aggregate writes per season/user")
+	if !strings.Contains(insertExamSetStopEventSQL, "ON CONFLICT") {
+		t.Error("stop event SQL is not retry-idempotent")
+	}
+	if !strings.Contains(acquireSeasonProjectionLockSQL, "pg_advisory_xact_lock") {
+		t.Error("projection SQL does not serialize rank mutations for the whole season")
 	}
 	for _, fragment := range []string{"status", "is_active", "published_at", "FOR SHARE"} {
 		if !strings.Contains(findExamSetPublicationStateForShareSQL, fragment) {
@@ -50,51 +54,43 @@ func TestApplicationReconcileRestoresIntervalOverlapConstraint(t *testing.T) {
 	}
 }
 
-func TestEnsureSeasonSQLUsesPriorIntervalsAndExplicitBootstrapState(t *testing.T) {
+func TestEnsureSeasonSQLUsesCurrentPublishedSetsAndAuthoritativeActivation(t *testing.T) {
 	t.Parallel()
 
 	for _, fragment := range []string{
-		"prior_season",
-		"leaderboard_season_exam_sets",
-		"ses.stopped_at IS NULL",
+		"FROM exam_sets",
+		"status = ?",
+		"is_active = true",
 		"ORDER BY es.id",
 	} {
 		if !strings.Contains(listRolloverExamSetCandidatesSQL, fragment) {
 			t.Errorf("rollover enrollment SQL missing %q", fragment)
 		}
 	}
-	for _, fragment := range []string{
-		"FROM exam_sets",
-		"status = ?",
-		"is_active = true",
-		"ORDER BY id",
-	} {
-		if !strings.Contains(listBootstrapExamSetCandidatesSQL, fragment) {
-			t.Errorf("bootstrap enrollment SQL missing %q", fragment)
+	for _, staleFragment := range []string{"prior_season", "leaderboard_season_exam_sets", "ses.stopped_at IS NULL"} {
+		if strings.Contains(listRolloverExamSetCandidatesSQL, staleFragment) {
+			t.Errorf("rollover enrollment SQL still depends on stale prior interval state %q", staleFragment)
 		}
 	}
-	if !strings.Contains(findBootstrapExamSetStateSQL, "published_at") {
-		t.Error("bootstrap enrollment does not derive an effective time from persisted set state")
-	}
-	for name, query := range map[string]string{
-		"rollover":  listRolloverExamSetCandidatesSQL,
-		"bootstrap": listBootstrapExamSetCandidatesSQL,
-	} {
-		if !strings.Contains(query, "id <> ?") {
-			t.Errorf("%s season creation does not exclude the newly published set", name)
+	for _, fragment := range []string{"published_at", "FOR SHARE"} {
+		if !strings.Contains(findRolloverExamSetStateSQL, fragment) {
+			t.Errorf("rollover state SQL missing %q", fragment)
 		}
+	}
+	if !strings.Contains(listRolloverExamSetCandidatesSQL, "id <> ?") {
+		t.Error("season creation does not exclude the newly published set")
 	}
 }
 
 func TestLifecycleSQLUsesAuthoritativePublicationTimeAndRejectsOverlaps(t *testing.T) {
 	t.Parallel()
 
-	if !strings.Contains(findBootstrapExamSetStateSQL, "published_at") {
-		t.Error("bootstrap state does not use authoritative published_at")
+	if !strings.Contains(findRolloverExamSetStateSQL, "published_at") {
+		t.Error("rollover state does not use authoritative published_at")
 	}
 	for _, fragment := range []string{"ORDER BY joined_at DESC", "stopped_at", "FOR UPDATE"} {
-		if !strings.Contains(findLatestExamSetIntervalSQL, fragment) {
-			t.Errorf("latest interval SQL missing %q", fragment)
+		if !strings.Contains(findContainingExamSetIntervalSQL, fragment) {
+			t.Errorf("containing interval SQL missing %q", fragment)
 		}
 	}
 
@@ -106,6 +102,7 @@ func TestLifecycleSQLUsesAuthoritativePublicationTimeAndRejectsOverlaps(t *testi
 	for _, fragment := range []string{
 		"ADD COLUMN IF NOT EXISTS published_at",
 		"status = 'published'",
+		"CREATE TABLE leaderboard_exam_set_stop_events",
 		"EXCLUDE USING gist",
 		"tstzrange(joined_at, stopped_at, '[)') WITH &&",
 	} {
@@ -115,9 +112,9 @@ func TestLifecycleSQLUsesAuthoritativePublicationTimeAndRejectsOverlaps(t *testi
 	}
 }
 
-func TestProjectionTransactionUsesRepeatableReadSnapshot(t *testing.T) {
+func TestProjectionTransactionUsesFreshReadCommittedState(t *testing.T) {
 	t.Parallel()
-	if projectionTxOptions.Isolation != sql.LevelRepeatableRead {
-		t.Fatalf("projection isolation = %v, want repeatable read", projectionTxOptions.Isolation)
+	if projectionTxOptions.Isolation != sql.LevelReadCommitted {
+		t.Fatalf("projection isolation = %v, want read committed", projectionTxOptions.Isolation)
 	}
 }

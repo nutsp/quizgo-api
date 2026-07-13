@@ -79,6 +79,7 @@ func TestLeaderboardModelsDeclareMigrationForeignKeys(t *testing.T) {
 		onDelete   string
 	}{
 		{"season exam track", &SeasonModel{}, "ExamTrack", "leaderboard_seasons_exam_track_id_fkey", "exam_tracks", "NO ACTION"},
+		{"exam set stop event exam set", &ExamSetStopEventModel{}, "ExamSet", "leaderboard_exam_set_stop_events_exam_set_id_fkey", "exam_sets", "NO ACTION"},
 		{"season exam set season", &SeasonExamSetModel{}, "Season", "leaderboard_season_exam_sets_season_id_fkey", "leaderboard_seasons", "CASCADE"},
 		{"season exam set exam set", &SeasonExamSetModel{}, "ExamSet", "leaderboard_season_exam_sets_exam_set_id_fkey", "exam_sets", "NO ACTION"},
 		{"score season", &ScoreModel{}, "Season", "leaderboard_scores_season_id_fkey", "leaderboard_seasons", "CASCADE"},

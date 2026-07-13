@@ -86,6 +86,8 @@ func (p *Projector) ProjectAttempt(ctx context.Context, input domain.ProjectionI
 	return result, nil
 }
 
+// OnExamSetPublished consumes the activation event time persisted with the
+// publication transition. Retries must reuse that time rather than time.Now.
 func (p *Projector) OnExamSetPublished(ctx context.Context, examTrackID, examSetID uuid.UUID, publishedAt time.Time) error {
 	window, err := domain.BangkokSeasonWindow(publishedAt)
 	if err != nil {

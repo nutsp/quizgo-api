@@ -27,6 +27,16 @@ type SeasonModel struct {
 
 func (SeasonModel) TableName() string { return "leaderboard_seasons" }
 
+type ExamSetStopEventModel struct {
+	ExamSetID uuid.UUID `gorm:"type:uuid;primaryKey"`
+	StoppedAt time.Time `gorm:"primaryKey"`
+	CreatedAt time.Time
+
+	ExamSet examsetrepo.ExamSetModel `gorm:"foreignKey:ExamSetID;references:ID;constraint:leaderboard_exam_set_stop_events_exam_set_id_fkey,OnDelete:NO ACTION"`
+}
+
+func (ExamSetStopEventModel) TableName() string { return "leaderboard_exam_set_stop_events" }
+
 type SeasonExamSetModel struct {
 	ID        uuid.UUID  `gorm:"type:uuid;primaryKey"`
 	SeasonID  uuid.UUID  `gorm:"type:uuid;not null;uniqueIndex:leaderboard_season_exam_sets_interval_key,priority:1;uniqueIndex:leaderboard_season_exam_sets_one_open_idx,priority:1,where:stopped_at IS NULL"`
