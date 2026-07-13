@@ -58,12 +58,21 @@ type lifecycleSetStore struct {
 	deleteWrites     int
 	softDelete       bool
 	lifecycleAtWrite int
-	pendingStops     []examsetrepo.LifecycleStopEvent
+	pendingEvents    []examsetrepo.LifecycleEvent
 }
 
-func (s *lifecycleSetStore) recordStop(wasEligible bool, stoppedAt time.Time) {
-	if wasEligible {
-		s.pendingStops = append(s.pendingStops, examsetrepo.LifecycleStopEvent{ExamSetID: s.current.ID, StoppedAt: stoppedAt})
+func (s *lifecycleSetStore) recordTransition(wasEligible bool, examSetID, trackID uuid.UUID, at time.Time) {
+	isEligible := isLeaderboardEligible(s.current)
+	if !wasEligible && isEligible {
+		s.pendingEvents = append(s.pendingEvents, examsetrepo.LifecycleEvent{
+			ExamSetID: examSetID, ExamTrackID: trackID,
+			EventType: examsetrepo.LifecycleEventPublished, EventAt: *s.current.PublishedAt,
+		})
+	}
+	if wasEligible && !isEligible {
+		s.pendingEvents = append(s.pendingEvents, examsetrepo.LifecycleEvent{
+			ExamSetID: examSetID, EventType: examsetrepo.LifecycleEventStopped, EventAt: at,
+		})
 	}
 }
 
@@ -77,7 +86,7 @@ func (s *lifecycleSetStore) UpdateStatus(_ context.Context, _ uuid.UUID, status 
 		publishedAt := s.publishAt
 		s.current.PublishedAt = &publishedAt
 	}
-	s.recordStop(wasEligible && !isLeaderboardEligible(s.current), s.transitionAt)
+	s.recordTransition(wasEligible, s.current.ID, s.current.ExamTrackID, s.transitionAt)
 	return nil
 }
 
@@ -90,7 +99,7 @@ func (s *lifecycleSetStore) UpdateIsActive(_ context.Context, _ uuid.UUID, activ
 		publishedAt := s.publishAt
 		s.current.PublishedAt = &publishedAt
 	}
-	s.recordStop(wasEligible && !isLeaderboardEligible(s.current), s.transitionAt)
+	s.recordTransition(wasEligible, s.current.ID, s.current.ExamTrackID, s.transitionAt)
 	return nil
 }
 
@@ -107,66 +116,53 @@ func (s *lifecycleSetStore) Update(_ context.Context, set *domain.ExamSet) error
 		publishedAt := s.publishAt
 		s.current.PublishedAt = &publishedAt
 	}
-	s.recordStop(wasEligible && !isLeaderboardEligible(s.current), s.transitionAt)
+	s.recordTransition(wasEligible, s.current.ID, s.current.ExamTrackID, s.transitionAt)
 	return nil
 }
 
 func (s *lifecycleSetStore) Delete(_ context.Context, _ uuid.UUID) (bool, error) {
 	s.deleteWrites++
 	wasEligible := isLeaderboardEligible(s.current)
+	examSetID := s.current.ID
+	trackID := s.current.ExamTrackID
 	if !s.softDelete {
 		if wasEligible {
-			s.pendingStops = append(s.pendingStops, examsetrepo.LifecycleStopEvent{ExamSetID: s.current.ID, StoppedAt: s.transitionAt})
+			s.pendingEvents = append(s.pendingEvents, examsetrepo.LifecycleEvent{
+				ExamSetID: examSetID, EventType: examsetrepo.LifecycleEventStopped, EventAt: s.transitionAt,
+			})
 		}
 		s.current = nil
 		return false, nil
 	}
 	s.current.IsActive = false
 	s.current.UpdatedAt = s.transitionAt
-	s.recordStop(wasEligible, s.transitionAt)
+	s.recordTransition(wasEligible, examSetID, trackID, s.transitionAt)
 	return true, nil
 }
 
-func (s *lifecycleSetStore) ListPendingLifecycleStops(_ context.Context, examSetID uuid.UUID) ([]examsetrepo.LifecycleStopEvent, error) {
-	events := make([]examsetrepo.LifecycleStopEvent, 0, len(s.pendingStops))
-	for _, event := range s.pendingStops {
-		if event.ExamSetID == examSetID {
-			events = append(events, event)
-		}
-	}
-	return events, nil
-}
-
-func (s *lifecycleSetStore) MarkLifecycleStopDelivered(_ context.Context, examSetID uuid.UUID, stoppedAt time.Time) error {
-	remaining := s.pendingStops[:0]
-	for _, event := range s.pendingStops {
-		if event.ExamSetID != examSetID || !event.StoppedAt.Equal(stoppedAt) {
+func (s *lifecycleSetStore) MarkLifecycleEventDelivered(_ context.Context, delivered examsetrepo.LifecycleEvent, _ time.Time) (bool, error) {
+	remaining := s.pendingEvents[:0]
+	for _, event := range s.pendingEvents {
+		if event.ExamSetID != delivered.ExamSetID || event.EventType != delivered.EventType || !event.EventAt.Equal(delivered.EventAt) {
 			remaining = append(remaining, event)
 		}
 	}
-	s.pendingStops = remaining
-	return nil
+	s.pendingEvents = remaining
+	return true, nil
 }
 
-func (s *lifecycleSetStore) ClaimLifecycleStops(_ context.Context, request examsetrepo.LifecycleClaimRequest) ([]examsetrepo.LifecycleStopEvent, error) {
-	events := make([]examsetrepo.LifecycleStopEvent, 0, len(s.pendingStops))
-	for i := range s.pendingStops {
-		if request.ExamSetID == nil || s.pendingStops[i].ExamSetID == *request.ExamSetID {
-			s.pendingStops[i].ClaimToken = request.Token
-			events = append(events, s.pendingStops[i])
+func (s *lifecycleSetStore) ClaimLifecycleEvents(_ context.Context, request examsetrepo.LifecycleClaimRequest) ([]examsetrepo.LifecycleEvent, error) {
+	events := make([]examsetrepo.LifecycleEvent, 0, len(s.pendingEvents))
+	for i := range s.pendingEvents {
+		if request.ExamSetID == nil || s.pendingEvents[i].ExamSetID == *request.ExamSetID {
+			s.pendingEvents[i].ClaimToken = request.Token
+			events = append(events, s.pendingEvents[i])
 		}
 	}
 	return events, nil
 }
 
-func (s *lifecycleSetStore) MarkLifecycleStopClaimDelivered(_ context.Context, examSetID uuid.UUID, stoppedAt time.Time, _ uuid.UUID, _ time.Time) (bool, error) {
-	if err := s.MarkLifecycleStopDelivered(context.Background(), examSetID, stoppedAt); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func (s *lifecycleSetStore) RetryLifecycleStop(_ context.Context, _ uuid.UUID, _ time.Time, _ uuid.UUID, _ time.Time, _ error) (bool, error) {
+func (s *lifecycleSetStore) RetryLifecycleEvent(_ context.Context, _ examsetrepo.LifecycleEvent, _ time.Time, _ error) (bool, error) {
 	return true, nil
 }
 

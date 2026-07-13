@@ -904,6 +904,7 @@ func openLeaderboardIntegrationDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open PostgreSQL admin connection: %v", err)
 	}
+	ensureLeaderboardTestExtension(t, admin)
 	schemaName := "leaderboard_task3_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	if err := admin.Exec("CREATE SCHEMA " + schemaName).Error; err != nil {
 		t.Fatalf("create integration schema: %v", err)
@@ -975,16 +976,46 @@ func openLeaderboardIntegrationDB(t *testing.T) *gorm.DB {
 	if !ok {
 		t.Fatal("locate integration test file")
 	}
-	migrationPath := filepath.Join(filepath.Dir(currentFile), "../../../migrations/000023_monthly_leaderboards.up.sql")
-	migration, err := os.ReadFile(migrationPath)
+	migrationTx, err := testSQLDB.BeginTx(t.Context(), nil)
 	if err != nil {
-		t.Fatalf("read migration 000023: %v", err)
+		t.Fatalf("begin migration fixture transaction: %v", err)
 	}
-	if _, err := testSQLDB.ExecContext(t.Context(), string(migration)); err != nil {
-		t.Fatalf("apply migration 000023: %v", err)
+	defer migrationTx.Rollback()
+	if _, err := migrationTx.ExecContext(t.Context(), `SELECT pg_advisory_xact_lock(230026)`); err != nil {
+		t.Fatalf("lock migration fixture: %v", err)
+	}
+	for _, migrationName := range []string{
+		"000023_monthly_leaderboards",
+		"000024_exam_set_lifecycle_stop_events",
+		"000025_leaderboard_projection_dispatch",
+		"000026_exam_set_lifecycle_events",
+	} {
+		migrationPath := filepath.Join(filepath.Dir(currentFile), "../../../migrations/"+migrationName+".up.sql")
+		migration, err := os.ReadFile(migrationPath)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", migrationName, err)
+		}
+		if _, err := migrationTx.ExecContext(t.Context(), string(migration)); err != nil {
+			t.Fatalf("apply migration %s: %v", migrationName, err)
+		}
+	}
+	if err := migrationTx.Commit(); err != nil {
+		t.Fatalf("commit migration fixture transaction: %v", err)
 	}
 
 	return testDB
+}
+
+func ensureLeaderboardTestExtension(t *testing.T, admin *gorm.DB) {
+	t.Helper()
+	if err := admin.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(`SELECT pg_advisory_xact_lock(230026)`).Error; err != nil {
+			return err
+		}
+		return tx.Exec(`CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public`).Error
+	}); err != nil {
+		t.Fatalf("install stable test extension: %v", err)
+	}
 }
 
 func dsnWithSearchPath(dsn, schemaName string) string {

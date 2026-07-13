@@ -132,11 +132,15 @@ type ChoiceDetail struct {
 }
 
 type postgresRepository struct {
-	db *gorm.DB
+	db            *gorm.DB
+	hasTimingMode bool
 }
 
 func NewPostgresRepository(db *gorm.DB) Repository {
-	return &postgresRepository{db: db}
+	return &postgresRepository{
+		db:            db,
+		hasTimingMode: db.Migrator().HasColumn("exam_attempts", "timing_mode"),
+	}
 }
 
 func (r *postgresRepository) CreateAttemptWithAnswers(ctx context.Context, attempt *domain.ExamAttempt, answers []domain.ExamAnswer) error {
@@ -293,8 +297,12 @@ func (r *postgresRepository) MarkAttemptTimeout(ctx context.Context, attemptID u
 	changed := false
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		now := time.Now().UTC()
-		result := tx.Model(&ExamAttemptModel{}).
-			Where("id = ? AND status = ?", attemptID, domain.StatusInProgress).
+		query := tx.Model(&ExamAttemptModel{}).
+			Where("id = ? AND status = ?", attemptID, domain.StatusInProgress)
+		if r.hasTimingMode {
+			query = query.Where("COALESCE(timing_mode, 'countdown') <> 'elapsed'")
+		}
+		result := query.
 			Updates(map[string]any{
 				"status":       domain.StatusTimeout,
 				"submitted_at": now,
@@ -361,7 +369,7 @@ func (r *postgresRepository) ClearAnswer(ctx context.Context, attemptID uuid.UUI
 		}).Error
 }
 
-func (r *postgresRepository) UpdateAttemptSubmitted(ctx context.Context, attempt *domain.ExamAttempt, answers []domain.ExamAnswer, allowAfterDeadline bool) (AttemptTransition, error) {
+func (r *postgresRepository) UpdateAttemptSubmitted(ctx context.Context, attempt *domain.ExamAttempt, answers []domain.ExamAnswer, _ bool) (AttemptTransition, error) {
 	transition := AttemptTransitionUnchanged
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if attempt.SubmittedAt == nil {
@@ -369,8 +377,14 @@ func (r *postgresRepository) UpdateAttemptSubmitted(ctx context.Context, attempt
 		}
 		model := toAttemptModel(attempt)
 		effectiveTransitionAt := gorm.Expr("GREATEST(?::timestamptz, CURRENT_TIMESTAMP)", *attempt.SubmittedAt)
-		result := tx.Model(&ExamAttemptModel{}).
-			Where("id = ? AND status = ? AND (? OR expires_at > GREATEST(?::timestamptz, CURRENT_TIMESTAMP))", attempt.ID, domain.StatusInProgress, allowAfterDeadline, *attempt.SubmittedAt).
+		query := tx.Model(&ExamAttemptModel{}).
+			Where("id = ? AND status = ?", attempt.ID, domain.StatusInProgress)
+		if r.hasTimingMode {
+			query = query.Where("(COALESCE(timing_mode, 'countdown') = 'elapsed' OR expires_at > GREATEST(?::timestamptz, CURRENT_TIMESTAMP))", *attempt.SubmittedAt)
+		} else {
+			query = query.Where("expires_at > GREATEST(?::timestamptz, CURRENT_TIMESTAMP)", *attempt.SubmittedAt)
+		}
+		result := query.
 			Updates(map[string]any{
 				"status":           domain.StatusSubmitted,
 				"submitted_at":     effectiveTransitionAt,
@@ -386,9 +400,13 @@ func (r *postgresRepository) UpdateAttemptSubmitted(ctx context.Context, attempt
 		if result.Error != nil {
 			return result.Error
 		}
-		if result.RowsAffected == 0 && !allowAfterDeadline {
-			result = tx.Model(&ExamAttemptModel{}).
-				Where("id = ? AND status = ? AND expires_at <= GREATEST(?::timestamptz, CURRENT_TIMESTAMP)", attempt.ID, domain.StatusInProgress, *attempt.SubmittedAt).
+		if result.RowsAffected == 0 {
+			timeoutQuery := tx.Model(&ExamAttemptModel{}).
+				Where("id = ? AND status = ? AND expires_at <= GREATEST(?::timestamptz, CURRENT_TIMESTAMP)", attempt.ID, domain.StatusInProgress, *attempt.SubmittedAt)
+			if r.hasTimingMode {
+				timeoutQuery = timeoutQuery.Where("COALESCE(timing_mode, 'countdown') <> 'elapsed'")
+			}
+			result = timeoutQuery.
 				Updates(map[string]any{
 					"status":       domain.StatusTimeout,
 					"submitted_at": effectiveTransitionAt,

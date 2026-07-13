@@ -95,7 +95,7 @@ func main() {
 			&auditrepo.AuditLogModel{},
 			&trackrepo.ExamTrackModel{},
 			&examsetrepo.ExamSetModel{},
-			&examsetrepo.LifecycleStopEventModel{},
+			&examsetrepo.LifecycleEventModel{},
 			&questionrepo.SubjectModel{},
 			&questionrepo.QuestionModel{},
 			&questionrepo.ChoiceModel{},

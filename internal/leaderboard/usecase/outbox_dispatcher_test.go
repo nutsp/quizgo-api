@@ -54,25 +54,31 @@ func (f *dispatcherAttemptOutbox) RetryProjection(_ context.Context, attemptID, 
 }
 
 type dispatcherLifecycleOutbox struct {
+	events []examsetrepo.LifecycleEvent
 }
 
-func (dispatcherLifecycleOutbox) ClaimLifecycleStops(context.Context, examsetrepo.LifecycleClaimRequest) ([]examsetrepo.LifecycleStopEvent, error) {
-	return nil, nil
+func (f dispatcherLifecycleOutbox) ClaimLifecycleEvents(_ context.Context, request examsetrepo.LifecycleClaimRequest) ([]examsetrepo.LifecycleEvent, error) {
+	for i := range f.events {
+		f.events[i].ClaimToken = request.Token
+	}
+	return f.events, nil
 }
 
-func (dispatcherLifecycleOutbox) MarkLifecycleStopClaimDelivered(context.Context, uuid.UUID, time.Time, uuid.UUID, time.Time) (bool, error) {
-	return false, nil
+func (dispatcherLifecycleOutbox) MarkLifecycleEventDelivered(context.Context, examsetrepo.LifecycleEvent, time.Time) (bool, error) {
+	return true, nil
 }
 
-func (dispatcherLifecycleOutbox) RetryLifecycleStop(context.Context, uuid.UUID, time.Time, uuid.UUID, time.Time, error) (bool, error) {
-	return false, nil
+func (dispatcherLifecycleOutbox) RetryLifecycleEvent(context.Context, examsetrepo.LifecycleEvent, time.Time, error) (bool, error) {
+	return true, nil
 }
 
 type dispatcherProjector struct {
-	mu       sync.Mutex
-	projects int
-	failures int
-	err      error
+	mu        sync.Mutex
+	projects  int
+	publishes int
+	stops     int
+	failures  int
+	err       error
 }
 
 func (p *dispatcherProjector) ProjectAttempt(context.Context, domain.ProjectionInput) (*domain.ProjectionUpdate, error) {
@@ -83,6 +89,16 @@ func (p *dispatcherProjector) ProjectAttempt(context.Context, domain.ProjectionI
 }
 
 func (p *dispatcherProjector) OnExamSetStopped(context.Context, uuid.UUID, time.Time) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.stops++
+	return nil
+}
+
+func (p *dispatcherProjector) OnExamSetPublished(context.Context, uuid.UUID, uuid.UUID, time.Time) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.publishes++
 	return nil
 }
 
@@ -154,6 +170,25 @@ func TestOutboxDispatcherRunStopsOnContextCancellation(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("dispatcher did not stop after cancellation")
+	}
+}
+
+func TestOutboxDispatcherDeliversPublishAndStopLifecycleTypes(t *testing.T) {
+	examSetID := uuid.New()
+	trackID := uuid.New()
+	base := time.Date(2026, 7, 14, 7, 0, 0, 0, time.UTC)
+	lifecycle := dispatcherLifecycleOutbox{events: []examsetrepo.LifecycleEvent{
+		{ExamSetID: examSetID, ExamTrackID: trackID, EventType: examsetrepo.LifecycleEventPublished, EventAt: base},
+		{ExamSetID: examSetID, EventType: examsetrepo.LifecycleEventStopped, EventAt: base.Add(time.Hour)},
+	}}
+	projector := &dispatcherProjector{}
+	dispatcher := NewOutboxDispatcher(&dispatcherAttemptOutbox{}, lifecycle, projector, OutboxDispatcherConfig{})
+
+	if _, err := dispatcher.DrainOnce(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if projector.publishes != 1 || projector.stops != 1 {
+		t.Fatalf("publish/stop calls = %d/%d, want 1/1", projector.publishes, projector.stops)
 	}
 }
 

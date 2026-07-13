@@ -34,7 +34,18 @@ type ProjectionOutboxModel struct {
 	LastError        *string
 	CreatedAt        time.Time `gorm:"not null;default:now();index:leaderboard_attempt_projection_outbox_pending_idx,priority:2,where:delivered_at IS NULL"`
 	UpdatedAt        time.Time `gorm:"not null;default:now()"`
+
+	Attempt   *ExamAttemptModel     `gorm:"foreignKey:AttemptID;references:ID;constraint:OnUpdate:NO ACTION,OnDelete:NO ACTION"`
+	User      *ProjectionOutboxUser `gorm:"foreignKey:UserID;references:ID;constraint:OnUpdate:NO ACTION,OnDelete:NO ACTION"`
+	ExamSet   *ExamSetJoin          `gorm:"foreignKey:ExamSetID;references:ID;constraint:OnUpdate:NO ACTION,OnDelete:NO ACTION"`
+	ExamTrack *ExamTrackJoin        `gorm:"foreignKey:ExamTrackID;references:ID;constraint:OnUpdate:NO ACTION,OnDelete:NO ACTION"`
 }
+
+type ProjectionOutboxUser struct {
+	ID uuid.UUID `gorm:"type:uuid;primaryKey"`
+}
+
+func (ProjectionOutboxUser) TableName() string { return "users" }
 
 type ProjectionOutboxEvent struct {
 	AttemptID       uuid.UUID

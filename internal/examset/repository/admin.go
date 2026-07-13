@@ -35,7 +35,7 @@ var examSetSortColumns = map[string]string{
 }
 
 type AdminRepository interface {
-	LifecycleStopOutbox
+	LifecycleOutbox
 	List(ctx context.Context, filter AdminFilter) (pagination.PaginatedList[domain.ExamSet], error)
 	Create(ctx context.Context, set *domain.ExamSet) error
 	Update(ctx context.Context, set *domain.ExamSet) error
@@ -43,8 +43,6 @@ type AdminRepository interface {
 	UpdateTotalQuestions(ctx context.Context, examSetID uuid.UUID, count int) error
 	UpdateStatus(ctx context.Context, id uuid.UUID, status string, isActive bool) error
 	UpdateIsActive(ctx context.Context, id uuid.UUID, isActive bool) error
-	ListPendingLifecycleStops(ctx context.Context, examSetID uuid.UUID) ([]LifecycleStopEvent, error)
-	MarkLifecycleStopDelivered(ctx context.Context, examSetID uuid.UUID, stoppedAt time.Time) error
 }
 
 type adminRepository struct {
@@ -184,10 +182,7 @@ func (r *adminRepository) Update(ctx context.Context, set *domain.ExamSet) error
 		if err := tx.Model(&ExamSetModel{}).Where("id = ?", set.ID).Updates(updates).Error; err != nil {
 			return err
 		}
-		if isEligibleLifecycleState(before.Status, before.IsActive) && !isEligibleLifecycleState(before.Status, set.IsActive) {
-			return insertLifecycleStopEvent(tx, set.ID, set.UpdatedAt)
-		}
-		return nil
+		return insertLifecycleTransitionEvent(tx, before, set.ExamTrackID, before.Status, set.IsActive, set.UpdatedAt)
 	})
 }
 
@@ -204,13 +199,13 @@ func (r *adminRepository) Delete(ctx context.Context, id uuid.UUID) (bool, error
 				OR EXISTS (SELECT 1 FROM leaderboard_season_exam_sets WHERE exam_set_id = ?)
 				OR EXISTS (SELECT 1 FROM leaderboard_scores WHERE exam_set_id = ?)
 				OR EXISTS (SELECT 1 FROM leaderboard_exam_set_stop_events WHERE exam_set_id = ?)
-				OR EXISTS (SELECT 1 FROM exam_set_lifecycle_stop_events WHERE exam_set_id = ?)
+				OR EXISTS (SELECT 1 FROM exam_set_lifecycle_events WHERE exam_set_id = ?)
 		`, id, id, id, id, id).Scan(&hasImmutableReferences).Error; err != nil {
 			return err
 		}
 		transitionAt := time.Now().UTC()
 		if isEligibleLifecycleState(before.Status, before.IsActive) {
-			if err := insertLifecycleStopEvent(tx, id, transitionAt); err != nil {
+			if err := insertLifecycleTransitionEvent(tx, before, before.ExamTrackID, domain.StatusArchived, false, transitionAt); err != nil {
 				return err
 			}
 		}
@@ -255,10 +250,7 @@ func (r *adminRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status
 		if err := tx.Model(&ExamSetModel{}).Where("id = ?", id).Updates(updates).Error; err != nil {
 			return err
 		}
-		if isEligibleLifecycleState(before.Status, before.IsActive) && !isEligibleLifecycleState(status, isActive) {
-			return insertLifecycleStopEvent(tx, id, now)
-		}
-		return nil
+		return insertLifecycleTransitionEvent(tx, before, before.ExamTrackID, status, isActive, now)
 	})
 }
 
@@ -279,10 +271,7 @@ func (r *adminRepository) UpdateIsActive(ctx context.Context, id uuid.UUID, isAc
 		if err := tx.Model(&ExamSetModel{}).Where("id = ?", id).Updates(updates).Error; err != nil {
 			return err
 		}
-		if isEligibleLifecycleState(before.Status, before.IsActive) && !isEligibleLifecycleState(before.Status, isActive) {
-			return insertLifecycleStopEvent(tx, id, now)
-		}
-		return nil
+		return insertLifecycleTransitionEvent(tx, before, before.ExamTrackID, before.Status, isActive, now)
 	})
 }
 

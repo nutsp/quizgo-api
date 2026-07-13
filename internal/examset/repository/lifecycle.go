@@ -10,22 +10,35 @@ import (
 	"virtual-exam-api/internal/examset/domain"
 )
 
-type LifecycleStopEvent struct {
-	ExamSetID  uuid.UUID
-	StoppedAt  time.Time
-	ClaimToken uuid.UUID
+type LifecycleEventType string
+
+const (
+	LifecycleEventPublished LifecycleEventType = "published"
+	LifecycleEventStopped   LifecycleEventType = "stopped"
+)
+
+type LifecycleEvent struct {
+	ExamSetID   uuid.UUID
+	ExamTrackID uuid.UUID
+	EventType   LifecycleEventType
+	EventAt     time.Time
+	ClaimToken  uuid.UUID
 }
 
-type LifecycleStopEventModel struct {
-	ExamSetID        uuid.UUID `gorm:"type:uuid;primaryKey"`
-	StoppedAt        time.Time `gorm:"primaryKey"`
+type LifecycleEventModel struct {
+	ExamSetID        uuid.UUID          `gorm:"type:uuid;primaryKey"`
+	EventType        LifecycleEventType `gorm:"type:varchar(20);primaryKey"`
+	EventAt          time.Time          `gorm:"primaryKey"`
+	ExamTrackID      *uuid.UUID         `gorm:"type:uuid"`
 	DeliveredAt      *time.Time
 	ClaimToken       *uuid.UUID
 	ClaimedAt        *time.Time
 	DeliveryAttempts int       `gorm:"not null;default:0"`
-	NextAttemptAt    time.Time `gorm:"not null;default:now();index:exam_set_lifecycle_stop_events_pending_idx,priority:1,where:delivered_at IS NULL"`
+	NextAttemptAt    time.Time `gorm:"not null;default:now();index:exam_set_lifecycle_events_pending_idx,priority:1,where:delivered_at IS NULL"`
 	LastError        *string
-	CreatedAt        time.Time `gorm:"not null;default:now();index:exam_set_lifecycle_stop_events_pending_idx,priority:2,where:delivered_at IS NULL"`
+	CreatedAt        time.Time `gorm:"not null;default:now();index:exam_set_lifecycle_events_pending_idx,priority:2,where:delivered_at IS NULL"`
+
+	ExamTrack *ExamTrackJoin `gorm:"foreignKey:ExamTrackID;references:ID;constraint:OnUpdate:NO ACTION,OnDelete:NO ACTION"`
 }
 
 type LifecycleClaimRequest struct {
@@ -36,25 +49,27 @@ type LifecycleClaimRequest struct {
 	LeaseBefore time.Time
 }
 
-type LifecycleStopOutbox interface {
-	ClaimLifecycleStops(context.Context, LifecycleClaimRequest) ([]LifecycleStopEvent, error)
-	MarkLifecycleStopClaimDelivered(context.Context, uuid.UUID, time.Time, uuid.UUID, time.Time) (bool, error)
-	RetryLifecycleStop(context.Context, uuid.UUID, time.Time, uuid.UUID, time.Time, error) (bool, error)
+type LifecycleOutbox interface {
+	ClaimLifecycleEvents(context.Context, LifecycleClaimRequest) ([]LifecycleEvent, error)
+	MarkLifecycleEventDelivered(context.Context, LifecycleEvent, time.Time) (bool, error)
+	RetryLifecycleEvent(context.Context, LifecycleEvent, time.Time, error) (bool, error)
 }
 
-func (LifecycleStopEventModel) TableName() string { return "exam_set_lifecycle_stop_events" }
+func (LifecycleEventModel) TableName() string { return "exam_set_lifecycle_events" }
 
 type examSetLifecycleState struct {
-	ID       uuid.UUID
-	Status   string
-	IsActive bool
+	ID          uuid.UUID
+	ExamTrackID uuid.UUID
+	Status      string
+	IsActive    bool
+	PublishedAt *time.Time
 }
 
 func lockExamSetLifecycleState(tx *gorm.DB, id uuid.UUID) (examSetLifecycleState, error) {
 	var state examSetLifecycleState
 	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Model(&ExamSetModel{}).
-		Select("id", "status", "is_active").
+		Select("id", "exam_track_id", "status", "is_active", "published_at").
 		Where("id = ?", id).
 		Take(&state).Error
 	return state, err
@@ -64,36 +79,37 @@ func isEligibleLifecycleState(status string, active bool) bool {
 	return status == domain.StatusPublished && active
 }
 
-func insertLifecycleStopEvent(tx *gorm.DB, examSetID uuid.UUID, stoppedAt time.Time) error {
-	return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&LifecycleStopEventModel{
-		ExamSetID: examSetID,
-		StoppedAt: stoppedAt,
-	}).Error
-}
-
-func (r *adminRepository) ListPendingLifecycleStops(ctx context.Context, examSetID uuid.UUID) ([]LifecycleStopEvent, error) {
-	var models []LifecycleStopEventModel
-	if err := r.db.WithContext(ctx).
-		Where("exam_set_id = ? AND delivered_at IS NULL", examSetID).
-		Order("stopped_at ASC").
-		Find(&models).Error; err != nil {
-		return nil, err
+func insertLifecycleEvent(tx *gorm.DB, event LifecycleEvent) error {
+	model := LifecycleEventModel{
+		ExamSetID: event.ExamSetID,
+		EventType: event.EventType,
+		EventAt:   event.EventAt,
 	}
-	events := make([]LifecycleStopEvent, len(models))
-	for i := range models {
-		events[i] = LifecycleStopEvent{ExamSetID: models[i].ExamSetID, StoppedAt: models[i].StoppedAt}
+	if event.ExamTrackID != uuid.Nil {
+		model.ExamTrackID = &event.ExamTrackID
 	}
-	return events, nil
+	return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&model).Error
 }
 
-func (r *adminRepository) MarkLifecycleStopDelivered(ctx context.Context, examSetID uuid.UUID, stoppedAt time.Time) error {
-	deliveredAt := time.Now().UTC()
-	return r.db.WithContext(ctx).Model(&LifecycleStopEventModel{}).
-		Where("exam_set_id = ? AND stopped_at = ? AND delivered_at IS NULL", examSetID, stoppedAt).
-		Update("delivered_at", deliveredAt).Error
+func insertLifecycleTransitionEvent(tx *gorm.DB, before examSetLifecycleState, targetTrackID uuid.UUID, targetStatus string, targetActive bool, transitionAt time.Time) error {
+	wasEligible := isEligibleLifecycleState(before.Status, before.IsActive)
+	isEligible := isEligibleLifecycleState(targetStatus, targetActive)
+	switch {
+	case !wasEligible && isEligible:
+		return insertLifecycleEvent(tx, LifecycleEvent{
+			ExamSetID: before.ID, ExamTrackID: targetTrackID,
+			EventType: LifecycleEventPublished, EventAt: transitionAt,
+		})
+	case wasEligible && !isEligible:
+		return insertLifecycleEvent(tx, LifecycleEvent{
+			ExamSetID: before.ID, EventType: LifecycleEventStopped, EventAt: transitionAt,
+		})
+	default:
+		return nil
+	}
 }
 
-func (r *adminRepository) ClaimLifecycleStops(ctx context.Context, request LifecycleClaimRequest) ([]LifecycleStopEvent, error) {
+func (r *adminRepository) ClaimLifecycleEvents(ctx context.Context, request LifecycleClaimRequest) ([]LifecycleEvent, error) {
 	if request.Limit <= 0 {
 		request.Limit = 20
 	}
@@ -107,47 +123,63 @@ func (r *adminRepository) ClaimLifecycleStops(ctx context.Context, request Lifec
 	if request.ExamSetID != nil {
 		examSetID = request.ExamSetID.String()
 	}
-	var events []LifecycleStopEvent
+	var events []LifecycleEvent
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		return tx.Raw(`
 			WITH pending AS (
-				SELECT exam_set_id, stopped_at
-				FROM exam_set_lifecycle_stop_events
-				WHERE delivered_at IS NULL
-				  AND next_attempt_at <= ?
-				  AND (claimed_at IS NULL OR claimed_at <= ?)
-				  AND (? = '' OR exam_set_id::text = ?)
-				ORDER BY next_attempt_at, created_at
-				FOR UPDATE SKIP LOCKED
+				SELECT candidate.exam_set_id, candidate.event_type, candidate.event_at
+				FROM exam_set_lifecycle_events candidate
+				WHERE candidate.delivered_at IS NULL
+				  AND candidate.next_attempt_at <= ?
+				  AND (candidate.claimed_at IS NULL OR candidate.claimed_at <= ?)
+				  AND (? = '' OR candidate.exam_set_id::text = ?)
+				  AND NOT EXISTS (
+					SELECT 1
+					FROM exam_set_lifecycle_events earlier
+					WHERE earlier.exam_set_id = candidate.exam_set_id
+					  AND earlier.delivered_at IS NULL
+					  AND (
+						earlier.event_at < candidate.event_at OR
+						(earlier.event_at = candidate.event_at AND earlier.event_type = 'published' AND candidate.event_type = 'stopped')
+					  )
+				  )
+				ORDER BY candidate.event_at,
+					CASE candidate.event_type WHEN 'published' THEN 0 ELSE 1 END,
+					candidate.created_at
+				FOR UPDATE OF candidate SKIP LOCKED
 				LIMIT ?
 			)
-			UPDATE exam_set_lifecycle_stop_events outbox
+			UPDATE exam_set_lifecycle_events outbox
 			SET claim_token = ?, claimed_at = ?,
 				delivery_attempts = delivery_attempts + 1
 			FROM pending
 			WHERE outbox.exam_set_id = pending.exam_set_id
-			  AND outbox.stopped_at = pending.stopped_at
-			RETURNING outbox.exam_set_id, outbox.stopped_at, outbox.claim_token
+			  AND outbox.event_type = pending.event_type
+			  AND outbox.event_at = pending.event_at
+			RETURNING outbox.exam_set_id, COALESCE(outbox.exam_track_id, '00000000-0000-0000-0000-000000000000'::uuid) AS exam_track_id,
+				outbox.event_type, outbox.event_at, outbox.claim_token
 		`, request.Now, request.LeaseBefore, examSetID, examSetID, request.Limit,
 			request.Token, request.Now).Scan(&events).Error
 	})
 	return events, err
 }
 
-func (r *adminRepository) MarkLifecycleStopClaimDelivered(ctx context.Context, examSetID uuid.UUID, stoppedAt time.Time, token uuid.UUID, deliveredAt time.Time) (bool, error) {
-	result := r.db.WithContext(ctx).Model(&LifecycleStopEventModel{}).
-		Where("exam_set_id = ? AND stopped_at = ? AND claim_token = ? AND delivered_at IS NULL", examSetID, stoppedAt, token).
+func (r *adminRepository) MarkLifecycleEventDelivered(ctx context.Context, event LifecycleEvent, deliveredAt time.Time) (bool, error) {
+	result := r.db.WithContext(ctx).Model(&LifecycleEventModel{}).
+		Where("exam_set_id = ? AND event_type = ? AND event_at = ? AND claim_token = ? AND delivered_at IS NULL",
+			event.ExamSetID, event.EventType, event.EventAt, event.ClaimToken).
 		Updates(map[string]any{"delivered_at": deliveredAt, "claim_token": nil, "claimed_at": nil, "last_error": nil})
 	return result.RowsAffected == 1, result.Error
 }
 
-func (r *adminRepository) RetryLifecycleStop(ctx context.Context, examSetID uuid.UUID, stoppedAt time.Time, token uuid.UUID, nextAttemptAt time.Time, deliveryErr error) (bool, error) {
+func (r *adminRepository) RetryLifecycleEvent(ctx context.Context, event LifecycleEvent, nextAttemptAt time.Time, deliveryErr error) (bool, error) {
 	lastError := ""
 	if deliveryErr != nil {
 		lastError = deliveryErr.Error()
 	}
-	result := r.db.WithContext(ctx).Model(&LifecycleStopEventModel{}).
-		Where("exam_set_id = ? AND stopped_at = ? AND claim_token = ? AND delivered_at IS NULL", examSetID, stoppedAt, token).
+	result := r.db.WithContext(ctx).Model(&LifecycleEventModel{}).
+		Where("exam_set_id = ? AND event_type = ? AND event_at = ? AND claim_token = ? AND delivered_at IS NULL",
+			event.ExamSetID, event.EventType, event.EventAt, event.ClaimToken).
 		Updates(map[string]any{"claim_token": nil, "claimed_at": nil, "next_attempt_at": nextAttemptAt, "last_error": lastError})
 	return result.RowsAffected == 1, result.Error
 }

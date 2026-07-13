@@ -13,35 +13,47 @@ import (
 
 func TestPostgresTerminalTransitionIsAtomicAndEnqueuesProjection(t *testing.T) {
 	tests := []struct {
-		name               string
-		expiresAt          time.Time
-		allowAfterDeadline bool
-		wantTransition     AttemptTransition
-		wantStatus         string
+		name             string
+		withTimingColumn bool
+		timingMode       string
+		expiresAt        time.Time
+		wantTransition   AttemptTransition
+		wantStatus       string
 	}{
 		{
-			name:           "countdown equality is timeout",
+			name:           "schema without timing mode safely falls back to countdown at equality",
 			expiresAt:      projectionTransitionFixtureTime(),
 			wantTransition: AttemptTransitionTimedOut,
 			wantStatus:     domain.StatusTimeout,
 		},
 		{
-			name:               "elapsed mode submits after nominal deadline",
-			expiresAt:          projectionTransitionFixtureTime().Add(-time.Minute),
-			allowAfterDeadline: true,
-			wantTransition:     AttemptTransitionSubmitted,
-			wantStatus:         domain.StatusSubmitted,
+			name:             "persisted elapsed mode submits after nominal deadline",
+			withTimingColumn: true,
+			timingMode:       "elapsed",
+			expiresAt:        projectionTransitionFixtureTime().Add(-time.Minute),
+			wantTransition:   AttemptTransitionSubmitted,
+			wantStatus:       domain.StatusSubmitted,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openAttemptProjectionIntegrationDB(t)
+			if tc.withTimingColumn {
+				if err := db.Exec(`ALTER TABLE exam_attempts ADD COLUMN timing_mode text NOT NULL DEFAULT 'countdown'`).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
 			repo := NewPostgresRepository(db)
 			attempt := insertProjectionAttemptFixture(t, db, tc.expiresAt)
+			if tc.withTimingColumn {
+				if err := db.Exec(`UPDATE exam_attempts SET timing_mode = ? WHERE id = ?`, tc.timingMode, attempt.ID).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
 			setSubmittedFixture(attempt, projectionTransitionFixtureTime())
 
-			transition, err := repo.UpdateAttemptSubmitted(t.Context(), attempt, nil, tc.allowAfterDeadline)
+			transition, err := repo.UpdateAttemptSubmitted(t.Context(), attempt, nil, false)
 			if err != nil {
 				t.Fatalf("UpdateAttemptSubmitted() error = %v", err)
 			}
@@ -77,8 +89,17 @@ func TestPostgresConcurrentSubmitAndTimeoutProduceOneTerminalEvent(t *testing.T)
 	repo := NewPostgresRepository(db)
 	attempt := insertProjectionAttemptFixture(t, db, projectionTransitionFixtureTime().Add(time.Minute))
 	setSubmittedFixture(attempt, projectionTransitionFixtureTime())
+	blocker := db.Begin()
+	if blocker.Error != nil {
+		t.Fatal(blocker.Error)
+	}
+	if err := blocker.Exec(`SELECT id FROM exam_attempts WHERE id = ? FOR UPDATE`, attempt.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback()
 
 	start := make(chan struct{})
+	entered := make(chan struct{}, 2)
 	var wg sync.WaitGroup
 	wg.Add(2)
 	var submitTransition AttemptTransition
@@ -87,14 +108,22 @@ func TestPostgresConcurrentSubmitAndTimeoutProduceOneTerminalEvent(t *testing.T)
 	go func() {
 		defer wg.Done()
 		<-start
+		entered <- struct{}{}
 		submitTransition, submitErr = repo.UpdateAttemptSubmitted(context.Background(), attempt, nil, false)
 	}()
 	go func() {
 		defer wg.Done()
 		<-start
+		entered <- struct{}{}
 		timeoutChanged, timeoutErr = repo.MarkAttemptTimeout(context.Background(), attempt.ID)
 	}()
 	close(start)
+	<-entered
+	<-entered
+	waitForAttemptLockWaiters(t, db, 2)
+	if err := blocker.Commit().Error; err != nil {
+		t.Fatal(err)
+	}
 	wg.Wait()
 
 	if submitErr != nil || timeoutErr != nil {
@@ -108,6 +137,27 @@ func TestPostgresConcurrentSubmitAndTimeoutProduceOneTerminalEvent(t *testing.T)
 		t.Fatal(err)
 	}
 	assertAttemptStatusAndSingleOutbox(t, db, attempt.ID, status)
+}
+
+func waitForAttemptLockWaiters(t *testing.T, db *gorm.DB, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var count int64
+		if err := db.Raw(`
+			SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database()
+			  AND wait_event_type = 'Lock'
+			  AND query ILIKE '%exam_attempts%'
+		`).Scan(&count).Error; err != nil {
+			t.Fatal(err)
+		}
+		if count >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("did not observe %d concurrent exam_attempt lock waiters", want)
 }
 
 func projectionTransitionFixtureTime() time.Time {

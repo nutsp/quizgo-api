@@ -211,7 +211,7 @@ func (uc *AdminUseCase) Delete(ctx context.Context, id uuid.UUID) (bool, error) 
 	if uc.invalidator != nil {
 		uc.invalidator.OnExamSetChanged(ctx, set.ID.String(), set.Code)
 	}
-	if lifecycleErr := uc.deliverPendingLeaderboardStops(ctx, id); lifecycleErr != nil {
+	if lifecycleErr := uc.deliverPendingLeaderboardLifecycle(ctx, id); lifecycleErr != nil {
 		return deactivated, lifecycleErr
 	}
 	return deactivated, nil
@@ -257,28 +257,10 @@ func activeStatusResponse(set *domain.ExamSet) *admindomain.ActiveStatusResponse
 }
 
 func (uc *AdminUseCase) syncLeaderboardLifecycle(ctx context.Context, set *domain.ExamSet) error {
-	if err := uc.deliverPendingLeaderboardStops(ctx, set.ID); err != nil {
-		return err
-	}
-	if isLeaderboardEligible(set) {
-		return uc.notifyLeaderboardPublished(ctx, set)
-	}
-	return nil
+	return uc.deliverPendingLeaderboardLifecycle(ctx, set.ID)
 }
 
-func (uc *AdminUseCase) notifyLeaderboardPublished(ctx context.Context, set *domain.ExamSet) error {
-	if uc.leaderboard == nil {
-		return nil
-	}
-	if set.PublishedAt == nil || set.PublishedAt.IsZero() {
-		return errors.New("published exam set is missing authoritative published_at")
-	}
-	deliveryCtx, cancel := leaderboardLifecycleContext(ctx)
-	defer cancel()
-	return uc.leaderboard.OnExamSetPublished(deliveryCtx, set.ExamTrackID, set.ID, set.PublishedAt.UTC())
-}
-
-func (uc *AdminUseCase) deliverPendingLeaderboardStops(ctx context.Context, examSetID uuid.UUID) error {
+func (uc *AdminUseCase) deliverPendingLeaderboardLifecycle(ctx context.Context, examSetID uuid.UUID) error {
 	if uc.leaderboard == nil {
 		return nil
 	}
@@ -286,7 +268,7 @@ func (uc *AdminUseCase) deliverPendingLeaderboardStops(ctx context.Context, exam
 	defer cancel()
 	now := time.Now().UTC()
 	token := uuid.New()
-	events, err := uc.sets.ClaimLifecycleStops(deliveryCtx, examsetrepo.LifecycleClaimRequest{
+	events, err := uc.sets.ClaimLifecycleEvents(deliveryCtx, examsetrepo.LifecycleClaimRequest{
 		Token: token, ExamSetID: &examSetID, Limit: 20,
 		Now: now, LeaseBefore: now.Add(-30 * time.Second),
 	})
@@ -294,20 +276,29 @@ func (uc *AdminUseCase) deliverPendingLeaderboardStops(ctx context.Context, exam
 		return err
 	}
 	for _, event := range events {
-		if err := uc.leaderboard.OnExamSetStopped(deliveryCtx, event.ExamSetID, event.StoppedAt.UTC()); err != nil {
+		var deliveryErr error
+		switch event.EventType {
+		case examsetrepo.LifecycleEventPublished:
+			deliveryErr = uc.leaderboard.OnExamSetPublished(deliveryCtx, event.ExamTrackID, event.ExamSetID, event.EventAt.UTC())
+		case examsetrepo.LifecycleEventStopped:
+			deliveryErr = uc.leaderboard.OnExamSetStopped(deliveryCtx, event.ExamSetID, event.EventAt.UTC())
+		default:
+			deliveryErr = errors.New("unknown exam set lifecycle event type: " + string(event.EventType))
+		}
+		if deliveryErr != nil {
 			maintenanceCtx, maintenanceCancel := leaderboardLifecycleContext(ctx)
-			_, _ = uc.sets.RetryLifecycleStop(maintenanceCtx, event.ExamSetID, event.StoppedAt, event.ClaimToken, now.Add(5*time.Second), err)
+			_, _ = uc.sets.RetryLifecycleEvent(maintenanceCtx, event, now.Add(5*time.Second), deliveryErr)
 			maintenanceCancel()
-			return err
+			return deliveryErr
 		}
 		maintenanceCtx, maintenanceCancel := leaderboardLifecycleContext(ctx)
-		marked, err := uc.sets.MarkLifecycleStopClaimDelivered(maintenanceCtx, event.ExamSetID, event.StoppedAt, event.ClaimToken, time.Now().UTC())
+		marked, err := uc.sets.MarkLifecycleEventDelivered(maintenanceCtx, event, time.Now().UTC())
 		maintenanceCancel()
 		if err != nil {
 			return err
 		}
 		if !marked {
-			return errors.New("lifecycle stop claim was lost before acknowledgement")
+			return errors.New("lifecycle event claim was lost before acknowledgement")
 		}
 	}
 	return nil

@@ -14,6 +14,7 @@ import (
 
 type OutboxProjector interface {
 	ProjectAttempt(context.Context, domain.ProjectionInput) (*domain.ProjectionUpdate, error)
+	OnExamSetPublished(context.Context, uuid.UUID, uuid.UUID, time.Time) error
 	OnExamSetStopped(context.Context, uuid.UUID, time.Time) error
 	RecordProjectionFailure(context.Context, uuid.UUID, error) error
 }
@@ -29,12 +30,12 @@ type OutboxDispatcherConfig struct {
 
 type OutboxDispatcher struct {
 	attempts  attemptrepo.ProjectionOutbox
-	lifecycle examsetrepo.LifecycleStopOutbox
+	lifecycle examsetrepo.LifecycleOutbox
 	projector OutboxProjector
 	config    OutboxDispatcherConfig
 }
 
-func NewOutboxDispatcher(attempts attemptrepo.ProjectionOutbox, lifecycle examsetrepo.LifecycleStopOutbox, projector OutboxProjector, config OutboxDispatcherConfig) *OutboxDispatcher {
+func NewOutboxDispatcher(attempts attemptrepo.ProjectionOutbox, lifecycle examsetrepo.LifecycleOutbox, projector OutboxProjector, config OutboxDispatcherConfig) *OutboxDispatcher {
 	if config.PollInterval <= 0 {
 		config.PollInterval = 2 * time.Second
 	}
@@ -120,9 +121,9 @@ func (d *OutboxDispatcher) claimAttemptEvents(ctx context.Context, attemptID *uu
 	})
 }
 
-func (d *OutboxDispatcher) claimLifecycleEvents(ctx context.Context, examSetID *uuid.UUID) ([]examsetrepo.LifecycleStopEvent, error) {
+func (d *OutboxDispatcher) claimLifecycleEvents(ctx context.Context, examSetID *uuid.UUID) ([]examsetrepo.LifecycleEvent, error) {
 	now := d.config.Now()
-	return d.lifecycle.ClaimLifecycleStops(ctx, examsetrepo.LifecycleClaimRequest{
+	return d.lifecycle.ClaimLifecycleEvents(ctx, examsetrepo.LifecycleClaimRequest{
 		Token: uuid.New(), ExamSetID: examSetID, Limit: d.config.BatchSize,
 		Now: now, LeaseBefore: now.Add(-d.config.ClaimLease),
 	})
@@ -153,21 +154,29 @@ func (d *OutboxDispatcher) deliverAttempt(ctx context.Context, event attemptrepo
 	return update, err
 }
 
-func (d *OutboxDispatcher) deliverLifecycle(ctx context.Context, event examsetrepo.LifecycleStopEvent) error {
+func (d *OutboxDispatcher) deliverLifecycle(ctx context.Context, event examsetrepo.LifecycleEvent) error {
 	deliveryCtx, cancel := context.WithTimeout(ctx, d.config.DeliveryTimeout)
 	defer cancel()
-	err := d.projector.OnExamSetStopped(deliveryCtx, event.ExamSetID, event.StoppedAt)
+	var err error
+	switch event.EventType {
+	case examsetrepo.LifecycleEventPublished:
+		err = d.projector.OnExamSetPublished(deliveryCtx, event.ExamTrackID, event.ExamSetID, event.EventAt)
+	case examsetrepo.LifecycleEventStopped:
+		err = d.projector.OnExamSetStopped(deliveryCtx, event.ExamSetID, event.EventAt)
+	default:
+		err = errors.New("unknown exam set lifecycle event type: " + string(event.EventType))
+	}
 	if err != nil {
 		maintenanceCtx, maintenanceCancel := context.WithTimeout(context.WithoutCancel(ctx), d.config.DeliveryTimeout)
 		defer maintenanceCancel()
-		_, retryErr := d.lifecycle.RetryLifecycleStop(maintenanceCtx, event.ExamSetID, event.StoppedAt, event.ClaimToken, d.config.Now().Add(d.config.RetryBackoff), err)
+		_, retryErr := d.lifecycle.RetryLifecycleEvent(maintenanceCtx, event, d.config.Now().Add(d.config.RetryBackoff), err)
 		return errors.Join(err, retryErr)
 	}
 	maintenanceCtx, maintenanceCancel := context.WithTimeout(context.WithoutCancel(ctx), d.config.DeliveryTimeout)
 	defer maintenanceCancel()
-	marked, err := d.lifecycle.MarkLifecycleStopClaimDelivered(maintenanceCtx, event.ExamSetID, event.StoppedAt, event.ClaimToken, d.config.Now())
+	marked, err := d.lifecycle.MarkLifecycleEventDelivered(maintenanceCtx, event, d.config.Now())
 	if err == nil && !marked {
-		err = errors.New("lifecycle stop claim was lost before acknowledgement")
+		err = errors.New("lifecycle event claim was lost before acknowledgement")
 	}
 	return err
 }

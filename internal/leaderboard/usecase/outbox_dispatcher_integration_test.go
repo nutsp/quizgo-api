@@ -23,6 +23,7 @@ type integrationOutboxProjector struct {
 	mu                 sync.Mutex
 	db                 *gorm.DB
 	projectCalls       int
+	publishCalls       int
 	stopCalls          int
 	stopSawPersistence bool
 }
@@ -41,10 +42,23 @@ func (p *integrationOutboxProjector) OnExamSetStopped(_ context.Context, examSet
 	var active bool
 	var pending int64
 	stateErr := p.db.Table("exam_sets").Select("is_active").Where("id = ?", examSetID).Scan(&active).Error
-	eventErr := p.db.Table("exam_set_lifecycle_stop_events").
-		Where("exam_set_id = ? AND stopped_at = ? AND delivered_at IS NULL", examSetID, stoppedAt).
+	eventErr := p.db.Table("exam_set_lifecycle_events").
+		Where("exam_set_id = ? AND event_type = 'stopped' AND event_at = ? AND delivered_at IS NULL", examSetID, stoppedAt).
 		Count(&pending).Error
 	p.stopSawPersistence = stateErr == nil && eventErr == nil && !active && pending == 1
+	return nil
+}
+
+func (p *integrationOutboxProjector) OnExamSetPublished(_ context.Context, trackID, examSetID uuid.UUID, publishedAt time.Time) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.publishCalls++
+	var pending int64
+	if err := p.db.Table("exam_set_lifecycle_events").
+		Where("exam_set_id = ? AND exam_track_id = ? AND event_type = 'published' AND event_at = ? AND delivered_at IS NULL",
+			examSetID, trackID, publishedAt).Count(&pending).Error; err != nil || pending != 1 {
+		return fmt.Errorf("publish callback did not observe persisted event: count=%d err=%v", pending, err)
+	}
 	return nil
 }
 
@@ -65,18 +79,36 @@ func TestPostgresOutboxDispatchersClaimAttemptOnceAcrossReplicas(t *testing.T) {
 		NewOutboxDispatcher(attempts, lifecycle, projector, config),
 	}
 
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(len(dispatchers))
-	for _, dispatcher := range dispatchers {
-		go func(d *OutboxDispatcher) {
-			defer wg.Done()
-			<-start
-			_, _ = d.DrainOnce(t.Context())
-		}(dispatcher)
+	lockKey := int64(260714)
+	installProjectionClaimBarrier(t, db, lockKey)
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
 	}
-	close(start)
-	wg.Wait()
+	lockConn, err := sqlDB.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockConn.Close()
+	if _, err := lockConn.ExecContext(t.Context(), `SELECT pg_advisory_lock($1)`, lockKey); err != nil {
+		t.Fatal(err)
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, drainErr := dispatchers[0].DrainOnce(t.Context())
+		firstDone <- drainErr
+	}()
+	waitForDispatcherLockWaiter(t, db)
+	if count, err := dispatchers[1].DrainOnce(t.Context()); err != nil || count != 0 {
+		t.Fatalf("overlapping SKIP LOCKED drain = %d, %v, want 0/nil", count, err)
+	}
+	if _, err := lockConn.ExecContext(t.Context(), `SELECT pg_advisory_unlock($1)`, lockKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
 
 	if projector.projectCalls != 1 {
 		t.Fatalf("project calls = %d, want 1", projector.projectCalls)
@@ -88,6 +120,44 @@ func TestPostgresOutboxDispatchersClaimAttemptOnceAcrossReplicas(t *testing.T) {
 	if delivered != 1 {
 		t.Fatalf("delivered rows = %d, want 1", delivered)
 	}
+}
+
+func installProjectionClaimBarrier(t *testing.T, db *gorm.DB, lockKey int64) {
+	t.Helper()
+	if err := db.Exec(fmt.Sprintf(`
+		CREATE FUNCTION block_projection_claim() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			PERFORM pg_advisory_xact_lock(%d);
+			RETURN NEW;
+		END $$;
+		CREATE TRIGGER block_projection_claim
+		BEFORE UPDATE OF claim_token ON leaderboard_attempt_projection_outbox
+		FOR EACH ROW WHEN (NEW.claim_token IS NOT NULL)
+		EXECUTE FUNCTION block_projection_claim();
+	`, lockKey)).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func waitForDispatcherLockWaiter(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var count int64
+		if err := db.Raw(`
+			SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database()
+			  AND wait_event_type = 'Lock'
+			  AND query ILIKE '%leaderboard_attempt_projection_outbox%'
+		`).Scan(&count).Error; err != nil {
+			t.Fatal(err)
+		}
+		if count >= 1 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("did not observe blocked projection claim")
 }
 
 func TestPostgresLifecycleCallbackSeesPersistedStopState(t *testing.T) {
@@ -135,14 +205,15 @@ func openOutboxDispatcherIntegrationDB(t *testing.T) *gorm.DB {
 	}
 	t.Cleanup(func() { _ = admin.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE").Error })
 	statements := []string{
-		`CREATE TABLE exam_sets (id uuid PRIMARY KEY, status text NOT NULL, is_active boolean NOT NULL, published_at timestamptz, created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL)`,
+		`CREATE TABLE exam_sets (id uuid PRIMARY KEY, exam_track_id uuid, status text NOT NULL, is_active boolean NOT NULL, published_at timestamptz, created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL)`,
 		`CREATE TABLE exam_attempts (id uuid PRIMARY KEY)`,
 		`CREATE TABLE exam_tracks (id uuid PRIMARY KEY, code text NOT NULL)`,
-		`CREATE TABLE exam_set_lifecycle_stop_events (
-			exam_set_id uuid NOT NULL, stopped_at timestamptz NOT NULL, delivered_at timestamptz,
+		`CREATE TABLE exam_set_lifecycle_events (
+			exam_set_id uuid NOT NULL, event_type text NOT NULL, event_at timestamptz NOT NULL,
+			exam_track_id uuid, delivered_at timestamptz,
 			claim_token uuid, claimed_at timestamptz, delivery_attempts int NOT NULL DEFAULT 0,
 			next_attempt_at timestamptz NOT NULL DEFAULT now(), last_error text,
-			created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (exam_set_id, stopped_at)
+			created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (exam_set_id, event_type, event_at)
 		)`,
 		`CREATE TABLE leaderboard_attempt_projection_outbox (
 			attempt_id uuid PRIMARY KEY, user_id uuid NOT NULL, exam_set_id uuid NOT NULL,

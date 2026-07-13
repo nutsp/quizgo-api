@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -17,8 +18,8 @@ import (
 	attemptrepo "virtual-exam-api/internal/examattempt/repository"
 )
 
-func TestLifecycleStopEventModelMatchesOutboxContract(t *testing.T) {
-	if got := (LifecycleStopEventModel{}).TableName(); got != "exam_set_lifecycle_stop_events" {
+func TestLifecycleEventModelMatchesOutboxContract(t *testing.T) {
+	if got := (LifecycleEventModel{}).TableName(); got != "exam_set_lifecycle_events" {
 		t.Fatalf("TableName() = %q", got)
 	}
 }
@@ -36,30 +37,138 @@ func TestPostgresLifecycleStopTimestampSurvivesUnrelatedEdit(t *testing.T) {
 	if err := repo.UpdateIsActive(t.Context(), examSetID, false); err != nil {
 		t.Fatalf("UpdateIsActive() error = %v", err)
 	}
-	events, err := repo.ListPendingLifecycleStops(t.Context(), examSetID)
+	events, err := repo.ClaimLifecycleEvents(t.Context(), LifecycleClaimRequest{
+		Token: uuid.New(), ExamSetID: &examSetID, Now: base.Add(48 * time.Hour),
+	})
 	if err != nil {
-		t.Fatalf("ListPendingLifecycleStops() error = %v", err)
+		t.Fatalf("ClaimLifecycleEvents() error = %v", err)
 	}
 	if len(events) != 1 {
 		t.Fatalf("pending events = %+v, want 1", events)
 	}
-	stoppedAt := events[0].StoppedAt
+	stoppedAt := events[0].EventAt
 
 	later := base.Add(24 * time.Hour)
 	mustExamSetLifecycleExec(t, db, `UPDATE exam_sets SET title = 'ordinary edit', updated_at = ? WHERE id = ?`, later, examSetID)
-	events, err = repo.ListPendingLifecycleStops(t.Context(), examSetID)
-	if err != nil {
-		t.Fatalf("ListPendingLifecycleStops() after edit error = %v", err)
+	if err := db.Exec(`UPDATE exam_set_lifecycle_events SET claim_token = NULL, claimed_at = NULL WHERE exam_set_id = ?`, examSetID).Error; err != nil {
+		t.Fatal(err)
 	}
-	if len(events) != 1 || !events[0].StoppedAt.Equal(stoppedAt) {
+	events, err = repo.ClaimLifecycleEvents(t.Context(), LifecycleClaimRequest{
+		Token: uuid.New(), ExamSetID: &examSetID, Now: later.Add(48 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("ClaimLifecycleEvents() after edit error = %v", err)
+	}
+	if len(events) != 1 || !events[0].EventAt.Equal(stoppedAt) {
 		t.Fatalf("pending event after edit = %+v, want durable %v", events, stoppedAt)
 	}
-	if err := repo.MarkLifecycleStopDelivered(t.Context(), examSetID, stoppedAt); err != nil {
-		t.Fatalf("MarkLifecycleStopDelivered() error = %v", err)
+	marked, err := repo.MarkLifecycleEventDelivered(t.Context(), events[0], later.Add(49*time.Hour))
+	if err != nil || !marked {
+		t.Fatalf("MarkLifecycleEventDelivered() = %t, %v", marked, err)
 	}
-	events, err = repo.ListPendingLifecycleStops(t.Context(), examSetID)
+	events, err = repo.ClaimLifecycleEvents(t.Context(), LifecycleClaimRequest{
+		Token: uuid.New(), ExamSetID: &examSetID, Now: later.Add(50 * time.Hour),
+	})
 	if err != nil || len(events) != 0 {
 		t.Fatalf("pending events after delivery = %+v, %v", events, err)
+	}
+}
+
+func TestPostgresPublishAndStopLifecycleEventsAreTransactionalAndOrdered(t *testing.T) {
+	db := openExamSetLifecycleIntegrationDB(t)
+	repo := NewAdminRepository(db)
+	examSetID := uuid.New()
+	trackID := uuid.New()
+	base := time.Date(2026, 7, 14, 1, 30, 0, 0, time.UTC)
+	mustExamSetLifecycleExec(t, db, `INSERT INTO exam_tracks (id) VALUES (?)`, trackID)
+	mustExamSetLifecycleExec(t, db, `
+		INSERT INTO exam_sets (id, exam_track_id, status, is_active, created_at, updated_at)
+		VALUES (?, ?, 'draft', false, ?, ?)
+	`, examSetID, trackID, base, base)
+
+	if err := repo.UpdateStatus(t.Context(), examSetID, "published", true); err != nil {
+		t.Fatalf("publish transition: %v", err)
+	}
+	if err := repo.UpdateIsActive(t.Context(), examSetID, false); err != nil {
+		t.Fatalf("stop transition: %v", err)
+	}
+
+	claimNow := time.Now().UTC().Add(time.Hour)
+	events, err := repo.ClaimLifecycleEvents(t.Context(), LifecycleClaimRequest{
+		Token: uuid.New(), ExamSetID: &examSetID, Limit: 10, Now: claimNow,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].EventType != LifecycleEventPublished {
+		t.Fatalf("first claim = %+v, want only publish", events)
+	}
+	var publishedAt time.Time
+	if err := db.Table("exam_sets").Select("published_at").Where("id = ?", examSetID).Scan(&publishedAt).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !events[0].EventAt.Equal(publishedAt) || events[0].ExamTrackID != trackID {
+		t.Fatalf("publish event = %+v, persisted published_at = %v", events[0], publishedAt)
+	}
+	retryAt := claimNow.Add(2 * time.Hour)
+	retried, err := repo.RetryLifecycleEvent(t.Context(), events[0], retryAt, errors.New("publish delivery failed"))
+	if err != nil || !retried {
+		t.Fatalf("retry publish = %t, %v", retried, err)
+	}
+	blocked, err := repo.ClaimLifecycleEvents(t.Context(), LifecycleClaimRequest{
+		Token: uuid.New(), ExamSetID: &examSetID, Limit: 10, Now: claimNow.Add(time.Hour),
+	})
+	if err != nil || len(blocked) != 0 {
+		t.Fatalf("claim before publish retry = %+v, %v, want stop blocked", blocked, err)
+	}
+	events, err = repo.ClaimLifecycleEvents(t.Context(), LifecycleClaimRequest{
+		Token: uuid.New(), ExamSetID: &examSetID, Limit: 10, Now: retryAt,
+	})
+	if err != nil || len(events) != 1 || events[0].EventType != LifecycleEventPublished {
+		t.Fatalf("retry claim = %+v, %v, want publish", events, err)
+	}
+	marked, err := repo.MarkLifecycleEventDelivered(t.Context(), events[0], retryAt)
+	if err != nil || !marked {
+		t.Fatalf("mark publish = %t, %v", marked, err)
+	}
+
+	events, err = repo.ClaimLifecycleEvents(t.Context(), LifecycleClaimRequest{
+		Token: uuid.New(), ExamSetID: &examSetID, Limit: 10, Now: retryAt.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].EventType != LifecycleEventStopped || events[0].EventAt.Before(publishedAt) {
+		t.Fatalf("second claim = %+v, want later stop", events)
+	}
+}
+
+func TestPostgresPublishRollsBackWhenLifecycleEventCannotPersist(t *testing.T) {
+	db := openExamSetLifecycleIntegrationDB(t)
+	repo := NewAdminRepository(db)
+	examSetID := uuid.New()
+	trackID := uuid.New()
+	base := time.Date(2026, 7, 14, 1, 45, 0, 0, time.UTC)
+	mustExamSetLifecycleExec(t, db, `INSERT INTO exam_tracks (id) VALUES (?)`, trackID)
+	mustExamSetLifecycleExec(t, db, `
+		INSERT INTO exam_sets (id, exam_track_id, status, is_active, created_at, updated_at)
+		VALUES (?, ?, 'draft', false, ?, ?)
+	`, examSetID, trackID, base, base)
+	mustExamSetLifecycleExec(t, db, `DROP TABLE exam_set_lifecycle_events`)
+
+	if err := repo.UpdateStatus(t.Context(), examSetID, "published", true); err == nil {
+		t.Fatal("publish transition succeeded without lifecycle outbox")
+	}
+	var state struct {
+		Status      string
+		IsActive    bool
+		PublishedAt *time.Time
+	}
+	if err := db.Table("exam_sets").Select("status", "is_active", "published_at").Where("id = ?", examSetID).Scan(&state).Error; err != nil {
+		t.Fatal(err)
+	}
+	if state.Status != "draft" || state.IsActive || state.PublishedAt != nil {
+		t.Fatalf("rolled back state = %+v", state)
 	}
 }
 
@@ -138,14 +247,14 @@ func TestPostgresDeletePreservesImmutableLeaderboardHistory(t *testing.T) {
 
 func TestAutoMigrateOutboxModelsKeepPendingPartialIndexes(t *testing.T) {
 	db := openExamSetLifecycleIntegrationDB(t)
-	if err := db.Migrator().DropTable("leaderboard_attempt_projection_outbox", "exam_set_lifecycle_stop_events"); err != nil {
+	if err := db.Migrator().DropTable("leaderboard_attempt_projection_outbox", "exam_set_lifecycle_events"); err != nil {
 		t.Fatalf("drop migrated outboxes: %v", err)
 	}
-	if err := db.AutoMigrate(&LifecycleStopEventModel{}, &attemptrepo.ProjectionOutboxModel{}); err != nil {
+	if err := db.AutoMigrate(&LifecycleEventModel{}, &attemptrepo.ProjectionOutboxModel{}); err != nil {
 		t.Fatalf("AutoMigrate outboxes: %v", err)
 	}
 	for _, indexName := range []string{
-		"exam_set_lifecycle_stop_events_pending_idx",
+		"exam_set_lifecycle_events_pending_idx",
 		"leaderboard_attempt_projection_outbox_pending_idx",
 	} {
 		var indexDef string
@@ -155,6 +264,26 @@ func TestAutoMigrateOutboxModelsKeepPendingPartialIndexes(t *testing.T) {
 		if !strings.Contains(strings.ToLower(indexDef), "where (delivered_at is null)") {
 			t.Fatalf("index %s = %q, want delivered_at partial predicate", indexName, indexDef)
 		}
+	}
+
+	var constraints int64
+	if err := db.Raw(`
+		SELECT count(*)
+		FROM pg_constraint c
+		JOIN pg_class rel ON rel.oid = c.conrelid
+		WHERE rel.relname = 'leaderboard_attempt_projection_outbox'
+		  AND c.contype = 'f'
+		  AND pg_get_constraintdef(c.oid) IN (
+			'FOREIGN KEY (attempt_id) REFERENCES exam_attempts(id)',
+			'FOREIGN KEY (user_id) REFERENCES users(id)',
+			'FOREIGN KEY (exam_set_id) REFERENCES exam_sets(id)',
+			'FOREIGN KEY (exam_track_id) REFERENCES exam_tracks(id)'
+		  )
+	`).Scan(&constraints).Error; err != nil {
+		t.Fatal(err)
+	}
+	if constraints != 4 {
+		t.Fatalf("projection outbox foreign keys = %d, want 4", constraints)
 	}
 }
 
@@ -168,6 +297,7 @@ func openExamSetLifecycleIntegrationDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open PostgreSQL: %v", err)
 	}
+	ensureExamSetLifecycleTestExtension(t, admin)
 	schema := "examset_task4_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	if err := admin.Exec("CREATE SCHEMA " + schema).Error; err != nil {
 		t.Fatalf("create schema: %v", err)
@@ -208,17 +338,37 @@ func openExamSetLifecycleIntegrationDB(t *testing.T) *gorm.DB {
 	if !ok {
 		t.Fatal("locate integration test")
 	}
-	for _, migrationNumber := range []string{"000023_monthly_leaderboards", "000024_exam_set_lifecycle_stop_events", "000025_leaderboard_projection_dispatch"} {
-		migrationPath := filepath.Join(filepath.Dir(currentFile), "../../../migrations/"+migrationNumber+".up.sql")
-		migration, err := os.ReadFile(migrationPath)
-		if err != nil {
-			t.Fatalf("read migration %s: %v", migrationNumber, err)
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(`SELECT pg_advisory_xact_lock(230026)`).Error; err != nil {
+			return err
 		}
-		if err := db.Exec(string(migration)).Error; err != nil {
-			t.Fatalf("apply migration %s: %v", migrationNumber, err)
+		for _, migrationNumber := range []string{"000023_monthly_leaderboards", "000024_exam_set_lifecycle_stop_events", "000025_leaderboard_projection_dispatch", "000026_exam_set_lifecycle_events"} {
+			migrationPath := filepath.Join(filepath.Dir(currentFile), "../../../migrations/"+migrationNumber+".up.sql")
+			migration, err := os.ReadFile(migrationPath)
+			if err != nil {
+				return fmt.Errorf("read migration %s: %w", migrationNumber, err)
+			}
+			if err := tx.Exec(string(migration)).Error; err != nil {
+				return fmt.Errorf("apply migration %s: %w", migrationNumber, err)
+			}
 		}
+		return nil
+	}); err != nil {
+		t.Fatalf("apply lifecycle fixture migrations: %v", err)
 	}
 	return db
+}
+
+func ensureExamSetLifecycleTestExtension(t *testing.T, admin *gorm.DB) {
+	t.Helper()
+	if err := admin.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(`SELECT pg_advisory_xact_lock(230026)`).Error; err != nil {
+			return err
+		}
+		return tx.Exec(`CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public`).Error
+	}); err != nil {
+		t.Fatalf("install stable test extension: %v", err)
+	}
 }
 
 func examSetLifecycleDSN(dsn, schema string) string {

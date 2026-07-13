@@ -205,7 +205,7 @@ func (uc *AdminUseCase) Unpublish(ctx context.Context, id uuid.UUID) (*PublishSt
 	if uc.invalidator != nil {
 		uc.invalidator.OnExamSetChanged(ctx, id.String(), set.Code)
 	}
-	if err := uc.deliverPendingLeaderboardStops(ctx, id); err != nil {
+	if err := uc.deliverPendingLeaderboardLifecycle(ctx, id); err != nil {
 		return nil, err
 	}
 	return &PublishStatusResponse{
@@ -235,7 +235,7 @@ func (uc *AdminUseCase) Archive(ctx context.Context, id uuid.UUID) (*PublishStat
 	if uc.invalidator != nil {
 		uc.invalidator.OnExamSetChanged(ctx, id.String(), set.Code)
 	}
-	if err := uc.deliverPendingLeaderboardStops(ctx, id); err != nil {
+	if err := uc.deliverPendingLeaderboardLifecycle(ctx, id); err != nil {
 		return nil, err
 	}
 	return &PublishStatusResponse{
