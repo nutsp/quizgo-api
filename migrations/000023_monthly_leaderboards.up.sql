@@ -13,12 +13,18 @@ CREATE TABLE leaderboard_seasons (
 );
 
 CREATE TABLE leaderboard_season_exam_sets (
+    id uuid PRIMARY KEY,
     season_id uuid NOT NULL REFERENCES leaderboard_seasons(id) ON DELETE CASCADE,
     exam_set_id uuid NOT NULL REFERENCES exam_sets(id),
     joined_at timestamptz NOT NULL,
     stopped_at timestamptz,
-    PRIMARY KEY (season_id, exam_set_id)
+    CONSTRAINT leaderboard_season_exam_sets_interval_key
+        UNIQUE (season_id, exam_set_id, joined_at)
 );
+
+CREATE UNIQUE INDEX leaderboard_season_exam_sets_one_open_idx
+ON leaderboard_season_exam_sets (season_id, exam_set_id)
+WHERE stopped_at IS NULL;
 
 CREATE TABLE leaderboard_scores (
     season_id uuid NOT NULL REFERENCES leaderboard_seasons(id) ON DELETE CASCADE,

@@ -17,6 +17,31 @@ func TestSeasonModelDeclaresMigrationChecks(t *testing.T) {
 	assertCheckConstraint(t, checks, "leaderboard_seasons_status_check", "status IN ('active', 'finalized')")
 }
 
+func TestSeasonExamSetModelDeclaresIntervalKeys(t *testing.T) {
+	t.Parallel()
+
+	model := parseModelSchema(t, &SeasonExamSetModel{})
+	if model.PrioritizedPrimaryField == nil || model.PrioritizedPrimaryField.Name != "ID" {
+		t.Fatalf("primary key = %v, want ID", model.PrioritizedPrimaryField)
+	}
+
+	indexes := model.ParseIndexes()
+	assertUniqueIndex(
+		t,
+		indexes,
+		"leaderboard_season_exam_sets_interval_key",
+		"",
+		"SeasonID", "ExamSetID", "JoinedAt",
+	)
+	assertUniqueIndex(
+		t,
+		indexes,
+		"leaderboard_season_exam_sets_one_open_idx",
+		"stopped_at IS NULL",
+		"SeasonID", "ExamSetID",
+	)
+}
+
 func TestLeaderboardModelsDeclareMigrationForeignKeys(t *testing.T) {
 	t.Parallel()
 
@@ -88,5 +113,28 @@ func assertCheckConstraint(t *testing.T, checks map[string]schema.CheckConstrain
 	}
 	if check.Constraint != expression {
 		t.Errorf("check expression = %q, want %q", check.Constraint, expression)
+	}
+}
+
+func assertUniqueIndex(t *testing.T, indexes map[string]schema.Index, name, where string, fieldNames ...string) {
+	t.Helper()
+
+	index, ok := indexes[name]
+	if !ok {
+		t.Fatalf("missing %s index", name)
+	}
+	if index.Class != "UNIQUE" {
+		t.Errorf("%s class = %q, want UNIQUE", name, index.Class)
+	}
+	if index.Where != where {
+		t.Errorf("%s where = %q, want %q", name, index.Where, where)
+	}
+	if len(index.Fields) != len(fieldNames) {
+		t.Fatalf("%s fields = %d, want %d", name, len(index.Fields), len(fieldNames))
+	}
+	for i, fieldName := range fieldNames {
+		if index.Fields[i].Name != fieldName {
+			t.Errorf("%s field %d = %q, want %q", name, i, index.Fields[i].Name, fieldName)
+		}
 	}
 }

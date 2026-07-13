@@ -28,9 +28,10 @@ type SeasonModel struct {
 func (SeasonModel) TableName() string { return "leaderboard_seasons" }
 
 type SeasonExamSetModel struct {
-	SeasonID  uuid.UUID `gorm:"type:uuid;primaryKey"`
-	ExamSetID uuid.UUID `gorm:"type:uuid;primaryKey"`
-	JoinedAt  time.Time `gorm:"not null"`
+	ID        uuid.UUID `gorm:"type:uuid;primaryKey"`
+	SeasonID  uuid.UUID `gorm:"type:uuid;not null;uniqueIndex:leaderboard_season_exam_sets_interval_key,priority:1;uniqueIndex:leaderboard_season_exam_sets_one_open_idx,priority:1,where:stopped_at IS NULL"`
+	ExamSetID uuid.UUID `gorm:"type:uuid;not null;uniqueIndex:leaderboard_season_exam_sets_interval_key,priority:2;uniqueIndex:leaderboard_season_exam_sets_one_open_idx,priority:2,where:stopped_at IS NULL"`
+	JoinedAt  time.Time `gorm:"not null;uniqueIndex:leaderboard_season_exam_sets_interval_key,priority:3"`
 	StoppedAt *time.Time
 
 	Season  SeasonModel              `gorm:"foreignKey:SeasonID;references:ID;constraint:leaderboard_season_exam_sets_season_id_fkey,OnDelete:CASCADE"`

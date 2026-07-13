@@ -169,28 +169,94 @@ func TestProjectAttemptClampsAndRoundsPoints(t *testing.T) {
 
 func TestProjectorManagesSeasonEnrollmentLifecycle(t *testing.T) {
 	fixture := newProjectionFixture()
+	fixture.intervals = nil
 	projector := NewProjector(fixture)
-	publishedAt := time.Date(2026, time.June, 30, 17, 30, 0, 0, time.UTC)
+	publishedAt := at(9)
 
 	if err := projector.OnExamSetPublished(context.Background(), fixture.trackID, fixture.examSetID, publishedAt); err != nil {
 		t.Fatalf("OnExamSetPublished() error = %v", err)
 	}
-	if fixture.ensureCalls != 1 || fixture.joinCalls != 1 {
-		t.Fatalf("ensure/join calls = %d/%d, want 1/1", fixture.ensureCalls, fixture.joinCalls)
+	if err := projector.OnExamSetPublished(context.Background(), fixture.trackID, fixture.examSetID, at(10)); err != nil {
+		t.Fatalf("repeated OnExamSetPublished() error = %v", err)
 	}
-	if !fixture.joinedWith.Equal(publishedAt) {
-		t.Errorf("joined at = %s, want %s", fixture.joinedWith, publishedAt)
+	if len(fixture.intervals) != 1 {
+		t.Fatalf("intervals after repeated publish = %d, want 1", len(fixture.intervals))
+	}
+	if !fixture.intervals[0].joinedAt.Equal(publishedAt) || fixture.intervals[0].stoppedAt != nil {
+		t.Errorf("first interval = %+v, want open interval joined at %s", fixture.intervals[0], publishedAt)
 	}
 
-	stoppedAt := publishedAt.Add(time.Hour)
+	first, err := projector.ProjectAttempt(context.Background(), domain.ProjectionInput{
+		AttemptID:   uuid.New(),
+		UserID:      fixture.userID,
+		ExamSetID:   fixture.examSetID,
+		ExamTrackID: fixture.trackID,
+		TrackCode:   "math",
+		SubmittedAt: at(11),
+		Candidate:   candidate(80, 900, at(11)),
+	})
+	if err != nil {
+		t.Fatalf("first ProjectAttempt() error = %v", err)
+	}
+	if first.TotalPoints != 80 {
+		t.Errorf("first TotalPoints = %.1f, want 80", first.TotalPoints)
+	}
+
+	stoppedAt := at(12)
 	if err := projector.OnExamSetStopped(context.Background(), fixture.examSetID, stoppedAt); err != nil {
 		t.Fatalf("OnExamSetStopped() error = %v", err)
 	}
-	if fixture.stopCalls != 1 {
-		t.Errorf("stop calls = %d, want 1", fixture.stopCalls)
+	if err := projector.OnExamSetStopped(context.Background(), fixture.examSetID, at(13)); err != nil {
+		t.Fatalf("repeated OnExamSetStopped() error = %v", err)
 	}
-	if !fixture.stoppedWith.Equal(stoppedAt) {
-		t.Errorf("stopped at = %s, want %s", fixture.stoppedWith, stoppedAt)
+	if fixture.intervals[0].stoppedAt == nil || !fixture.intervals[0].stoppedAt.Equal(stoppedAt) {
+		t.Errorf("first stopped at = %v, want %s", fixture.intervals[0].stoppedAt, stoppedAt)
+	}
+
+	gap, err := projector.ProjectAttempt(context.Background(), domain.ProjectionInput{
+		AttemptID:   uuid.New(),
+		UserID:      fixture.userID,
+		ExamSetID:   fixture.examSetID,
+		ExamTrackID: fixture.trackID,
+		TrackCode:   "math",
+		SubmittedAt: at(14),
+		Candidate:   candidate(95, 700, at(14)),
+	})
+	if err != nil {
+		t.Fatalf("gap ProjectAttempt() error = %v", err)
+	}
+	if gap.SeasonID != "" || fixture.bestScores[fixture.examSetID].Points != 80 {
+		t.Errorf("gap attempt changed score: season = %q, best = %.1f", gap.SeasonID, fixture.bestScores[fixture.examSetID].Points)
+	}
+
+	republishedAt := at(15)
+	if err := projector.OnExamSetPublished(context.Background(), fixture.trackID, fixture.examSetID, republishedAt); err != nil {
+		t.Fatalf("republished OnExamSetPublished() error = %v", err)
+	}
+	if err := projector.OnExamSetPublished(context.Background(), fixture.trackID, fixture.examSetID, at(16)); err != nil {
+		t.Fatalf("repeated republished OnExamSetPublished() error = %v", err)
+	}
+	if len(fixture.intervals) != 2 {
+		t.Fatalf("intervals after republish = %d, want 2", len(fixture.intervals))
+	}
+	if !fixture.intervals[1].joinedAt.Equal(republishedAt) || fixture.intervals[1].stoppedAt != nil {
+		t.Errorf("second interval = %+v, want open interval joined at %s", fixture.intervals[1], republishedAt)
+	}
+
+	afterRepublish, err := projector.ProjectAttempt(context.Background(), domain.ProjectionInput{
+		AttemptID:   uuid.New(),
+		UserID:      fixture.userID,
+		ExamSetID:   fixture.examSetID,
+		ExamTrackID: fixture.trackID,
+		TrackCode:   "math",
+		SubmittedAt: republishedAt,
+		Candidate:   candidate(90, 800, republishedAt),
+	})
+	if err != nil {
+		t.Fatalf("republished ProjectAttempt() error = %v", err)
+	}
+	if afterRepublish.TotalPoints != 90 || len(fixture.bestScores) != 1 {
+		t.Errorf("republished score total/rows = %.1f/%d, want 90/1", afterRepublish.TotalPoints, len(fixture.bestScores))
 	}
 }
 

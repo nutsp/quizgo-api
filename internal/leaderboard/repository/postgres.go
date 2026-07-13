@@ -140,23 +140,19 @@ func (r *postgresRepository) EnsureSeason(ctx context.Context, examTrackID uuid.
 
 func (r *postgresRepository) JoinExamSet(ctx context.Context, seasonID, examSetID uuid.UUID, joinedAt time.Time) error {
 	return r.db.WithContext(ctx).Exec(`
-		INSERT INTO leaderboard_season_exam_sets (season_id, exam_set_id, joined_at)
-		VALUES (?, ?, ?)
-		ON CONFLICT (season_id, exam_set_id) DO UPDATE SET
-			joined_at = LEAST(leaderboard_season_exam_sets.joined_at, EXCLUDED.joined_at),
-			stopped_at = NULL
-	`, seasonID, examSetID, joinedAt).Error
+		INSERT INTO leaderboard_season_exam_sets (id, season_id, exam_set_id, joined_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT DO NOTHING
+	`, uuid.New(), seasonID, examSetID, joinedAt).Error
 }
 
 func (r *postgresRepository) StopExamSet(ctx context.Context, examSetID uuid.UUID, stoppedAt time.Time) error {
 	return r.db.WithContext(ctx).Exec(`
 		UPDATE leaderboard_season_exam_sets
-		SET stopped_at = CASE
-			WHEN stopped_at IS NULL OR ? < stopped_at THEN ?
-			ELSE stopped_at
-		END
+		SET stopped_at = ?
 		WHERE exam_set_id = ?
-	`, stoppedAt, stoppedAt, examSetID).Error
+			AND stopped_at IS NULL
+	`, stoppedAt, examSetID).Error
 }
 
 func (r *postgresRepository) GetEligibleSeason(ctx context.Context, examSetID uuid.UUID, submittedAt time.Time) (*SeasonRow, error) {
@@ -164,16 +160,20 @@ func (r *postgresRepository) GetEligibleSeason(ctx context.Context, examSetID uu
 	err := r.db.WithContext(ctx).Raw(`
 		SELECT s.id, s.exam_track_id, s.year, s.month, s.starts_at, s.ends_at
 		FROM leaderboard_seasons s
-		JOIN leaderboard_season_exam_sets ses ON ses.season_id = s.id
-		WHERE ses.exam_set_id = ?
-			AND s.status = 'active'
+		WHERE s.status = 'active'
 			AND ? >= s.starts_at
 			AND ? < s.ends_at
-			AND ? >= ses.joined_at
-			AND (ses.stopped_at IS NULL OR ? < ses.stopped_at)
+			AND EXISTS (
+				SELECT 1
+				FROM leaderboard_season_exam_sets ses
+				WHERE ses.season_id = s.id
+					AND ses.exam_set_id = ?
+					AND ? >= ses.joined_at
+					AND (ses.stopped_at IS NULL OR ? < ses.stopped_at)
+			)
 		ORDER BY s.starts_at DESC
 		LIMIT 1
-	`, examSetID, submittedAt, submittedAt, submittedAt, submittedAt).Scan(&row).Error
+	`, submittedAt, submittedAt, examSetID, submittedAt, submittedAt).Scan(&row).Error
 	if err != nil {
 		return nil, err
 	}

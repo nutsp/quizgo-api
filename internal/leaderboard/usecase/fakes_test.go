@@ -16,8 +16,7 @@ type projectionFixture struct {
 	trackID   uuid.UUID
 	examSetID uuid.UUID
 	userID    uuid.UUID
-	joinedAt  time.Time
-	stoppedAt *time.Time
+	intervals []eligibilityInterval
 
 	bestScores map[uuid.UUID]domain.ScoreCandidate
 	entries    map[uuid.UUID]leaderboardrepo.EntryRow
@@ -30,15 +29,22 @@ type projectionFixture struct {
 	stoppedWith time.Time
 }
 
+type eligibilityInterval struct {
+	joinedAt  time.Time
+	stoppedAt *time.Time
+}
+
 func newProjectionFixture() *projectionFixture {
 	stoppedAt := at(20)
 	return &projectionFixture{
-		seasonID:   uuid.MustParse("10000000-0000-0000-0000-000000000001"),
-		trackID:    uuid.MustParse("20000000-0000-0000-0000-000000000002"),
-		examSetID:  uuid.MustParse("30000000-0000-0000-0000-000000000003"),
-		userID:     uuid.MustParse("40000000-0000-0000-0000-000000000004"),
-		joinedAt:   at(9),
-		stoppedAt:  &stoppedAt,
+		seasonID:  uuid.MustParse("10000000-0000-0000-0000-000000000001"),
+		trackID:   uuid.MustParse("20000000-0000-0000-0000-000000000002"),
+		examSetID: uuid.MustParse("30000000-0000-0000-0000-000000000003"),
+		userID:    uuid.MustParse("40000000-0000-0000-0000-000000000004"),
+		intervals: []eligibilityInterval{{
+			joinedAt:  at(9),
+			stoppedAt: &stoppedAt,
+		}},
 		bestScores: make(map[uuid.UUID]domain.ScoreCandidate),
 		entries:    make(map[uuid.UUID]leaderboardrepo.EntryRow),
 	}
@@ -65,6 +71,12 @@ func (f *projectionFixture) JoinExamSet(_ context.Context, seasonID, examSetID u
 		return errors.New("unexpected season or exam set ID")
 	}
 	f.joinedWith = joinedAt
+	for _, interval := range f.intervals {
+		if interval.stoppedAt == nil {
+			return nil
+		}
+	}
+	f.intervals = append(f.intervals, eligibilityInterval{joinedAt: joinedAt})
 	return nil
 }
 
@@ -74,6 +86,13 @@ func (f *projectionFixture) StopExamSet(_ context.Context, examSetID uuid.UUID, 
 		return errors.New("unexpected exam set ID")
 	}
 	f.stoppedWith = stoppedAt
+	for i := len(f.intervals) - 1; i >= 0; i-- {
+		if f.intervals[i].stoppedAt == nil {
+			stoppedAtCopy := stoppedAt
+			f.intervals[i].stoppedAt = &stoppedAtCopy
+			break
+		}
+	}
 	return nil
 }
 
@@ -81,17 +100,20 @@ func (f *projectionFixture) GetEligibleSeason(_ context.Context, examSetID uuid.
 	if examSetID != f.examSetID {
 		return nil, errors.New("unexpected exam set ID")
 	}
-	if submittedAt.Before(f.joinedAt) || (f.stoppedAt != nil && !submittedAt.Before(*f.stoppedAt)) {
-		return nil, nil
+	for _, interval := range f.intervals {
+		if !submittedAt.Before(interval.joinedAt) &&
+			(interval.stoppedAt == nil || submittedAt.Before(*interval.stoppedAt)) {
+			return &leaderboardrepo.SeasonRow{
+				ID:          f.seasonID,
+				ExamTrackID: f.trackID,
+				Year:        2026,
+				Month:       7,
+				StartsAt:    at(1),
+				EndsAt:      at(32),
+			}, nil
+		}
 	}
-	return &leaderboardrepo.SeasonRow{
-		ID:          f.seasonID,
-		ExamTrackID: f.trackID,
-		Year:        2026,
-		Month:       7,
-		StartsAt:    at(1),
-		EndsAt:      at(32),
-	}, nil
+	return nil, nil
 }
 
 func (f *projectionFixture) UpsertBestScore(
