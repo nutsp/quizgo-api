@@ -55,12 +55,17 @@ CREATE TABLE leaderboard_seasons (
 );
 
 CREATE TABLE leaderboard_season_exam_sets (
+    id uuid PRIMARY KEY,
     season_id uuid NOT NULL REFERENCES leaderboard_seasons(id) ON DELETE CASCADE,
     exam_set_id uuid NOT NULL REFERENCES exam_sets(id),
     joined_at timestamptz NOT NULL,
     stopped_at timestamptz,
-    PRIMARY KEY (season_id, exam_set_id)
+    UNIQUE (season_id, exam_set_id, joined_at)
 );
+
+CREATE UNIQUE INDEX leaderboard_season_exam_sets_one_open_idx
+ON leaderboard_season_exam_sets (season_id, exam_set_id)
+WHERE stopped_at IS NULL;
 
 CREATE TABLE leaderboard_scores (
     season_id uuid NOT NULL REFERENCES leaderboard_seasons(id) ON DELETE CASCADE,
@@ -262,7 +267,7 @@ Expected: FAIL because projector and repository contracts are undefined.
 
 - [ ] **Step 3: Implement transactional repository operations**
 
-Use `INSERT ... ON CONFLICT` for season and exam-set enrollment. Use a transaction plus `SELECT ... FOR UPDATE` for best-score replacement and entry rebuilding. Rebuild an entry from authoritative `leaderboard_scores`:
+Use `INSERT ... ON CONFLICT` for season creation. Exam-set enrollment inserts a new interval only when no open interval exists; stopping closes only the current open interval. This must support publish, stop, and republish within one month while rejecting attempts submitted during the closed gap. Use a transaction plus `SELECT ... FOR UPDATE` for best-score replacement and entry rebuilding. Rebuild an entry from authoritative `leaderboard_scores`:
 
 ```sql
 SELECT COALESCE(SUM(points), 0), COUNT(*), COALESCE(SUM(duration_seconds), 0), MAX(achieved_at)
