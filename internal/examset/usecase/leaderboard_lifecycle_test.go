@@ -23,18 +23,28 @@ type lifecycleCall struct {
 }
 
 type lifecycleRecorder struct {
-	calls []lifecycleCall
-	err   error
+	calls        []lifecycleCall
+	statesAtCall []domain.ExamSet
+	store        *lifecycleSetStore
+	err          error
 }
 
 func (r *lifecycleRecorder) OnExamSetPublished(_ context.Context, trackID, examSetID uuid.UUID, at time.Time) error {
 	r.calls = append(r.calls, lifecycleCall{kind: "published", trackID: trackID, examSetID: examSetID, at: at})
+	r.snapshotState()
 	return r.err
 }
 
 func (r *lifecycleRecorder) OnExamSetStopped(_ context.Context, examSetID uuid.UUID, at time.Time) error {
 	r.calls = append(r.calls, lifecycleCall{kind: "stopped", examSetID: examSetID, at: at})
+	r.snapshotState()
 	return r.err
+}
+
+func (r *lifecycleRecorder) snapshotState() {
+	if r.store != nil && r.store.current != nil {
+		r.statesAtCall = append(r.statesAtCall, *r.store.current)
+	}
 }
 
 type lifecycleSetStore struct {
@@ -48,6 +58,13 @@ type lifecycleSetStore struct {
 	deleteWrites     int
 	softDelete       bool
 	lifecycleAtWrite int
+	pendingStops     []examsetrepo.LifecycleStopEvent
+}
+
+func (s *lifecycleSetStore) recordStop(wasEligible bool, stoppedAt time.Time) {
+	if wasEligible {
+		s.pendingStops = append(s.pendingStops, examsetrepo.LifecycleStopEvent{ExamSetID: s.current.ID, StoppedAt: stoppedAt})
+	}
 }
 
 func (s *lifecycleSetStore) UpdateStatus(_ context.Context, _ uuid.UUID, status string, active bool) error {
@@ -60,6 +77,7 @@ func (s *lifecycleSetStore) UpdateStatus(_ context.Context, _ uuid.UUID, status 
 		publishedAt := s.publishAt
 		s.current.PublishedAt = &publishedAt
 	}
+	s.recordStop(wasEligible && !isLeaderboardEligible(s.current), s.transitionAt)
 	return nil
 }
 
@@ -72,6 +90,7 @@ func (s *lifecycleSetStore) UpdateIsActive(_ context.Context, _ uuid.UUID, activ
 		publishedAt := s.publishAt
 		s.current.PublishedAt = &publishedAt
 	}
+	s.recordStop(wasEligible && !isLeaderboardEligible(s.current), s.transitionAt)
 	return nil
 }
 
@@ -88,18 +107,45 @@ func (s *lifecycleSetStore) Update(_ context.Context, set *domain.ExamSet) error
 		publishedAt := s.publishAt
 		s.current.PublishedAt = &publishedAt
 	}
+	s.recordStop(wasEligible && !isLeaderboardEligible(s.current), s.transitionAt)
 	return nil
 }
 
 func (s *lifecycleSetStore) Delete(_ context.Context, _ uuid.UUID) (bool, error) {
 	s.deleteWrites++
+	wasEligible := isLeaderboardEligible(s.current)
 	if !s.softDelete {
+		if wasEligible {
+			s.pendingStops = append(s.pendingStops, examsetrepo.LifecycleStopEvent{ExamSetID: s.current.ID, StoppedAt: s.transitionAt})
+		}
 		s.current = nil
 		return false, nil
 	}
 	s.current.IsActive = false
 	s.current.UpdatedAt = s.transitionAt
+	s.recordStop(wasEligible, s.transitionAt)
 	return true, nil
+}
+
+func (s *lifecycleSetStore) ListPendingLifecycleStops(_ context.Context, examSetID uuid.UUID) ([]examsetrepo.LifecycleStopEvent, error) {
+	events := make([]examsetrepo.LifecycleStopEvent, 0, len(s.pendingStops))
+	for _, event := range s.pendingStops {
+		if event.ExamSetID == examSetID {
+			events = append(events, event)
+		}
+	}
+	return events, nil
+}
+
+func (s *lifecycleSetStore) MarkLifecycleStopDelivered(_ context.Context, examSetID uuid.UUID, stoppedAt time.Time) error {
+	remaining := s.pendingStops[:0]
+	for _, event := range s.pendingStops {
+		if event.ExamSetID != examSetID || !event.StoppedAt.Equal(stoppedAt) {
+			remaining = append(remaining, event)
+		}
+	}
+	s.pendingStops = remaining
+	return nil
 }
 
 type lifecycleSetReader struct {
@@ -179,6 +225,10 @@ func leaderboardSet() *domain.ExamSet {
 	}
 }
 
+func lifecycleFixtureTime(hour int) time.Time {
+	return time.Date(2026, 7, 14, hour, 0, 0, 0, time.UTC)
+}
+
 func readyQuestions(examSetID uuid.UUID) []qdomain.ExamSetQuestion {
 	questionID := uuid.New()
 	choices := []qdomain.Choice{
@@ -226,9 +276,9 @@ func updateInputFromSet(set *domain.ExamSet) UpdateSetInput {
 
 func TestLeaderboardPublishUsesPersistedPublishedAtAfterStatusWrite(t *testing.T) {
 	set := leaderboardSet()
-	publishedAt := time.Date(2026, 7, 14, 2, 0, 0, 0, time.UTC)
+	publishedAt := lifecycleFixtureTime(2)
 	store := &lifecycleSetStore{current: set, publishAt: publishedAt, transitionAt: publishedAt}
-	recorder := &lifecycleRecorder{}
+	recorder := &lifecycleRecorder{store: store}
 	uc := newLifecycleAdmin(store, recorder)
 
 	if _, err := uc.Publish(context.Background(), set.ID); err != nil {
@@ -240,14 +290,14 @@ func TestLeaderboardPublishUsesPersistedPublishedAtAfterStatusWrite(t *testing.T
 	if recorder.calls[0].at != publishedAt {
 		t.Errorf("publish timestamp = %v, want persisted %v", recorder.calls[0].at, publishedAt)
 	}
-	if store.current.Status != domain.StatusPublished || !store.current.IsActive {
-		t.Fatalf("lifecycle ran before persistence: state = %s/%v", store.current.Status, store.current.IsActive)
+	if len(recorder.statesAtCall) != 1 || recorder.statesAtCall[0].Status != domain.StatusPublished || !recorder.statesAtCall[0].IsActive {
+		t.Fatalf("state at lifecycle call = %#v, want persisted published/active", recorder.statesAtCall)
 	}
 }
 
 func TestLeaderboardPublishRetryReusesPublishedAt(t *testing.T) {
 	set := leaderboardSet()
-	publishedAt := time.Date(2026, 7, 14, 2, 15, 0, 0, time.UTC)
+	publishedAt := lifecycleFixtureTime(3)
 	store := &lifecycleSetStore{current: set, publishAt: publishedAt, transitionAt: publishedAt}
 	recorder := &lifecycleRecorder{err: errors.New("join unavailable")}
 	uc := newLifecycleAdmin(store, recorder)
@@ -289,9 +339,9 @@ func TestLeaderboardStopPathsUsePersistedTransitionTime(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			set := leaderboardSet()
 			set.Status = domain.StatusPublished
-			publishedAt := time.Date(2026, 7, 10, 1, 0, 0, 0, time.UTC)
+			publishedAt := lifecycleFixtureTime(1).Add(-96 * time.Hour)
 			set.PublishedAt = &publishedAt
-			stoppedAt := time.Date(2026, 7, 14, 3, 0, 0, 0, time.UTC)
+			stoppedAt := lifecycleFixtureTime(4)
 			store := &lifecycleSetStore{current: set, transitionAt: stoppedAt}
 			recorder := &lifecycleRecorder{}
 			uc := newLifecycleAdmin(store, recorder)
@@ -310,7 +360,7 @@ func TestLeaderboardReactivationUsesAuthoritativePublishedAt(t *testing.T) {
 	set := leaderboardSet()
 	set.Status = domain.StatusPublished
 	set.IsActive = false
-	publishedAt := time.Date(2026, 7, 14, 4, 0, 0, 0, time.UTC)
+	publishedAt := lifecycleFixtureTime(5)
 	store := &lifecycleSetStore{current: set, publishAt: publishedAt, transitionAt: publishedAt}
 	recorder := &lifecycleRecorder{}
 	uc := newLifecycleAdmin(store, recorder)
@@ -326,9 +376,9 @@ func TestLeaderboardReactivationUsesAuthoritativePublishedAt(t *testing.T) {
 func TestLeaderboardGeneralUpdateRetryKeepsStopBoundary(t *testing.T) {
 	set := leaderboardSet()
 	set.Status = domain.StatusPublished
-	publishedAt := time.Date(2026, 7, 10, 1, 0, 0, 0, time.UTC)
+	publishedAt := lifecycleFixtureTime(1).Add(-96 * time.Hour)
 	set.PublishedAt = &publishedAt
-	stoppedAt := time.Date(2026, 7, 14, 4, 30, 0, 0, time.UTC)
+	stoppedAt := lifecycleFixtureTime(6)
 	store := &lifecycleSetStore{current: set, transitionAt: stoppedAt}
 	recorder := &lifecycleRecorder{err: errors.New("stop unavailable")}
 	uc := newLifecycleAdmin(store, recorder)
@@ -343,18 +393,49 @@ func TestLeaderboardGeneralUpdateRetryKeepsStopBoundary(t *testing.T) {
 	if _, err := uc.Update(context.Background(), set.ID, input); err != nil {
 		t.Fatalf("retry Update() error = %v", err)
 	}
-	if store.updateWrites != 1 {
-		t.Fatalf("Update repository writes = %d, want 1", store.updateWrites)
+	if store.updateWrites != 2 {
+		t.Fatalf("Update repository writes = %d, want 2 retry attempts", store.updateWrites)
 	}
 	if len(recorder.calls) != 2 || recorder.calls[0].at != stoppedAt || recorder.calls[1].at != stoppedAt {
 		t.Fatalf("update retry timestamps = %#v, want stable boundary", recorder.calls)
 	}
 }
 
+func TestLeaderboardStopRetryAfterUnrelatedEditKeepsDurableBoundary(t *testing.T) {
+	set := leaderboardSet()
+	set.Status = domain.StatusPublished
+	publishedAt := lifecycleFixtureTime(1)
+	set.PublishedAt = &publishedAt
+	stoppedAt := lifecycleFixtureTime(7)
+	store := &lifecycleSetStore{current: set, transitionAt: stoppedAt}
+	recorder := &lifecycleRecorder{err: errors.New("stop unavailable")}
+	uc := newLifecycleAdmin(store, recorder)
+	input := updateInputFromSet(set)
+	input.IsActive = false
+
+	if _, err := uc.Update(context.Background(), set.ID, input); err == nil {
+		t.Fatal("first Update() error = nil, want lifecycle error")
+	}
+
+	recorder.err = nil
+	store.transitionAt = lifecycleFixtureTime(8)
+	unrelatedEdit := updateInputFromSet(store.current)
+	unrelatedEdit.Title = "Edited after failed lifecycle delivery"
+	if _, err := uc.Update(context.Background(), set.ID, unrelatedEdit); err != nil {
+		t.Fatalf("unrelated Update() retry error = %v", err)
+	}
+	if len(recorder.calls) != 2 {
+		t.Fatalf("lifecycle calls = %#v, want failed call plus durable retry", recorder.calls)
+	}
+	if recorder.calls[1].at != stoppedAt {
+		t.Fatalf("retried stop timestamp = %v, want durable %v", recorder.calls[1].at, stoppedAt)
+	}
+}
+
 func TestLeaderboardSoftDeleteStopsAndRetryKeepsBoundary(t *testing.T) {
 	set := leaderboardSet()
 	set.Status = domain.StatusPublished
-	stoppedAt := time.Date(2026, 7, 14, 5, 0, 0, 0, time.UTC)
+	stoppedAt := lifecycleFixtureTime(9)
 	store := &lifecycleSetStore{current: set, transitionAt: stoppedAt, softDelete: true}
 	recorder := &lifecycleRecorder{err: errors.New("stop unavailable")}
 	uc := newLifecycleAdmin(store, recorder)
@@ -367,17 +448,39 @@ func TestLeaderboardSoftDeleteStopsAndRetryKeepsBoundary(t *testing.T) {
 	if _, err := uc.Delete(context.Background(), set.ID); err != nil {
 		t.Fatalf("retry Delete() error = %v", err)
 	}
-	if store.deleteWrites != 1 {
-		t.Fatalf("Delete repository writes = %d, want 1", store.deleteWrites)
+	if store.deleteWrites != 2 {
+		t.Fatalf("Delete repository writes = %d, want 2 retry attempts", store.deleteWrites)
 	}
 	if len(recorder.calls) != 2 || recorder.calls[0].at != stoppedAt || recorder.calls[1].at != stoppedAt {
 		t.Fatalf("delete retry timestamps = %#v, want stable boundary", recorder.calls)
 	}
 }
 
+func TestLeaderboardDeleteAfterDeactivateStillPerformsHardDelete(t *testing.T) {
+	set := leaderboardSet()
+	set.Status = domain.StatusPublished
+	set.IsActive = false
+	set.UpdatedAt = lifecycleFixtureTime(9)
+	store := &lifecycleSetStore{current: set, transitionAt: lifecycleFixtureTime(10), softDelete: false}
+	recorder := &lifecycleRecorder{}
+	uc := newLifecycleAdmin(store, recorder)
+
+	deactivated, err := uc.Delete(context.Background(), set.ID)
+	if err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if deactivated {
+		t.Fatal("Delete() deactivated = true, want hard delete")
+	}
+	if store.deleteWrites != 1 || store.current != nil {
+		t.Fatalf("hard delete writes/current = %d/%#v, want 1/nil", store.deleteWrites, store.current)
+	}
+}
+
 func TestLeaderboardLifecycleNilIsBackwardCompatible(t *testing.T) {
 	set := leaderboardSet()
-	store := &lifecycleSetStore{current: set, publishAt: time.Now().UTC(), transitionAt: time.Now().UTC()}
+	now := lifecycleFixtureTime(11)
+	store := &lifecycleSetStore{current: set, publishAt: now, transitionAt: now}
 	uc := newLifecycleAdmin(store, nil)
 	if _, err := uc.Publish(context.Background(), set.ID); err != nil {
 		t.Fatalf("Publish() with nil lifecycle error = %v", err)

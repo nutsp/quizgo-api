@@ -3,7 +3,6 @@ package usecase
 import (
 	"context"
 	"errors"
-	"reflect"
 	"time"
 
 	"github.com/google/uuid"
@@ -16,6 +15,8 @@ import (
 	trackrepo "virtual-exam-api/internal/examtrack/repository"
 	questionrepo "virtual-exam-api/internal/question/repository"
 )
+
+const leaderboardLifecycleDeliveryTimeout = 5 * time.Second
 
 type LeaderboardLifecycle interface {
 	OnExamSetPublished(context.Context, uuid.UUID, uuid.UUID, time.Time) error
@@ -159,18 +160,6 @@ func (uc *AdminUseCase) Update(ctx context.Context, id uuid.UUID, input UpdateSe
 	set.UpdatedAt = existing.UpdatedAt
 	set.PublishedAt = existing.PublishedAt
 	set.Status = existing.Status
-	if sameAdminSetState(existing, set) {
-		if existing.Status == domain.StatusPublished {
-			if existing.IsActive {
-				if err := uc.notifyLeaderboardPublished(ctx, existing); err != nil {
-					return nil, err
-				}
-			} else if err := uc.notifyLeaderboardStopped(ctx, existing); err != nil {
-				return nil, err
-			}
-		}
-		return toSetAdminResponse(existing), nil
-	}
 	if set.Code != existing.Code {
 		byCode, err := uc.reads.FindByCode(ctx, set.Code)
 		if err != nil {
@@ -201,7 +190,7 @@ func (uc *AdminUseCase) Update(ctx context.Context, id uuid.UUID, input UpdateSe
 			uc.invalidator.OnExamSetChanged(ctx, set.ID.String(), existing.Code)
 		}
 	}
-	if err := uc.notifyLeaderboardTransition(ctx, existing, updated); err != nil {
+	if err := uc.syncLeaderboardLifecycle(ctx, updated); err != nil {
 		return nil, err
 	}
 	return toSetAdminResponse(set), nil
@@ -215,12 +204,6 @@ func (uc *AdminUseCase) Delete(ctx context.Context, id uuid.UUID) (bool, error) 
 	if set == nil {
 		return false, apperrors.ErrExamSetNotFound
 	}
-	if set.Status == domain.StatusPublished && !set.IsActive {
-		if err := uc.notifyLeaderboardStopped(ctx, set); err != nil {
-			return true, err
-		}
-		return true, nil
-	}
 	deactivated, err := uc.sets.Delete(ctx, id)
 	if err != nil {
 		return deactivated, err
@@ -228,17 +211,8 @@ func (uc *AdminUseCase) Delete(ctx context.Context, id uuid.UUID) (bool, error) 
 	if uc.invalidator != nil {
 		uc.invalidator.OnExamSetChanged(ctx, set.ID.String(), set.Code)
 	}
-	if deactivated && isLeaderboardEligible(set) {
-		updated, findErr := uc.reads.FindByID(ctx, id)
-		if findErr != nil {
-			return deactivated, findErr
-		}
-		if updated == nil {
-			return deactivated, apperrors.ErrExamSetNotFound
-		}
-		if lifecycleErr := uc.notifyLeaderboardStopped(ctx, updated); lifecycleErr != nil {
-			return deactivated, lifecycleErr
-		}
+	if lifecycleErr := uc.deliverPendingLeaderboardStops(ctx, id); lifecycleErr != nil {
+		return deactivated, lifecycleErr
 	}
 	return deactivated, nil
 }
@@ -250,18 +224,6 @@ func (uc *AdminUseCase) UpdateActiveStatus(ctx context.Context, id uuid.UUID, is
 	}
 	if set == nil {
 		return nil, apperrors.ErrExamSetNotFound
-	}
-	if set.IsActive == isActive {
-		if set.Status == domain.StatusPublished {
-			if isActive {
-				if err := uc.notifyLeaderboardPublished(ctx, set); err != nil {
-					return nil, err
-				}
-			} else if err := uc.notifyLeaderboardStopped(ctx, set); err != nil {
-				return nil, err
-			}
-		}
-		return activeStatusResponse(set), nil
 	}
 	if err := uc.sets.UpdateIsActive(ctx, id, isActive); err != nil {
 		return nil, err
@@ -276,7 +238,7 @@ func (uc *AdminUseCase) UpdateActiveStatus(ctx context.Context, id uuid.UUID, is
 	if uc.invalidator != nil {
 		uc.invalidator.OnExamSetChanged(ctx, id.String(), set.Code)
 	}
-	if err := uc.notifyLeaderboardTransition(ctx, set, updated); err != nil {
+	if err := uc.syncLeaderboardLifecycle(ctx, updated); err != nil {
 		return nil, err
 	}
 	return activeStatusResponse(updated), nil
@@ -284,17 +246,6 @@ func (uc *AdminUseCase) UpdateActiveStatus(ctx context.Context, id uuid.UUID, is
 
 func isLeaderboardEligible(set *domain.ExamSet) bool {
 	return set != nil && set.Status == domain.StatusPublished && set.IsActive
-}
-
-func sameAdminSetState(left, right *domain.ExamSet) bool {
-	if left == nil || right == nil {
-		return left == right
-	}
-	leftCopy := *left
-	rightCopy := *right
-	leftCopy.ExamTrack = nil
-	rightCopy.ExamTrack = nil
-	return reflect.DeepEqual(leftCopy, rightCopy)
 }
 
 func activeStatusResponse(set *domain.ExamSet) *admindomain.ActiveStatusResponse {
@@ -305,14 +256,12 @@ func activeStatusResponse(set *domain.ExamSet) *admindomain.ActiveStatusResponse
 	}
 }
 
-func (uc *AdminUseCase) notifyLeaderboardTransition(ctx context.Context, before, after *domain.ExamSet) error {
-	wasEligible := isLeaderboardEligible(before)
-	isEligible := isLeaderboardEligible(after)
-	if !wasEligible && isEligible {
-		return uc.notifyLeaderboardPublished(ctx, after)
+func (uc *AdminUseCase) syncLeaderboardLifecycle(ctx context.Context, set *domain.ExamSet) error {
+	if err := uc.deliverPendingLeaderboardStops(ctx, set.ID); err != nil {
+		return err
 	}
-	if wasEligible && !isEligible {
-		return uc.notifyLeaderboardStopped(ctx, after)
+	if isLeaderboardEligible(set) {
+		return uc.notifyLeaderboardPublished(ctx, set)
 	}
 	return nil
 }
@@ -324,17 +273,34 @@ func (uc *AdminUseCase) notifyLeaderboardPublished(ctx context.Context, set *dom
 	if set.PublishedAt == nil || set.PublishedAt.IsZero() {
 		return errors.New("published exam set is missing authoritative published_at")
 	}
-	return uc.leaderboard.OnExamSetPublished(ctx, set.ExamTrackID, set.ID, set.PublishedAt.UTC())
+	deliveryCtx, cancel := leaderboardLifecycleContext(ctx)
+	defer cancel()
+	return uc.leaderboard.OnExamSetPublished(deliveryCtx, set.ExamTrackID, set.ID, set.PublishedAt.UTC())
 }
 
-func (uc *AdminUseCase) notifyLeaderboardStopped(ctx context.Context, set *domain.ExamSet) error {
+func (uc *AdminUseCase) deliverPendingLeaderboardStops(ctx context.Context, examSetID uuid.UUID) error {
 	if uc.leaderboard == nil {
 		return nil
 	}
-	if set.UpdatedAt.IsZero() {
-		return errors.New("stopped exam set is missing authoritative updated_at")
+	deliveryCtx, cancel := leaderboardLifecycleContext(ctx)
+	defer cancel()
+	events, err := uc.sets.ListPendingLifecycleStops(deliveryCtx, examSetID)
+	if err != nil {
+		return err
 	}
-	return uc.leaderboard.OnExamSetStopped(ctx, set.ID, set.UpdatedAt.UTC())
+	for _, event := range events {
+		if err := uc.leaderboard.OnExamSetStopped(deliveryCtx, event.ExamSetID, event.StoppedAt.UTC()); err != nil {
+			return err
+		}
+		if err := uc.sets.MarkLifecycleStopDelivered(deliveryCtx, event.ExamSetID, event.StoppedAt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func leaderboardLifecycleContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), leaderboardLifecycleDeliveryTimeout)
 }
 
 func (uc *AdminUseCase) buildSetFromInput(input CreateSetInput, existingLayout *domain.AnswerSheetLayoutConfig) (*domain.ExamSet, error) {

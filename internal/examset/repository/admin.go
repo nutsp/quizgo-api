@@ -42,6 +42,8 @@ type AdminRepository interface {
 	UpdateTotalQuestions(ctx context.Context, examSetID uuid.UUID, count int) error
 	UpdateStatus(ctx context.Context, id uuid.UUID, status string, isActive bool) error
 	UpdateIsActive(ctx context.Context, id uuid.UUID, isActive bool) error
+	ListPendingLifecycleStops(ctx context.Context, examSetID uuid.UUID) ([]LifecycleStopEvent, error)
+	MarkLifecycleStopDelivered(ctx context.Context, examSetID uuid.UUID, stoppedAt time.Time) error
 }
 
 type adminRepository struct {
@@ -141,55 +143,80 @@ func (r *adminRepository) Create(ctx context.Context, set *domain.ExamSet) error
 }
 
 func (r *adminRepository) Update(ctx context.Context, set *domain.ExamSet) error {
-	set.UpdatedAt = time.Now().UTC()
-	updates := map[string]any{
-		"exam_track_id":     set.ExamTrackID,
-		"code":              strings.ToLower(set.Code),
-		"title":             set.Title,
-		"description":       set.Description,
-		"cover_image_url":   set.CoverImageURL,
-		"duration_minutes":  set.DurationMinutes,
-		"total_questions":   set.TotalQuestions,
-		"passing_score":     set.PassingScore,
-		"difficulty":        set.Difficulty,
-		"access_type":            set.AccessType,
-		"allow_single_purchase":  set.AllowSinglePurchase,
-		"price_amount":           set.PriceAmount,
-		"original_price_amount":  set.OriginalPriceAmount,
-		"currency":               set.Currency,
-		"sale_price_amount":      set.SalePriceAmount,
-		"mode":              set.Mode,
-		"is_official":       set.IsOfficial,
-		"is_featured":       set.IsFeatured,
-		"is_active":         set.IsActive,
-		"answer_sheet_block_columns":          set.AnswerSheetLayout.BlockColumns,
-		"answer_sheet_questions_per_block":    set.AnswerSheetLayout.QuestionsPerBlock,
-		"answer_sheet_choice_label_style":     set.AnswerSheetLayout.ChoiceLabelStyle,
-		"answer_sheet_show_header":            set.AnswerSheetLayout.ShowHeader,
-		"answer_sheet_show_instructions":      set.AnswerSheetLayout.ShowInstructions,
-		"answer_sheet_show_candidate_info":    set.AnswerSheetLayout.ShowCandidateInfo,
-		"updated_at":        set.UpdatedAt,
-	}
-	if set.IsActive {
-		updates["published_at"] = publicationActivationTimestamp(set.UpdatedAt)
-	}
-	return r.db.WithContext(ctx).Model(&ExamSetModel{}).Where("id = ?", set.ID).Updates(updates).Error
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		before, err := lockExamSetLifecycleState(tx, set.ID)
+		if err != nil {
+			return err
+		}
+		set.UpdatedAt = time.Now().UTC()
+		updates := map[string]any{
+			"exam_track_id":                    set.ExamTrackID,
+			"code":                             strings.ToLower(set.Code),
+			"title":                            set.Title,
+			"description":                      set.Description,
+			"cover_image_url":                  set.CoverImageURL,
+			"duration_minutes":                 set.DurationMinutes,
+			"total_questions":                  set.TotalQuestions,
+			"passing_score":                    set.PassingScore,
+			"difficulty":                       set.Difficulty,
+			"access_type":                      set.AccessType,
+			"allow_single_purchase":            set.AllowSinglePurchase,
+			"price_amount":                     set.PriceAmount,
+			"original_price_amount":            set.OriginalPriceAmount,
+			"currency":                         set.Currency,
+			"sale_price_amount":                set.SalePriceAmount,
+			"mode":                             set.Mode,
+			"is_official":                      set.IsOfficial,
+			"is_featured":                      set.IsFeatured,
+			"is_active":                        set.IsActive,
+			"answer_sheet_block_columns":       set.AnswerSheetLayout.BlockColumns,
+			"answer_sheet_questions_per_block": set.AnswerSheetLayout.QuestionsPerBlock,
+			"answer_sheet_choice_label_style":  set.AnswerSheetLayout.ChoiceLabelStyle,
+			"answer_sheet_show_header":         set.AnswerSheetLayout.ShowHeader,
+			"answer_sheet_show_instructions":   set.AnswerSheetLayout.ShowInstructions,
+			"answer_sheet_show_candidate_info": set.AnswerSheetLayout.ShowCandidateInfo,
+			"updated_at":                       set.UpdatedAt,
+		}
+		if set.IsActive {
+			updates["published_at"] = publicationActivationTimestamp(set.UpdatedAt)
+		}
+		if err := tx.Model(&ExamSetModel{}).Where("id = ?", set.ID).Updates(updates).Error; err != nil {
+			return err
+		}
+		if isEligibleLifecycleState(before.Status, before.IsActive) && !isEligibleLifecycleState(before.Status, set.IsActive) {
+			return insertLifecycleStopEvent(tx, set.ID, set.UpdatedAt)
+		}
+		return nil
+	})
 }
 
 func (r *adminRepository) Delete(ctx context.Context, id uuid.UUID) (bool, error) {
-	var attemptCount int64
-	if err := r.db.WithContext(ctx).Table("exam_attempts").Where("exam_set_id = ?", id).Count(&attemptCount).Error; err != nil {
-		return false, err
-	}
-	if attemptCount > 0 {
-		err := r.db.WithContext(ctx).Model(&ExamSetModel{}).Where("id = ?", id).Updates(map[string]any{
-			"is_active":  false,
-			"updated_at": time.Now().UTC(),
-		}).Error
-		return true, err
-	}
-	err := r.db.WithContext(ctx).Delete(&ExamSetModel{}, "id = ?", id).Error
-	return false, err
+	deactivated := false
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		before, err := lockExamSetLifecycleState(tx, id)
+		if err != nil {
+			return err
+		}
+		var attemptCount int64
+		if err := tx.Table("exam_attempts").Where("exam_set_id = ?", id).Count(&attemptCount).Error; err != nil {
+			return err
+		}
+		transitionAt := time.Now().UTC()
+		if isEligibleLifecycleState(before.Status, before.IsActive) {
+			if err := insertLifecycleStopEvent(tx, id, transitionAt); err != nil {
+				return err
+			}
+		}
+		if attemptCount > 0 {
+			deactivated = true
+			return tx.Model(&ExamSetModel{}).Where("id = ?", id).Updates(map[string]any{
+				"is_active":  false,
+				"updated_at": transitionAt,
+			}).Error
+		}
+		return tx.Delete(&ExamSetModel{}, "id = ?", id).Error
+	})
+	return deactivated, err
 }
 
 func (r *adminRepository) UpdateTotalQuestions(ctx context.Context, examSetID uuid.UUID, count int) error {
@@ -200,31 +227,55 @@ func (r *adminRepository) UpdateTotalQuestions(ctx context.Context, examSetID uu
 }
 
 func (r *adminRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status string, isActive bool) error {
-	now := time.Now().UTC()
-	updates := map[string]any{
-		"status":     status,
-		"is_active":  isActive,
-		"updated_at": now,
-	}
-	if status == domain.StatusPublished && isActive {
-		updates["published_at"] = gorm.Expr(`CASE
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		before, err := lockExamSetLifecycleState(tx, id)
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		updates := map[string]any{
+			"status":     status,
+			"is_active":  isActive,
+			"updated_at": now,
+		}
+		if status == domain.StatusPublished && isActive {
+			updates["published_at"] = gorm.Expr(`CASE
 			WHEN status <> ? OR is_active = false OR published_at IS NULL THEN ?
 			ELSE published_at
 		END`, domain.StatusPublished, now)
-	}
-	return r.db.WithContext(ctx).Model(&ExamSetModel{}).Where("id = ?", id).Updates(updates).Error
+		}
+		if err := tx.Model(&ExamSetModel{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+			return err
+		}
+		if isEligibleLifecycleState(before.Status, before.IsActive) && !isEligibleLifecycleState(status, isActive) {
+			return insertLifecycleStopEvent(tx, id, now)
+		}
+		return nil
+	})
 }
 
 func (r *adminRepository) UpdateIsActive(ctx context.Context, id uuid.UUID, isActive bool) error {
-	now := time.Now().UTC()
-	updates := map[string]any{
-		"is_active":  isActive,
-		"updated_at": now,
-	}
-	if isActive {
-		updates["published_at"] = publicationActivationTimestamp(now)
-	}
-	return r.db.WithContext(ctx).Model(&ExamSetModel{}).Where("id = ?", id).Updates(updates).Error
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		before, err := lockExamSetLifecycleState(tx, id)
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		updates := map[string]any{
+			"is_active":  isActive,
+			"updated_at": now,
+		}
+		if isActive {
+			updates["published_at"] = publicationActivationTimestamp(now)
+		}
+		if err := tx.Model(&ExamSetModel{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+			return err
+		}
+		if isEligibleLifecycleState(before.Status, before.IsActive) && !isEligibleLifecycleState(before.Status, isActive) {
+			return insertLifecycleStopEvent(tx, id, now)
+		}
+		return nil
+	})
 }
 
 func publicationActivationTimestamp(transitionAt time.Time) any {

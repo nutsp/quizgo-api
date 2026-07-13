@@ -33,6 +33,8 @@ type LeaderboardProjector interface {
 	RecordProjectionFailure(context.Context, uuid.UUID, error) error
 }
 
+const leaderboardProjectionDeliveryTimeout = 5 * time.Second
+
 type ExamAttemptUseCase struct {
 	attempts     attemptrepo.Repository
 	cache        attemptrepo.AttemptCacheRepository
@@ -45,6 +47,7 @@ type ExamAttemptUseCase struct {
 	invalidator  *appcache.Invalidator
 	omrSettings  OMRSettingsProvider
 	leaderboard  LeaderboardProjector
+	now          func() time.Time
 	validator    *validator.Validate
 }
 
@@ -76,6 +79,7 @@ func NewExamAttemptUseCase(
 		invalidator:  invalidator,
 		omrSettings:  omrSettings,
 		leaderboard:  leaderboard,
+		now:          func() time.Time { return time.Now().UTC() },
 		validator:    validator.New(),
 	}
 }
@@ -102,13 +106,13 @@ func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examS
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now().UTC()
+	now := uc.now()
 	if existing != nil {
-		if now.After(existing.ExpiresAt) {
-			if err := uc.timeoutAttempt(ctx, existing); err != nil {
-				return nil, err
-			}
-		} else {
+		existing, err = uc.transitionExpiredAttempt(ctx, existing)
+		if err != nil {
+			return nil, err
+		}
+		if existing.Status == domain.StatusInProgress {
 			return uc.buildStartResponseFromExisting(ctx, existing, set, setQuestions)
 		}
 	}
@@ -173,18 +177,29 @@ func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examS
 	}, nil
 }
 
-func (uc *ExamAttemptUseCase) timeoutAttempt(ctx context.Context, attempt *domain.ExamAttempt) error {
-	if err := uc.attempts.MarkAttemptTimeout(ctx, attempt.ID); err != nil {
-		return err
+func (uc *ExamAttemptUseCase) transitionExpiredAttempt(ctx context.Context, attempt *domain.ExamAttempt) (*domain.ExamAttempt, error) {
+	if attempt == nil || attempt.Status != domain.StatusInProgress || !uc.now().After(attempt.ExpiresAt) {
+		return attempt, nil
 	}
-	timedOut, err := uc.attempts.FindByIDForUser(ctx, attempt.ID, attempt.UserID)
+	changed, err := uc.attempts.MarkAttemptTimeout(ctx, attempt.ID)
 	if err != nil {
-		log.Printf("leaderboard timeout reload failed attempt_id=%s err=%v", attempt.ID, err)
-	} else {
-		uc.projectAttemptNonBlocking(ctx, timedOut)
+		return nil, err
 	}
-	uc.invalidateUserExams(ctx, attempt.UserID)
-	return nil
+	deliveryCtx, cancel := leaderboardProjectionContext(ctx)
+	defer cancel()
+	timedOut, reloadErr := uc.attempts.FindByIDForUser(deliveryCtx, attempt.ID, attempt.UserID)
+	if reloadErr == nil && timedOut == nil {
+		reloadErr = errors.New("timed out attempt disappeared during reload")
+	}
+	if reloadErr != nil {
+		uc.recordProjectionFailure(deliveryCtx, attempt.ID, reloadErr)
+		return nil, reloadErr
+	}
+	if changed {
+		uc.projectAttemptNonBlocking(deliveryCtx, timedOut)
+	}
+	uc.invalidateUserExams(deliveryCtx, attempt.UserID)
+	return timedOut, nil
 }
 
 func (uc *ExamAttemptUseCase) applyAccessSnapshot(attempt *domain.ExamAttempt, check entdomain.ExamSetAccessResult, now time.Time) {
@@ -232,6 +247,10 @@ func (uc *ExamAttemptUseCase) invalidateUserExams(ctx context.Context, userID uu
 
 func (uc *ExamAttemptUseCase) Get(ctx context.Context, userID, attemptID uuid.UUID) (*domain.GetAttemptResponse, error) {
 	attempt, err := uc.getOwnedAttempt(ctx, userID, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	attempt, err = uc.transitionExpiredAttempt(ctx, attempt)
 	if err != nil {
 		return nil, err
 	}
@@ -402,6 +421,10 @@ func (uc *ExamAttemptUseCase) Submit(ctx context.Context, userID, attemptID uuid
 	if attempt == nil {
 		return nil, apperrors.ErrAttemptNotFound
 	}
+	attempt, err = uc.transitionExpiredAttempt(ctx, attempt)
+	if err != nil {
+		return nil, err
+	}
 
 	if attempt.Status == domain.StatusSubmitted || attempt.Status == domain.StatusTimeout {
 		return uc.buildSubmitResponse(attempt), nil
@@ -434,7 +457,7 @@ func (uc *ExamAttemptUseCase) Submit(ctx context.Context, userID, attemptID uuid
 		return nil, err
 	}
 
-	now := time.Now().UTC()
+	now := uc.now()
 	scoreInputs := make([]scoringuc.AnswerInput, len(answers))
 	for i, a := range answers {
 		scoreInputs[i] = scoringuc.AnswerInput{
@@ -499,20 +522,35 @@ func (uc *ExamAttemptUseCase) projectAttemptNonBlocking(ctx context.Context, att
 	if uc.leaderboard == nil || attempt == nil {
 		return nil
 	}
+	deliveryCtx, cancel := leaderboardProjectionContext(ctx)
+	defer cancel()
 	input, err := leaderboardProjectionInput(attempt)
 	if err == nil {
 		var update *leaderboarddomain.ProjectionUpdate
-		update, err = uc.leaderboard.ProjectAttempt(ctx, input)
+		update, err = uc.leaderboard.ProjectAttempt(deliveryCtx, input)
 		if err == nil {
 			return update
 		}
 	}
-	if recordErr := uc.leaderboard.RecordProjectionFailure(ctx, attempt.ID, err); recordErr != nil {
-		log.Printf("leaderboard projection failure record failed attempt_id=%s projection_err=%v record_err=%v", attempt.ID, err, recordErr)
-	} else {
-		log.Printf("leaderboard projection failed attempt_id=%s err=%v", attempt.ID, err)
-	}
+	uc.recordProjectionFailure(deliveryCtx, attempt.ID, err)
 	return nil
+}
+
+func (uc *ExamAttemptUseCase) recordProjectionFailure(ctx context.Context, attemptID uuid.UUID, projectionErr error) {
+	if uc.leaderboard == nil {
+		return
+	}
+	deliveryCtx, cancel := leaderboardProjectionContext(ctx)
+	defer cancel()
+	if recordErr := uc.leaderboard.RecordProjectionFailure(deliveryCtx, attemptID, projectionErr); recordErr != nil {
+		log.Printf("leaderboard projection failure record failed attempt_id=%s projection_err=%v record_err=%v", attemptID, projectionErr, recordErr)
+	} else {
+		log.Printf("leaderboard projection failed attempt_id=%s err=%v", attemptID, projectionErr)
+	}
+}
+
+func leaderboardProjectionContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), leaderboardProjectionDeliveryTimeout)
 }
 
 func leaderboardProjectionInput(attempt *domain.ExamAttempt) (leaderboarddomain.ProjectionInput, error) {
@@ -740,7 +778,11 @@ func (uc *ExamAttemptUseCase) GetContinueAttempt(ctx context.Context, userID uui
 	if attempt == nil {
 		return nil, nil
 	}
-	if time.Now().UTC().After(attempt.ExpiresAt) {
+	attempt, err = uc.transitionExpiredAttempt(ctx, attempt)
+	if err != nil {
+		return nil, err
+	}
+	if attempt.Status != domain.StatusInProgress {
 		return nil, nil
 	}
 
@@ -786,11 +828,15 @@ func (uc *ExamAttemptUseCase) getEditableAttempt(ctx context.Context, userID, at
 	if err != nil {
 		return nil, err
 	}
-	if attempt.Status != domain.StatusInProgress {
-		return nil, apperrors.ErrAttemptSubmitted
+	attempt, err = uc.transitionExpiredAttempt(ctx, attempt)
+	if err != nil {
+		return nil, err
 	}
-	if time.Now().UTC().After(attempt.ExpiresAt) {
-		return nil, apperrors.ErrAttemptExpired
+	if attempt.Status != domain.StatusInProgress {
+		if attempt.Status == domain.StatusTimeout {
+			return nil, apperrors.ErrAttemptExpired
+		}
+		return nil, apperrors.ErrAttemptSubmitted
 	}
 	return attempt, nil
 }

@@ -93,7 +93,7 @@ type Repository interface {
 	UpsertAnswer(ctx context.Context, answer *domain.ExamAnswer) error
 	ClearAnswer(ctx context.Context, attemptID uuid.UUID, questionNo int) error
 	UpdateAttemptSubmitted(ctx context.Context, attempt *domain.ExamAttempt, answers []domain.ExamAnswer) error
-	MarkAttemptTimeout(ctx context.Context, attemptID uuid.UUID) error
+	MarkAttemptTimeout(ctx context.Context, attemptID uuid.UUID) (changed bool, err error)
 	CountCompletedByUser(ctx context.Context, userID uuid.UUID) (int64, error)
 	AverageScorePercentByUser(ctx context.Context, userID uuid.UUID) (float64, error)
 	ListAnswersWithQuestions(ctx context.Context, attemptID uuid.UUID) ([]AnswerWithQuestion, error)
@@ -288,15 +288,16 @@ func (r *postgresRepository) FindUserActivityForExamSet(ctx context.Context, use
 	return activity, nil
 }
 
-func (r *postgresRepository) MarkAttemptTimeout(ctx context.Context, attemptID uuid.UUID) error {
+func (r *postgresRepository) MarkAttemptTimeout(ctx context.Context, attemptID uuid.UUID) (bool, error) {
 	now := time.Now().UTC()
-	return r.db.WithContext(ctx).Model(&ExamAttemptModel{}).
+	result := r.db.WithContext(ctx).Model(&ExamAttemptModel{}).
 		Where("id = ? AND status = ?", attemptID, domain.StatusInProgress).
 		Updates(map[string]any{
 			"status":       domain.StatusTimeout,
 			"submitted_at": now,
 			"updated_at":   now,
-		}).Error
+		})
+	return result.RowsAffected == 1, result.Error
 }
 
 func (r *postgresRepository) FindLatestInProgress(ctx context.Context, userID uuid.UUID) (*domain.ExamAttempt, error) {
