@@ -7,7 +7,35 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	examsetdomain "virtual-exam-api/internal/examset/domain"
+	"virtual-exam-api/internal/leaderboard/domain"
 )
+
+type SeasonRow struct {
+	ID          uuid.UUID
+	ExamTrackID uuid.UUID
+	Year        int
+	Month       int
+	StartsAt    time.Time
+	EndsAt      time.Time
+}
+
+type BestScoreUpdate struct {
+	Previous *domain.ScoreCandidate
+	Current  domain.ScoreCandidate
+	Improved bool
+}
+
+type EntryRow struct {
+	TotalPoints          float64
+	CompletedExamSets    int
+	TotalDurationSeconds int64
+	ScoreAchievedAt      time.Time
+}
+
+type UserRankRow struct {
+	Rank        int
+	TotalPoints float64
+}
 
 type ExamSetContextRow struct {
 	ID            uuid.UUID
@@ -64,6 +92,15 @@ type ExamTrackUserRankRow struct {
 }
 
 type Repository interface {
+	EnsureSeason(ctx context.Context, examTrackID uuid.UUID, window domain.SeasonWindow) (*SeasonRow, error)
+	JoinExamSet(ctx context.Context, seasonID, examSetID uuid.UUID, joinedAt time.Time) error
+	StopExamSet(ctx context.Context, examSetID uuid.UUID, stoppedAt time.Time) error
+	GetEligibleSeason(ctx context.Context, examSetID uuid.UUID, submittedAt time.Time) (*SeasonRow, error)
+	UpsertBestScore(ctx context.Context, seasonID, userID, examSetID, attemptID uuid.UUID, candidate domain.ScoreCandidate) (*BestScoreUpdate, error)
+	RebuildEntry(ctx context.Context, seasonID, userID uuid.UUID) (*EntryRow, error)
+	GetUserRank(ctx context.Context, seasonID, userID uuid.UUID) (*UserRankRow, error)
+	RecordProjectionFailure(ctx context.Context, attemptID uuid.UUID, projectionErr error) error
+
 	FindPublishedExamSetByCode(ctx context.Context, code string) (*ExamSetContextRow, error)
 	FindActiveExamTrackByCode(ctx context.Context, code string) (*ExamTrackContextRow, error)
 	CountExamSetLeaderboard(ctx context.Context, examSetID uuid.UUID) (int64, error)
@@ -80,6 +117,243 @@ type postgresRepository struct {
 
 func NewPostgresRepository(db *gorm.DB) Repository {
 	return &postgresRepository{db: db}
+}
+
+func (r *postgresRepository) EnsureSeason(ctx context.Context, examTrackID uuid.UUID, window domain.SeasonWindow) (*SeasonRow, error) {
+	var row SeasonRow
+	err := r.db.WithContext(ctx).Raw(`
+		INSERT INTO leaderboard_seasons (
+			id, exam_track_id, year, month, starts_at, ends_at, status
+		)
+		VALUES (?, ?, ?, ?, ?, ?, 'active')
+		ON CONFLICT (exam_track_id, year, month) DO UPDATE SET
+			starts_at = EXCLUDED.starts_at,
+			ends_at = EXCLUDED.ends_at,
+			updated_at = now()
+		RETURNING id, exam_track_id, year, month, starts_at, ends_at
+	`, uuid.New(), examTrackID, window.Year, window.Month, window.StartsAt, window.EndsAt).Scan(&row).Error
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+func (r *postgresRepository) JoinExamSet(ctx context.Context, seasonID, examSetID uuid.UUID, joinedAt time.Time) error {
+	return r.db.WithContext(ctx).Exec(`
+		INSERT INTO leaderboard_season_exam_sets (season_id, exam_set_id, joined_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT (season_id, exam_set_id) DO UPDATE SET
+			joined_at = LEAST(leaderboard_season_exam_sets.joined_at, EXCLUDED.joined_at),
+			stopped_at = NULL
+	`, seasonID, examSetID, joinedAt).Error
+}
+
+func (r *postgresRepository) StopExamSet(ctx context.Context, examSetID uuid.UUID, stoppedAt time.Time) error {
+	return r.db.WithContext(ctx).Exec(`
+		UPDATE leaderboard_season_exam_sets
+		SET stopped_at = CASE
+			WHEN stopped_at IS NULL OR ? < stopped_at THEN ?
+			ELSE stopped_at
+		END
+		WHERE exam_set_id = ?
+	`, stoppedAt, stoppedAt, examSetID).Error
+}
+
+func (r *postgresRepository) GetEligibleSeason(ctx context.Context, examSetID uuid.UUID, submittedAt time.Time) (*SeasonRow, error) {
+	var row SeasonRow
+	err := r.db.WithContext(ctx).Raw(`
+		SELECT s.id, s.exam_track_id, s.year, s.month, s.starts_at, s.ends_at
+		FROM leaderboard_seasons s
+		JOIN leaderboard_season_exam_sets ses ON ses.season_id = s.id
+		WHERE ses.exam_set_id = ?
+			AND s.status = 'active'
+			AND ? >= s.starts_at
+			AND ? < s.ends_at
+			AND ? >= ses.joined_at
+			AND (ses.stopped_at IS NULL OR ? < ses.stopped_at)
+		ORDER BY s.starts_at DESC
+		LIMIT 1
+	`, examSetID, submittedAt, submittedAt, submittedAt, submittedAt).Scan(&row).Error
+	if err != nil {
+		return nil, err
+	}
+	if row.ID == uuid.Nil {
+		return nil, nil
+	}
+	return &row, nil
+}
+
+func (r *postgresRepository) UpsertBestScore(
+	ctx context.Context,
+	seasonID, userID, examSetID, attemptID uuid.UUID,
+	candidate domain.ScoreCandidate,
+) (*BestScoreUpdate, error) {
+	var update BestScoreUpdate
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		insert := tx.Exec(`
+			INSERT INTO leaderboard_scores (
+				season_id, user_id, exam_set_id, attempt_id,
+				points, duration_seconds, achieved_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (season_id, user_id, exam_set_id) DO NOTHING
+		`, seasonID, userID, examSetID, attemptID, candidate.Points, candidate.DurationSeconds, candidate.AchievedAt)
+		if insert.Error != nil {
+			return insert.Error
+		}
+		if insert.RowsAffected == 1 {
+			update.Current = candidate
+			update.Improved = true
+			return nil
+		}
+
+		var current struct {
+			Points          float64
+			DurationSeconds int
+			AchievedAt      time.Time
+		}
+		if err := tx.Raw(`
+			SELECT points, duration_seconds, achieved_at
+			FROM leaderboard_scores
+			WHERE season_id = ? AND user_id = ? AND exam_set_id = ?
+			FOR UPDATE
+		`, seasonID, userID, examSetID).Scan(&current).Error; err != nil {
+			return err
+		}
+
+		previous := domain.ScoreCandidate{
+			Points:          current.Points,
+			DurationSeconds: current.DurationSeconds,
+			AchievedAt:      current.AchievedAt,
+		}
+		update.Previous = &previous
+		update.Current = previous
+		if !domain.AttemptWins(candidate, previous) {
+			return nil
+		}
+
+		if err := tx.Exec(`
+			UPDATE leaderboard_scores
+			SET attempt_id = ?, points = ?, duration_seconds = ?, achieved_at = ?, updated_at = now()
+			WHERE season_id = ? AND user_id = ? AND exam_set_id = ?
+		`, attemptID, candidate.Points, candidate.DurationSeconds, candidate.AchievedAt, seasonID, userID, examSetID).Error; err != nil {
+			return err
+		}
+		update.Current = candidate
+		update.Improved = true
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &update, nil
+}
+
+func (r *postgresRepository) RebuildEntry(ctx context.Context, seasonID, userID uuid.UUID) (*EntryRow, error) {
+	var entry EntryRow
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var lockedAttempts []uuid.UUID
+		if err := tx.Raw(`
+			SELECT attempt_id
+			FROM leaderboard_scores
+			WHERE season_id = ? AND user_id = ?
+			ORDER BY exam_set_id
+			FOR UPDATE
+		`, seasonID, userID).Scan(&lockedAttempts).Error; err != nil {
+			return err
+		}
+		if len(lockedAttempts) == 0 {
+			return tx.Exec(`
+				DELETE FROM leaderboard_entries WHERE season_id = ? AND user_id = ?
+			`, seasonID, userID).Error
+		}
+
+		if err := tx.Raw(`
+			SELECT
+				COALESCE(SUM(points), 0) AS total_points,
+				COUNT(*)::int AS completed_exam_sets,
+				COALESCE(SUM(duration_seconds), 0)::bigint AS total_duration_seconds,
+				MAX(achieved_at) AS score_achieved_at
+			FROM leaderboard_scores
+			WHERE season_id = ? AND user_id = ?
+		`, seasonID, userID).Scan(&entry).Error; err != nil {
+			return err
+		}
+
+		return tx.Exec(`
+			INSERT INTO leaderboard_entries (
+				season_id, user_id, total_points, completed_exam_sets,
+				total_duration_seconds, score_achieved_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT (season_id, user_id) DO UPDATE SET
+				total_points = EXCLUDED.total_points,
+				completed_exam_sets = EXCLUDED.completed_exam_sets,
+				total_duration_seconds = EXCLUDED.total_duration_seconds,
+				score_achieved_at = EXCLUDED.score_achieved_at,
+				updated_at = now()
+		`, seasonID, userID, entry.TotalPoints, entry.CompletedExamSets, entry.TotalDurationSeconds, entry.ScoreAchievedAt).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &entry, nil
+}
+
+const monthlyRankWindowSQL = `
+		total_points DESC,
+		completed_exam_sets DESC,
+		total_duration_seconds ASC,
+		score_achieved_at ASC`
+
+const monthlyRankedEntriesCTE = `
+	WITH ranked AS (
+		SELECT
+			RANK() OVER (ORDER BY ` + monthlyRankWindowSQL + `) AS rank,
+			user_id,
+			total_points
+		FROM leaderboard_entries
+		WHERE season_id = ?
+	),
+	ordered AS (
+		SELECT rank, user_id, total_points
+		FROM ranked
+		ORDER BY rank, user_id
+	)
+`
+
+func (r *postgresRepository) GetUserRank(ctx context.Context, seasonID, userID uuid.UUID) (*UserRankRow, error) {
+	var row UserRankRow
+	err := r.db.WithContext(ctx).Raw(monthlyRankedEntriesCTE+`
+		SELECT rank, total_points
+		FROM ordered
+		WHERE user_id = ?
+	`, seasonID, userID).Scan(&row).Error
+	if err != nil {
+		return nil, err
+	}
+	if row.Rank == 0 {
+		return nil, nil
+	}
+	return &row, nil
+}
+
+func (r *postgresRepository) RecordProjectionFailure(ctx context.Context, attemptID uuid.UUID, projectionErr error) error {
+	lastError := ""
+	if projectionErr != nil {
+		lastError = projectionErr.Error()
+	}
+	return r.db.WithContext(ctx).Exec(`
+		INSERT INTO leaderboard_projection_failures (
+			id, attempt_id, retry_count, last_error
+		)
+		VALUES (?, ?, 1, ?)
+		ON CONFLICT (attempt_id) DO UPDATE SET
+			retry_count = leaderboard_projection_failures.retry_count + 1,
+			last_error = EXCLUDED.last_error,
+			resolved_at = NULL,
+			updated_at = now()
+	`, uuid.New(), attemptID, lastError).Error
 }
 
 func (r *postgresRepository) FindPublishedExamSetByCode(ctx context.Context, code string) (*ExamSetContextRow, error) {
