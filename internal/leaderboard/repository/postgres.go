@@ -971,12 +971,13 @@ func upsertBestScore(
 	}
 
 	var current struct {
+		AttemptID       uuid.UUID
 		Points          float64
 		DurationSeconds int
 		AchievedAt      time.Time
 	}
 	if err := tx.Raw(`
-			SELECT points, duration_seconds, achieved_at
+			SELECT attempt_id, points, duration_seconds, achieved_at
 			FROM leaderboard_scores
 			WHERE season_id = ? AND user_id = ? AND exam_set_id = ?
 			FOR UPDATE
@@ -991,7 +992,7 @@ func upsertBestScore(
 	}
 	update.Previous = &previous
 	update.Current = previous
-	if !domain.AttemptWins(candidate, previous) {
+	if !bestScoreAttemptWins(candidate, attemptID, previous, current.AttemptID) {
 		return &update, nil
 	}
 
@@ -1005,6 +1006,21 @@ func upsertBestScore(
 	update.Current = candidate
 	update.Improved = true
 	return &update, nil
+}
+
+func bestScoreAttemptWins(
+	candidate domain.ScoreCandidate,
+	attemptID uuid.UUID,
+	current domain.ScoreCandidate,
+	currentAttemptID uuid.UUID,
+) bool {
+	if domain.AttemptWins(candidate, current) {
+		return true
+	}
+	return candidate.Points == current.Points &&
+		candidate.DurationSeconds == current.DurationSeconds &&
+		candidate.AchievedAt.Equal(current.AchievedAt) &&
+		attemptID.String() < currentAttemptID.String()
 }
 
 func (r *postgresRepository) RebuildEntry(ctx context.Context, seasonID, userID uuid.UUID) (*EntryRow, error) {
@@ -1120,18 +1136,83 @@ func (r *postgresRepository) RecordProjectionFailure(ctx context.Context, attemp
 	if projectionErr != nil {
 		lastError = projectionErr.Error()
 	}
-	return r.db.WithContext(ctx).Exec(`
-		INSERT INTO leaderboard_projection_failures (
-			id, attempt_id, retry_count, last_error
-		)
-		VALUES (?, ?, 1, ?)
-		ON CONFLICT (attempt_id) DO UPDATE SET
-			retry_count = leaderboard_projection_failures.retry_count + 1,
-			last_error = EXCLUDED.last_error,
-			resolved_at = NULL,
-			updated_at = now()
-	`, uuid.New(), attemptID, lastError).Error
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var attempt struct {
+			ExamTrackID *uuid.UUID
+			ExamSetID   *uuid.UUID
+			SubmittedAt *time.Time
+		}
+		attemptResult := tx.Raw(`
+			SELECT exam_track_id, exam_set_id, submitted_at
+			FROM exam_attempts
+			WHERE id = ?
+			FOR SHARE
+		`, attemptID).Scan(&attempt)
+		if attemptResult.Error != nil {
+			return attemptResult.Error
+		}
+		if attemptResult.RowsAffected > 0 && attempt.ExamSetID != nil {
+			if attempt.SubmittedAt != nil && attempt.ExamTrackID != nil {
+				window, err := domain.BangkokSeasonWindow(*attempt.SubmittedAt)
+				if err != nil {
+					return err
+				}
+				if err := tx.Exec(
+					acquireSeasonLifecycleLockSQL,
+					*attempt.ExamTrackID,
+					window.Year,
+					window.Month,
+				).Error; err != nil {
+					return err
+				}
+			}
+			if err := tx.Exec(acquireExamSetTransitionLockSQL, *attempt.ExamSetID).Error; err != nil {
+				return err
+			}
+
+			var seasonID uuid.UUID
+			seasonResult := tx.Raw(findProjectionFailureSeasonSQL, attemptID).Scan(&seasonID)
+			if seasonResult.Error != nil {
+				return seasonResult.Error
+			}
+			if seasonResult.RowsAffected > 0 && seasonID != uuid.Nil {
+				if err := tx.Exec(acquireSeasonProjectionLockSQL, seasonID).Error; err != nil {
+					return err
+				}
+			}
+		}
+
+		return tx.Exec(`
+			INSERT INTO leaderboard_projection_failures (
+				id, attempt_id, retry_count, last_error
+			)
+			VALUES (?, ?, 1, ?)
+			ON CONFLICT (attempt_id) DO UPDATE SET
+				retry_count = leaderboard_projection_failures.retry_count + 1,
+				last_error = EXCLUDED.last_error,
+				updated_at = now()
+		`, uuid.New(), attemptID, lastError).Error
+	}, projectionTxOptions)
 }
+
+const findProjectionFailureSeasonSQL = `
+	SELECT s.id
+	FROM exam_attempts ea
+	JOIN leaderboard_seasons s ON s.exam_track_id = ea.exam_track_id
+	JOIN leaderboard_season_exam_sets ses
+		ON ses.season_id = s.id
+		AND ses.exam_set_id = ea.exam_set_id
+	WHERE ea.id = ?
+		AND s.status = 'active'
+		AND ea.status IN ('submitted', 'timeout')
+		AND ea.submitted_at IS NOT NULL
+		AND ea.submitted_at >= s.starts_at
+		AND ea.submitted_at < s.ends_at
+		AND ea.submitted_at >= ses.joined_at
+		AND (ses.stopped_at IS NULL OR ea.submitted_at < ses.stopped_at)
+	ORDER BY s.starts_at DESC, ses.joined_at DESC
+	LIMIT 1
+`
 
 const listReconcileExamSetIDsSQL = `
 	SELECT DISTINCT exam_set_id

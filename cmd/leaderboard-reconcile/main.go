@@ -58,6 +58,10 @@ func run(
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "unexpected positional arguments")
+		return 2
+	}
 
 	*trackCode = strings.TrimSpace(*trackCode)
 	hasTrackCode := *trackCode != ""

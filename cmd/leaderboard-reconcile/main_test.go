@@ -87,6 +87,36 @@ func TestRunTrackCodePrintsSeasonSummary(t *testing.T) {
 	}
 }
 
+func TestRunRejectsUnexpectedPositionalArguments(t *testing.T) {
+	t.Parallel()
+
+	track := leaderboardrepo.ExamTrackContextRow{
+		ID: uuid.MustParse("73000000-0000-0000-0000-000000000001"), Code: "gpor", Name: "Gpor",
+	}
+	source := &fakeTrackSource{byCode: map[string]*leaderboardrepo.ExamTrackContextRow{"gpor": &track}}
+	reconciler := &fakeSeasonReconciler{summaries: map[uuid.UUID]leaderboardusecase.ReconcileSummary{
+		track.ID: {SeasonID: uuid.New(), ScoreCount: 1, EntryCount: 1},
+	}}
+	var stdout, stderr bytes.Buffer
+	exitCode := run(
+		t.Context(),
+		[]string{"-track-code", "gpor", "-year", "2026", "-month", "7", "unexpected"},
+		&stdout,
+		&stderr,
+		time.Date(2026, time.July, 14, 10, 0, 0, 0, time.UTC),
+		func(context.Context) (trackSource, seasonReconciler, error) { return source, reconciler, nil },
+	)
+	if exitCode != 2 {
+		t.Fatalf("run() exit code = %d, want 2", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "unexpected positional arguments") {
+		t.Errorf("stderr = %q, want positional-argument error", stderr.String())
+	}
+	if len(reconciler.calls) != 0 {
+		t.Fatalf("reconciliation calls = %d, want 0", len(reconciler.calls))
+	}
+}
+
 func TestRunAllTracksContinuesAfterPerTrackFailureAndReturnsNonZero(t *testing.T) {
 	t.Parallel()
 

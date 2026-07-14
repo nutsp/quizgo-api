@@ -186,6 +186,61 @@ func TestPostgresReconcileSeasonPreservesTieAndDisabledUserPolicy(t *testing.T) 
 	assertSeasonRankRows(t, finalRows, []uuid.UUID{disabledUserID, firstActiveUserID, secondActiveUserID}, 1)
 }
 
+func TestPostgresReconcileSeasonUsesSameExactTieChoiceAsProjector(t *testing.T) {
+	db := openLeaderboardIntegrationDB(t)
+	repo := leaderboardrepo.NewPostgresRepository(db)
+	projector := leaderboardusecase.NewProjector(repo)
+	ctx, cancel := context.WithTimeout(t.Context(), postgresRaceBound)
+	defer cancel()
+
+	trackID := uuid.New()
+	examSetID := uuid.New()
+	userID := uuid.New()
+	lowerAttemptID := uuid.MustParse("64000000-0000-0000-0000-000000000001")
+	higherAttemptID := uuid.MustParse("64000000-0000-0000-0000-000000000002")
+	window := mustBangkokWindow(t, time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC))
+	achievedAt := window.StartsAt.Add(12 * time.Hour)
+
+	mustExec(t, db, `INSERT INTO exam_tracks (id, code) VALUES (?, 'exact-tie-track')`, trackID)
+	mustExec(t, db, `INSERT INTO users (id, email) VALUES (?, 'exact-tie@example.com')`, userID)
+	mustExec(t, db, `
+		INSERT INTO exam_sets (id, exam_track_id, code, status, is_active, published_at)
+		VALUES (?, ?, 'exact-tie-set', 'published', true, ?)
+	`, examSetID, trackID, window.StartsAt)
+	season, err := repo.EnsureSeason(ctx, trackID, window)
+	if err != nil {
+		t.Fatalf("EnsureSeason() error = %v", err)
+	}
+	for _, attemptID := range []uuid.UUID{higherAttemptID, lowerAttemptID} {
+		insertReconcileAttempt(t, db, trackID, userID, reconcileAttemptFixture{
+			id: attemptID, examSetID: examSetID, status: "submitted",
+			submittedAt: achievedAt, points: 80, duration: 600,
+		})
+	}
+
+	for _, attemptID := range []uuid.UUID{higherAttemptID, lowerAttemptID} {
+		if _, err := projector.ProjectAttempt(ctx, domain.ProjectionInput{
+			AttemptID: attemptID, UserID: userID, ExamSetID: examSetID,
+			ExamTrackID: trackID, TrackCode: "exact-tie-track", SubmittedAt: achievedAt,
+			Candidate: domain.ScoreCandidate{Points: 80, DurationSeconds: 600, AchievedAt: achievedAt},
+		}); err != nil {
+			t.Fatalf("ProjectAttempt(%s) error = %v", attemptID, err)
+		}
+	}
+
+	projected := readReconcileScores(t, db, season.ID)
+	if len(projected) != 1 || projected[0].AttemptID != lowerAttemptID {
+		t.Fatalf("projected exact tie = %+v, want attempt %s", projected, lowerAttemptID)
+	}
+	if _, err := repo.ReconcileSeason(ctx, trackID, window); err != nil {
+		t.Fatalf("ReconcileSeason() error = %v", err)
+	}
+	reconciled := readReconcileScores(t, db, season.ID)
+	if len(reconciled) != 1 || reconciled[0].AttemptID != lowerAttemptID {
+		t.Fatalf("reconciled exact tie = %+v, want attempt %s", reconciled, lowerAttemptID)
+	}
+}
+
 func TestPostgresReconcileSeasonSerializesWithProjector(t *testing.T) {
 	db := openLeaderboardIntegrationDB(t)
 	repo := leaderboardrepo.NewPostgresRepository(db)
@@ -243,6 +298,80 @@ func TestPostgresReconcileSeasonSerializesWithProjector(t *testing.T) {
 	}
 	if scores, entries := readReconcileScores(t, db, season.ID), readReconcileEntries(t, db, season.ID); len(scores) != 1 || len(entries) != 1 || scores[0].AttemptID != attemptID || entries[0].TotalPoints != 90 {
 		t.Fatalf("concurrent projection state scores=%+v entries=%+v", scores, entries)
+	}
+}
+
+func TestPostgresReconcileSeasonDoesNotReopenResolvedProjectionFailure(t *testing.T) {
+	db := openLeaderboardIntegrationDB(t)
+	repo := leaderboardrepo.NewPostgresRepository(db)
+	ctx, cancel := context.WithTimeout(t.Context(), postgresRaceBound)
+	defer cancel()
+
+	trackID := uuid.New()
+	examSetID := uuid.New()
+	userID := uuid.New()
+	attemptID := uuid.New()
+	window := mustBangkokWindow(t, time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC))
+	submittedAt := window.StartsAt.Add(12 * time.Hour)
+	mustExec(t, db, `INSERT INTO exam_tracks (id, code) VALUES (?, 'failure-race')`, trackID)
+	mustExec(t, db, `INSERT INTO users (id, email) VALUES (?, 'failure-race@example.com')`, userID)
+	mustExec(t, db, `
+		INSERT INTO exam_sets (id, exam_track_id, code, status, is_active, published_at)
+		VALUES (?, ?, 'failure-race-set', 'published', true, ?)
+	`, examSetID, trackID, window.StartsAt)
+	season, err := repo.EnsureSeason(ctx, trackID, window)
+	if err != nil {
+		t.Fatalf("EnsureSeason() error = %v", err)
+	}
+	insertReconcileAttempt(t, db, trackID, userID, reconcileAttemptFixture{
+		id: attemptID, examSetID: examSetID, status: "submitted",
+		submittedAt: submittedAt, points: 90, duration: 600,
+	})
+	if err := repo.RecordProjectionFailure(ctx, attemptID, errors.New("initial failure")); err != nil {
+		t.Fatalf("initial RecordProjectionFailure() error = %v", err)
+	}
+
+	gate := acquireSeasonProjectionGate(t, db, season.ID)
+	reconcileResult := make(chan error, 1)
+	go func() {
+		_, err := repo.ReconcileSeason(ctx, trackID, window)
+		reconcileResult <- err
+	}()
+	waitForPostgresLockWait(t, db, "pg_advisory_xact_lock", "hashtextextended")
+
+	recordResult := make(chan error, 1)
+	go func() {
+		recordResult <- repo.RecordProjectionFailure(ctx, attemptID, errors.New("late failure"))
+	}()
+	waitForPostgresLockWaitCount(t, db, 2, "pg_advisory_xact_lock", "hashtextextended")
+	select {
+	case err := <-recordResult:
+		t.Fatalf("RecordProjectionFailure() returned before reconciliation released its lock: %v", err)
+	default:
+	}
+	if err := gate.Rollback().Error; err != nil {
+		t.Fatalf("release season projection gate: %v", err)
+	}
+	if err := <-reconcileResult; err != nil {
+		t.Fatalf("ReconcileSeason() error = %v", err)
+	}
+	if err := <-recordResult; err != nil {
+		t.Fatalf("late RecordProjectionFailure() error = %v", err)
+	}
+
+	var failure struct {
+		RetryCount int
+		ResolvedAt *time.Time
+	}
+	if err := db.Raw(`
+		SELECT retry_count, resolved_at
+		FROM leaderboard_projection_failures
+		WHERE attempt_id = ?
+	`, attemptID).Scan(&failure).Error; err != nil {
+		t.Fatalf("read projection failure: %v", err)
+	}
+	if failure.RetryCount != 2 || failure.ResolvedAt == nil {
+		t.Fatalf("projection failure = %+v, want retry_count=2 and resolved_at set", failure)
 	}
 }
 
