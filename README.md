@@ -469,6 +469,15 @@ api/
 └── Dockerfile
 ```
 
+## Monthly Leaderboard Reconciliation
+
+After deploying the monthly leaderboard migrations and application code, rebuild the target month before running the focused backend verification:
+
+```bash
+go run ./cmd/leaderboard-reconcile -all-active-tracks -year 2026 -month 7
+go test ./internal/leaderboard/... ./internal/examattempt/usecase ./internal/examset/usecase
+```
+
 ## Seed Data
 
 - Exam tracks: สอบ ก.พ., สอบตำรวจ, สอบท้องถิ่น, สอบครูผู้ช่วย

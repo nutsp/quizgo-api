@@ -34,6 +34,7 @@ type LeaderboardRepository interface {
 	ListAwards(context.Context, uuid.UUID) ([]leaderboardrepo.AwardRow, error)
 	ListDueSeasons(context.Context, time.Time) ([]leaderboardrepo.SeasonRow, error)
 	FinalizeSeason(context.Context, uuid.UUID, time.Time) (*leaderboardrepo.FinalizationResult, error)
+	ReconcileSeason(context.Context, uuid.UUID, domain.SeasonWindow) (*leaderboardrepo.ReconcileResult, error)
 }
 
 type LeaderboardUseCase struct {

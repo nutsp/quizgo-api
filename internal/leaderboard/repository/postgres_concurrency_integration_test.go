@@ -977,7 +977,17 @@ func openLeaderboardIntegrationDB(t *testing.T) *gorm.DB {
 				email varchar(255) NOT NULL DEFAULT '',
 				status varchar(30) NOT NULL DEFAULT 'active'
 			)`,
-		`CREATE TABLE exam_attempts (id uuid PRIMARY KEY, exam_set_id uuid REFERENCES exam_sets(id))`,
+		`CREATE TABLE exam_attempts (
+				id uuid PRIMARY KEY,
+				user_id uuid REFERENCES users(id),
+				exam_track_id uuid REFERENCES exam_tracks(id),
+				exam_set_id uuid REFERENCES exam_sets(id),
+				status varchar(30) NOT NULL DEFAULT 'in_progress',
+				started_at timestamptz NOT NULL DEFAULT now(),
+				submitted_at timestamptz,
+				duration_seconds int,
+				score_percent numeric(10,2) NOT NULL DEFAULT 0
+			)`,
 	} {
 		mustExec(t, testDB, statement)
 	}

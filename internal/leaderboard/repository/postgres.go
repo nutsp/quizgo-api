@@ -52,6 +52,7 @@ type BestScoreProjection struct {
 
 var (
 	ErrLifecycleStatePending = errors.New("leaderboard lifecycle state is pending")
+	ErrSeasonFinalized       = errors.New("leaderboard season is finalized")
 	projectionTxOptions      = &sql.TxOptions{Isolation: sql.LevelReadCommitted}
 )
 
@@ -184,6 +185,12 @@ type FinalizationResult struct {
 	AwardCount  int64
 }
 
+type ReconcileResult struct {
+	SeasonID   uuid.UUID
+	ScoreCount int64
+	EntryCount int64
+}
+
 type Repository interface {
 	EnsureSeason(ctx context.Context, examTrackID uuid.UUID, window domain.SeasonWindow) (*SeasonRow, error)
 	EnsureSeasonForPublish(ctx context.Context, examTrackID, examSetID uuid.UUID, window domain.SeasonWindow) (*SeasonRow, error)
@@ -199,6 +206,7 @@ type Repository interface {
 
 	FindPublishedExamSetByCode(ctx context.Context, code string) (*ExamSetContextRow, error)
 	FindActiveExamTrackByCode(ctx context.Context, code string) (*ExamTrackContextRow, error)
+	ListActiveExamTracks(ctx context.Context) ([]ExamTrackContextRow, error)
 	CountExamSetLeaderboard(ctx context.Context, examSetID uuid.UUID) (int64, error)
 	ListExamSetLeaderboard(ctx context.Context, examSetID uuid.UUID, offset, limit int) ([]ExamSetLeaderboardRow, error)
 	GetExamSetUserRank(ctx context.Context, examSetID, userID uuid.UUID) (*ExamSetUserRankRow, error)
@@ -217,6 +225,7 @@ type Repository interface {
 	ListAwards(ctx context.Context, userID uuid.UUID) ([]AwardRow, error)
 	ListDueSeasons(ctx context.Context, at time.Time) ([]SeasonRow, error)
 	FinalizeSeason(ctx context.Context, seasonID uuid.UUID, finalizedAt time.Time) (*FinalizationResult, error)
+	ReconcileSeason(ctx context.Context, trackID uuid.UUID, window domain.SeasonWindow) (*ReconcileResult, error)
 }
 
 type postgresRepository struct {
@@ -1124,6 +1133,162 @@ func (r *postgresRepository) RecordProjectionFailure(ctx context.Context, attemp
 	`, uuid.New(), attemptID, lastError).Error
 }
 
+const listReconcileExamSetIDsSQL = `
+	SELECT DISTINCT exam_set_id
+	FROM leaderboard_season_exam_sets
+	WHERE season_id = ?
+	ORDER BY exam_set_id
+`
+
+const lockReconcileSeasonSQL = `
+	SELECT id, exam_track_id, year, month, starts_at, ends_at, status, finalized_at
+	FROM leaderboard_seasons
+	WHERE id = ?
+	FOR UPDATE
+`
+
+const reconcileEligibleAttemptsCTE = `
+	WITH eligible_attempts AS (
+		SELECT
+			ea.id AS attempt_id,
+			ea.user_id,
+			ea.exam_set_id,
+			ROUND(
+				LEAST(100::numeric, GREATEST(0::numeric, ea.score_percent)),
+				1
+			) AS points,
+			COALESCE(ea.duration_seconds, 0) AS duration_seconds,
+			ea.submitted_at AS achieved_at
+		FROM exam_attempts ea
+		WHERE ea.exam_track_id = ?
+			AND ea.status IN ('submitted', 'timeout')
+			AND ea.submitted_at IS NOT NULL
+			AND ea.submitted_at >= ?
+			AND ea.submitted_at < ?
+			AND EXISTS (
+				SELECT 1
+				FROM leaderboard_season_exam_sets ses
+				WHERE ses.season_id = ?
+					AND ses.exam_set_id = ea.exam_set_id
+					AND ea.submitted_at >= ses.joined_at
+					AND (ses.stopped_at IS NULL OR ea.submitted_at < ses.stopped_at)
+			)
+	)
+`
+
+func (r *postgresRepository) ReconcileSeason(
+	ctx context.Context,
+	trackID uuid.UUID,
+	window domain.SeasonWindow,
+) (*ReconcileResult, error) {
+	result := &ReconcileResult{}
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Stabilize season enrollment intervals before replacing projections.
+		if err := tx.Exec(
+			acquireSeasonLifecycleLockSQL,
+			trackID,
+			window.Year,
+			window.Month,
+		).Error; err != nil {
+			return err
+		}
+
+		var season SeasonRow
+		if err := r.ensureSeasonInTransaction(tx, trackID, window, nil, &season); err != nil {
+			return err
+		}
+		result.SeasonID = season.ID
+
+		var examSetIDs []uuid.UUID
+		if err := tx.Raw(listReconcileExamSetIDsSQL, season.ID).Scan(&examSetIDs).Error; err != nil {
+			return err
+		}
+		for _, examSetID := range examSetIDs {
+			if err := tx.Exec(acquireExamSetTransitionLockSQL, examSetID).Error; err != nil {
+				return err
+			}
+		}
+		if err := tx.Exec(acquireSeasonProjectionLockSQL, season.ID).Error; err != nil {
+			return err
+		}
+		if err := tx.Raw(lockReconcileSeasonSQL, season.ID).Scan(&season).Error; err != nil {
+			return err
+		}
+		if season.Status != "active" {
+			return ErrSeasonFinalized
+		}
+
+		// Rebuild scores and entries from terminal attempts as one visible change.
+		if err := tx.Exec(`DELETE FROM leaderboard_entries WHERE season_id = ?`, season.ID).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(`DELETE FROM leaderboard_scores WHERE season_id = ?`, season.ID).Error; err != nil {
+			return err
+		}
+
+		scores := tx.Exec(reconcileEligibleAttemptsCTE+`, ranked_attempts AS (
+			SELECT
+				eligible_attempts.*,
+				ROW_NUMBER() OVER (
+					PARTITION BY user_id, exam_set_id
+					ORDER BY points DESC, duration_seconds ASC, achieved_at ASC, attempt_id ASC
+				) AS attempt_rank
+			FROM eligible_attempts
+		)
+		INSERT INTO leaderboard_scores (
+			season_id, user_id, exam_set_id, attempt_id,
+			points, duration_seconds, achieved_at
+		)
+		SELECT ?, user_id, exam_set_id, attempt_id, points, duration_seconds, achieved_at
+		FROM ranked_attempts
+		WHERE attempt_rank = 1
+		ORDER BY user_id, exam_set_id
+	`, trackID, season.StartsAt, season.EndsAt, season.ID, season.ID)
+		if scores.Error != nil {
+			return scores.Error
+		}
+		result.ScoreCount = scores.RowsAffected
+
+		entries := tx.Exec(`
+			INSERT INTO leaderboard_entries (
+				season_id, user_id, total_points, completed_exam_sets,
+				total_duration_seconds, score_achieved_at
+			)
+			SELECT
+				season_id,
+				user_id,
+				SUM(points),
+				COUNT(*)::int,
+				SUM(duration_seconds)::bigint,
+				MAX(achieved_at)
+			FROM leaderboard_scores
+			WHERE season_id = ?
+			GROUP BY season_id, user_id
+			ORDER BY user_id
+		`, season.ID)
+		if entries.Error != nil {
+			return entries.Error
+		}
+		result.EntryCount = entries.RowsAffected
+
+		// Preserve the first successful resolution time across idempotent retries.
+		if err := tx.Exec(reconcileEligibleAttemptsCTE+`
+			UPDATE leaderboard_projection_failures failure
+			SET resolved_at = now(), updated_at = now()
+			FROM eligible_attempts eligible
+			WHERE failure.attempt_id = eligible.attempt_id
+				AND failure.resolved_at IS NULL
+		`, trackID, season.StartsAt, season.EndsAt, season.ID).Error; err != nil {
+			return err
+		}
+		return nil
+	}, projectionTxOptions)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 func (r *postgresRepository) FindPublishedExamSetByCode(ctx context.Context, code string) (*ExamSetContextRow, error) {
 	var row ExamSetContextRow
 	err := r.db.WithContext(ctx).Raw(`
@@ -1158,6 +1323,17 @@ func (r *postgresRepository) FindActiveExamTrackByCode(ctx context.Context, code
 		return nil, nil
 	}
 	return &row, nil
+}
+
+func (r *postgresRepository) ListActiveExamTracks(ctx context.Context) ([]ExamTrackContextRow, error) {
+	var rows []ExamTrackContextRow
+	err := r.db.WithContext(ctx).Raw(`
+		SELECT id, code, name
+		FROM exam_tracks
+		WHERE is_active = true
+		ORDER BY code, id
+	`).Scan(&rows).Error
+	return rows, err
 }
 
 func (r *postgresRepository) FindMostRecentAttemptedTrack(ctx context.Context, userID uuid.UUID) (*ExamTrackContextRow, error) {
