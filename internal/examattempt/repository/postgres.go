@@ -404,15 +404,18 @@ func (r *postgresRepository) UpdateAttemptSubmitted(ctx context.Context, attempt
 		}
 		if result.RowsAffected == 0 {
 			timeoutQuery := tx.Model(&ExamAttemptModel{}).
-				Where("id = ? AND status = ? AND expires_at <= GREATEST(?::timestamptz, CURRENT_TIMESTAMP)", attempt.ID, domain.StatusInProgress, *attempt.SubmittedAt)
+				Where("id = ? AND status = ? AND expires_at <= CURRENT_TIMESTAMP", attempt.ID, domain.StatusInProgress)
 			if r.hasTimingMode {
 				timeoutQuery = timeoutQuery.Where("COALESCE(timing_mode, 'countdown') <> 'elapsed'")
 			}
 			result = timeoutQuery.
 				Updates(map[string]any{
 					"status":       domain.StatusTimeout,
-					"submitted_at": effectiveTransitionAt,
-					"updated_at":   effectiveTransitionAt,
+					"submitted_at": gorm.Expr("CURRENT_TIMESTAMP"),
+					"duration_seconds": gorm.Expr(`GREATEST(0,
+						FLOOR(EXTRACT(EPOCH FROM (LEAST(CURRENT_TIMESTAMP, expires_at) - started_at)))::integer
+					)`),
+					"updated_at": gorm.Expr("CURRENT_TIMESTAMP"),
 				})
 			if result.Error != nil {
 				return result.Error

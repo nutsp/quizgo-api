@@ -21,12 +21,6 @@ func TestPostgresTerminalTransitionIsAtomicAndEnqueuesProjection(t *testing.T) {
 		wantStatus       string
 	}{
 		{
-			name:           "schema without timing mode safely falls back to countdown at equality",
-			expiresAt:      projectionTransitionFixtureTime(),
-			wantTransition: AttemptTransitionTimedOut,
-			wantStatus:     domain.StatusTimeout,
-		},
-		{
 			name:             "persisted elapsed mode submits after nominal deadline",
 			withTimingColumn: true,
 			timingMode:       "elapsed",
@@ -61,6 +55,108 @@ func TestPostgresTerminalTransitionIsAtomicAndEnqueuesProjection(t *testing.T) {
 				t.Fatalf("transition = %q, want %q", transition, tc.wantTransition)
 			}
 			assertAttemptStatusAndSingleOutbox(t, db, attempt.ID, tc.wantStatus)
+		})
+	}
+}
+
+func TestPostgresSubmitFallbackUsesOnlyDatabaseDeadline(t *testing.T) {
+	t.Run("application clock ahead cannot timeout before database deadline", func(t *testing.T) {
+		db := openAttemptProjectionIntegrationDB(t)
+		repo := NewPostgresRepository(db)
+		attempt := insertProjectionAttemptFixture(t, db, time.Now().UTC().Add(time.Hour))
+		if err := db.Exec(`
+			UPDATE exam_attempts
+			SET started_at = CURRENT_TIMESTAMP - interval '10 minutes',
+				expires_at = CURRENT_TIMESTAMP + interval '1 hour'
+			WHERE id = ?
+		`, attempt.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+		setSubmittedFixture(attempt, time.Now().UTC().Add(2*time.Hour))
+
+		transition, err := repo.UpdateAttemptSubmitted(t.Context(), attempt, nil, false)
+		if err != nil {
+			t.Fatalf("UpdateAttemptSubmitted() error = %v", err)
+		}
+		if transition != AttemptTransitionUnchanged {
+			t.Fatalf("transition = %q, want unchanged", transition)
+		}
+		assertAttemptStatusAndOutboxCount(t, db, attempt.ID, domain.StatusInProgress, 0)
+	})
+
+	for _, tc := range []struct {
+		name            string
+		expiresOffset   int
+		wantDurationSec int
+	}{
+		{name: "database deadline equality", expiresOffset: 0, wantDurationSec: 1800},
+		{name: "database deadline already passed", expiresOffset: -1, wantDurationSec: 1799},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openAttemptProjectionIntegrationDB(t)
+			tx := db.Begin()
+			if tx.Error != nil {
+				t.Fatal(tx.Error)
+			}
+			defer tx.Rollback()
+
+			attempt := &domain.ExamAttempt{
+				ID:          uuid.New(),
+				UserID:      uuid.New(),
+				ExamTrackID: uuid.New(),
+				ExamSetID:   uuid.New(),
+				Status:      domain.StatusInProgress,
+			}
+			if err := tx.Exec(`INSERT INTO exam_tracks (id, code) VALUES (?, 'police')`, attempt.ExamTrackID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := tx.Exec(`
+				INSERT INTO exam_attempts (
+					id, user_id, exam_track_id, exam_set_id, status, started_at,
+					expires_at, created_at, updated_at
+				) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP - interval '30 minutes',
+					CURRENT_TIMESTAMP + (? * interval '1 second'),
+					CURRENT_TIMESTAMP - interval '30 minutes', CURRENT_TIMESTAMP - interval '30 minutes')
+			`, attempt.ID, attempt.UserID, attempt.ExamTrackID, attempt.ExamSetID,
+				attempt.Status, tc.expiresOffset).Error; err != nil {
+				t.Fatal(err)
+			}
+			setSubmittedFixture(attempt, time.Now().UTC().Add(2*time.Hour))
+
+			repo := NewPostgresRepository(tx)
+			transition, err := repo.UpdateAttemptSubmitted(t.Context(), attempt, nil, false)
+			if err != nil {
+				t.Fatalf("UpdateAttemptSubmitted() error = %v", err)
+			}
+			if transition != AttemptTransitionTimedOut {
+				t.Fatalf("transition = %q, want timed_out", transition)
+			}
+
+			var payload struct {
+				Status          string `gorm:"column:status"`
+				AttemptDuration int    `gorm:"column:attempt_duration"`
+				OutboxDuration  int    `gorm:"column:outbox_duration"`
+			}
+			if err := tx.Raw(`
+				SELECT ea.status,
+					ea.duration_seconds AS attempt_duration,
+					o.duration_seconds AS outbox_duration
+				FROM exam_attempts ea
+				JOIN leaderboard_attempt_projection_outbox o ON o.attempt_id = ea.id
+				WHERE ea.id = ?
+			`, attempt.ID).Scan(&payload).Error; err != nil {
+				t.Fatal(err)
+			}
+			if payload.Status != domain.StatusTimeout ||
+				payload.AttemptDuration != tc.wantDurationSec ||
+				payload.OutboxDuration != tc.wantDurationSec {
+				t.Fatalf("fallback state/durations = %s/%d/%d, want %s/%d/%d",
+					payload.Status, payload.AttemptDuration, payload.OutboxDuration,
+					domain.StatusTimeout, tc.wantDurationSec, tc.wantDurationSec)
+			}
+			if err := tx.Commit().Error; err != nil {
+				t.Fatal(err)
+			}
 		})
 	}
 }
@@ -246,6 +342,11 @@ func setSubmittedFixture(attempt *domain.ExamAttempt, at time.Time) {
 
 func assertAttemptStatusAndSingleOutbox(t *testing.T, db *gorm.DB, attemptID uuid.UUID, wantStatus string) {
 	t.Helper()
+	assertAttemptStatusAndOutboxCount(t, db, attemptID, wantStatus, 1)
+}
+
+func assertAttemptStatusAndOutboxCount(t *testing.T, db *gorm.DB, attemptID uuid.UUID, wantStatus string, wantOutbox int64) {
+	t.Helper()
 	var status string
 	if err := db.Table("exam_attempts").Select("status").Where("id = ?", attemptID).Scan(&status).Error; err != nil {
 		t.Fatal(err)
@@ -257,7 +358,7 @@ func assertAttemptStatusAndSingleOutbox(t *testing.T, db *gorm.DB, attemptID uui
 	if err := db.Table("leaderboard_attempt_projection_outbox").Where("attempt_id = ?", attemptID).Count(&count).Error; err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Fatalf("outbox rows = %d, want 1", count)
+	if count != wantOutbox {
+		t.Fatalf("outbox rows = %d, want %d", count, wantOutbox)
 	}
 }
