@@ -285,11 +285,11 @@ Announcement detail is available at:
 
 Shared public components render type treatment, schedule countdown, summary/content, CTA, and recommended exam-set links. Public pages include loading, error, empty, and not-found handling appropriate to their context.
 
-## Testing Strategy
+## Verification Strategy
 
-Implementation follows test-first red-green-refactor cycles.
+Implementation is feature-first. Automated tests focus on the backend rules most likely to expose unpublished content or calculate schedule visibility incorrectly; the MVP does not add a new frontend test framework.
 
-Backend unit tests cover:
+Targeted backend tests cover:
 
 - Required and conditional validation.
 - CTA URL validation.
@@ -297,18 +297,13 @@ Backend unit tests cover:
 - Bangkok calendar `days_left` values.
 - Public visibility, including pinned past schedules.
 - Status transitions.
-- Ordered exam-set replacement.
-- Cache hit/miss and invalidation calls.
-- Audit action selection.
-
-Repository integration tests cover PostgreSQL filtering, track scope, time windows, past-exam behavior, and exam-set ordering.
-
-Frontend unit tests cover Zod validation, countdown formatting, CTA resolution, and Home selection. A lightweight test runner is added because the current frontend has no TypeScript unit-test runner.
+- Cache invalidation calls for successful mutations.
+- Public repository filtering and exam-set ordering where the existing PostgreSQL integration harness is practical.
 
 Final verification includes:
 
-- Targeted Go tests and `go test ./...`.
-- Frontend unit tests, ESLint, and production build.
+- Targeted Go tests for visibility and validation, followed by `go test ./...`.
+- Frontend ESLint and production build.
 - Desktop and mobile browser flows for Admin create/edit/status/delete, Home strip, track announcements, and detail.
 - Negative paths for duplicate slug, invalid CTA, incomplete schedule publish, expired detail, and draft public access.
 
@@ -324,4 +319,3 @@ Final verification includes:
 8. Notification bell/read-unread state is excluded.
 9. Admin UI reuses the existing full-card/data-list/form layout.
 10. Indexed cache invalidation and six audit actions cover every mutation.
-
