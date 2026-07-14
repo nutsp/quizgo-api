@@ -990,9 +990,8 @@ func upsertBestScore(
 		DurationSeconds: current.DurationSeconds,
 		AchievedAt:      current.AchievedAt,
 	}
-	update.Previous = &previous
-	update.Current = previous
-	if !bestScoreAttemptWins(candidate, attemptID, previous, current.AttemptID) {
+	update, replace := bestScoreUpdate(attemptID, current.AttemptID, previous, candidate)
+	if !replace {
 		return &update, nil
 	}
 
@@ -1003,20 +1002,35 @@ func upsertBestScore(
 		`, attemptID, candidate.Points, candidate.DurationSeconds, candidate.AchievedAt, seasonID, userID, examSetID).Error; err != nil {
 		return nil, err
 	}
-	update.Current = candidate
-	update.Improved = true
 	return &update, nil
 }
 
-func bestScoreAttemptWins(
+func bestScoreUpdate(
+	attemptID, currentAttemptID uuid.UUID,
+	previous, candidate domain.ScoreCandidate,
+) (BestScoreUpdate, bool) {
+	update := BestScoreUpdate{
+		Previous: &previous,
+		Current:  previous,
+	}
+	if domain.AttemptWins(candidate, previous) {
+		update.Current = candidate
+		update.Improved = true
+		return update, true
+	}
+	if bestScoreAttemptWinsExactTie(candidate, attemptID, previous, currentAttemptID) {
+		update.Current = candidate
+		return update, true
+	}
+	return update, false
+}
+
+func bestScoreAttemptWinsExactTie(
 	candidate domain.ScoreCandidate,
 	attemptID uuid.UUID,
 	current domain.ScoreCandidate,
 	currentAttemptID uuid.UUID,
 ) bool {
-	if domain.AttemptWins(candidate, current) {
-		return true
-	}
 	return candidate.Points == current.Points &&
 		candidate.DurationSeconds == current.DurationSeconds &&
 		candidate.AchievedAt.Equal(current.AchievedAt) &&

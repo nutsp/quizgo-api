@@ -219,12 +219,16 @@ func TestPostgresReconcileSeasonUsesSameExactTieChoiceAsProjector(t *testing.T) 
 	}
 
 	for _, attemptID := range []uuid.UUID{higherAttemptID, lowerAttemptID} {
-		if _, err := projector.ProjectAttempt(ctx, domain.ProjectionInput{
+		update, err := projector.ProjectAttempt(ctx, domain.ProjectionInput{
 			AttemptID: attemptID, UserID: userID, ExamSetID: examSetID,
 			ExamTrackID: trackID, TrackCode: "exact-tie-track", SubmittedAt: achievedAt,
 			Candidate: domain.ScoreCandidate{Points: 80, DurationSeconds: 600, AchievedAt: achievedAt},
-		}); err != nil {
+		})
+		if err != nil {
 			t.Fatalf("ProjectAttempt(%s) error = %v", attemptID, err)
+		}
+		if attemptID == lowerAttemptID && update.ImprovedBestScore {
+			t.Error("exact-tie replacement ImprovedBestScore = true, want false")
 		}
 	}
 
