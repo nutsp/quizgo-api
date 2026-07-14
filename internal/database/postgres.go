@@ -41,6 +41,27 @@ func MustMigrate(db *gorm.DB, models ...any) {
 	if err := db.AutoMigrate(models...); err != nil {
 		log.Fatalf("auto migrate: %v", err)
 	}
+	reconcilePostMigrate(db)
+}
+
+func reconcilePostMigrate(db *gorm.DB) {
+	statements := []string{
+		`WITH ranked AS (
+			SELECT id, ROW_NUMBER() OVER (PARTITION BY exam_set_id ORDER BY rule_order ASC, id ASC) AS next_order
+			FROM exam_set_question_rules
+		)
+		UPDATE exam_set_question_rules AS rules
+		SET rule_order = ranked.next_order
+		FROM ranked
+			WHERE rules.id = ranked.id AND rules.rule_order <> ranked.next_order`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_exam_set_question_rules_order ON exam_set_question_rules(exam_set_id, rule_order)`,
+	}
+
+	for _, stmt := range statements {
+		if err := db.Exec(stmt).Error; err != nil {
+			log.Printf("post migrate reconcile (non-fatal): %v", err)
+		}
+	}
 }
 
 // reconcileLegacyConstraints drops PostgreSQL default unique constraint names

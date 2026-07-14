@@ -51,6 +51,14 @@ type ExamAttemptUseCase struct {
 	validator    *validator.Validate
 }
 
+type StartAttemptRequest struct {
+	TimingMode string `json:"timing_mode"`
+}
+
+func (r StartAttemptRequest) ToDomain() domain.StartAttemptRequest {
+	return domain.StartAttemptRequest{TimingMode: r.TimingMode}
+}
+
 func NewExamAttemptUseCase(
 	attempts attemptrepo.Repository,
 	attemptCache attemptrepo.AttemptCacheRepository,
@@ -84,7 +92,7 @@ func NewExamAttemptUseCase(
 	}
 }
 
-func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examSetCode string) (*domain.StartAttemptResponse, error) {
+func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examSetCode string, req domain.StartAttemptRequest) (*domain.StartAttemptResponse, error) {
 	set, err := uc.examSets.FindByCode(ctx, examSetCode)
 	if err != nil {
 		return nil, err
@@ -132,6 +140,7 @@ func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examS
 	defer uc.runtimeLocks.ReleaseDuplicateCreateLock(ctx, userID.String(), set.ID.String())
 
 	expiresAt := now.Add(time.Duration(set.DurationMinutes) * time.Minute)
+	timingMode := domain.NormalizeTimingMode(req.TimingMode)
 	attemptID := uuid.New()
 
 	attempt := &domain.ExamAttempt{
@@ -140,6 +149,7 @@ func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examS
 		ExamTrackID: set.ExamTrackID,
 		ExamSetID:   set.ID,
 		Status:      domain.StatusInProgress,
+		TimingMode:  timingMode,
 		StartedAt:   now,
 		ExpiresAt:   expiresAt,
 	}
@@ -168,6 +178,7 @@ func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examS
 	examSetRef := uc.examSetRefWithOMRSettings(set, omrSettings)
 	return &domain.StartAttemptResponse{
 		AttemptID:   attemptID.String(),
+		TimingMode:  timingMode,
 		ExamSet:     examSetRef,
 		OMRSettings: omrSettings,
 		StartedAt:   now,
@@ -178,7 +189,8 @@ func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examS
 }
 
 func (uc *ExamAttemptUseCase) transitionExpiredAttempt(ctx context.Context, attempt *domain.ExamAttempt) (*domain.ExamAttempt, error) {
-	if attempt == nil || attempt.Status != domain.StatusInProgress || uc.now().Before(attempt.ExpiresAt) {
+	if attempt == nil || attempt.Status != domain.StatusInProgress ||
+		!domain.UsesCountdownDeadline(attempt.TimingMode) || uc.now().Before(attempt.ExpiresAt) {
 		return attempt, nil
 	}
 	changed, err := uc.attempts.MarkAttemptTimeout(ctx, attempt.ID)
@@ -230,6 +242,7 @@ func (uc *ExamAttemptUseCase) buildStartResponseFromExisting(
 	examSetRef := uc.examSetRefWithOMRSettings(set, omrSettings)
 	return &domain.StartAttemptResponse{
 		AttemptID:   attempt.ID.String(),
+		TimingMode:  domain.NormalizeTimingMode(attempt.TimingMode),
 		ExamSet:     examSetRef,
 		OMRSettings: omrSettings,
 		StartedAt:   attempt.StartedAt,
@@ -276,11 +289,13 @@ func (uc *ExamAttemptUseCase) Get(ctx context.Context, userID, attemptID uuid.UU
 	return &domain.GetAttemptResponse{
 		AttemptID:        attempt.ID.String(),
 		Status:           attempt.Status,
+		TimingMode:       domain.NormalizeTimingMode(attempt.TimingMode),
 		ExamSet:          examSetRef,
 		OMRSettings:      omrSettings,
 		StartedAt:        attempt.StartedAt,
 		ExpiresAt:        attempt.ExpiresAt,
-		RemainingSeconds: attemptrepo.RemainingSeconds(attempt.ExpiresAt),
+		RemainingSeconds: remainingSecondsForAttempt(attempt),
+		ElapsedSeconds:   elapsedSecondsSince(attempt.StartedAt),
 		Questions:        buildQuestionsForExam(setQuestions),
 		Answers:          answerMap,
 		AnsweredCount:    answeredCount,
@@ -504,7 +519,7 @@ func (uc *ExamAttemptUseCase) Submit(ctx context.Context, userID, attemptID uuid
 	attempt.WrongCount = result.WrongCount
 	attempt.UnansweredCount = result.UnansweredCount
 
-	transition, err := uc.attempts.UpdateAttemptSubmitted(ctx, attempt, answers, false)
+	transition, err := uc.attempts.UpdateAttemptSubmitted(ctx, attempt, answers, !domain.UsesCountdownDeadline(attempt.TimingMode))
 	if err != nil {
 		return nil, err
 	}
@@ -602,6 +617,9 @@ func (uc *ExamAttemptUseCase) GetResult(ctx context.Context, userID, attemptID u
 	key := appcache.ResultSummary(attemptID.String())
 	var cached domain.ResultResponse
 	if ok, _ := uc.resultCache.GetJSON(ctx, key, &cached); ok {
+		if err := uc.attachResultAccess(ctx, userID, &cached); err != nil {
+			return nil, err
+		}
 		return &cached, nil
 	}
 
@@ -613,7 +631,19 @@ func (uc *ExamAttemptUseCase) GetResult(ctx context.Context, userID, attemptID u
 	_ = uc.resultCache.SetJSON(ctx, key, result, appcache.TTLResult)
 	_ = uc.resultCache.AddIndex(ctx, appcache.IndexAttemptResult(attemptID.String()), key, appcache.TTLResult+appcache.TTLIndexBuffer)
 
+	if err := uc.attachResultAccess(ctx, userID, result); err != nil {
+		return nil, err
+	}
 	return result, nil
+}
+
+func (uc *ExamAttemptUseCase) attachResultAccess(ctx context.Context, userID uuid.UUID, result *domain.ResultResponse) error {
+	hasPremium, err := uc.hasActivePremium(ctx, userID)
+	if err != nil {
+		return err
+	}
+	result.ExamSet.Access = &domain.ResultAccessInfo{HasPremium: hasPremium}
+	return nil
 }
 
 func (uc *ExamAttemptUseCase) buildResultResponse(ctx context.Context, attempt *domain.ExamAttempt) (*domain.ResultResponse, error) {
@@ -694,6 +724,13 @@ func (uc *ExamAttemptUseCase) GetReview(ctx context.Context, userID, attemptID u
 	if err != nil {
 		return nil, err
 	}
+	summaryOnly, err := uc.isSummaryOnlyAttempt(ctx, userID, attempt)
+	if err != nil {
+		return nil, err
+	}
+	if summaryOnly {
+		return nil, apperrors.ErrPremiumRequired
+	}
 
 	key := appcache.ResultReview(attemptID.String())
 	var cached domain.ReviewResponse
@@ -710,6 +747,33 @@ func (uc *ExamAttemptUseCase) GetReview(ctx context.Context, userID, attemptID u
 	_ = uc.resultCache.AddIndex(ctx, appcache.IndexAttemptResult(attemptID.String()), key, appcache.TTLResult+appcache.TTLIndexBuffer)
 
 	return review, nil
+}
+
+func (uc *ExamAttemptUseCase) isSummaryOnlyAttempt(ctx context.Context, userID uuid.UUID, attempt *domain.ExamAttempt) (bool, error) {
+	hasPremium, err := uc.hasActivePremium(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+	if hasPremium {
+		return false, nil
+	}
+	if attempt.AccessSource != nil {
+		return *attempt.AccessSource == entdomain.AccessSourceFree ||
+			*attempt.AccessSource == entdomain.AccessSourceTrial, nil
+	}
+	if attempt.ExamSet == nil {
+		return false, nil
+	}
+	return attempt.ExamSet.AccessType == examsetdomain.AccessFree ||
+		attempt.ExamSet.AccessType == examsetdomain.AccessTrial, nil
+}
+
+func (uc *ExamAttemptUseCase) hasActivePremium(ctx context.Context, userID uuid.UUID) (bool, error) {
+	if uc.entitlements == nil {
+		return false, nil
+	}
+	hasPremium, _, err := uc.entitlements.HasActivePremiumEntitlement(ctx, userID)
+	return hasPremium, err
 }
 
 func (uc *ExamAttemptUseCase) buildReviewResponse(ctx context.Context, attempt *domain.ExamAttempt) (*domain.ReviewResponse, error) {
@@ -815,7 +879,9 @@ func (uc *ExamAttemptUseCase) GetContinueAttempt(ctx context.Context, userID uui
 		ExamSetTitle:     title,
 		AnsweredCount:    answeredCount,
 		TotalQuestions:   total,
-		RemainingSeconds: attemptrepo.RemainingSeconds(attempt.ExpiresAt),
+		RemainingSeconds: remainingSecondsForAttempt(attempt),
+		ElapsedSeconds:   elapsedSecondsSince(attempt.StartedAt),
+		TimingMode:       domain.NormalizeTimingMode(attempt.TimingMode),
 		ExpiresAt:        attempt.ExpiresAt,
 	}, nil
 }
@@ -927,6 +993,21 @@ func buildAnswerMap(answers []domain.ExamAnswer) (map[int]string, int) {
 	return m, count
 }
 
+func remainingSecondsForAttempt(attempt *domain.ExamAttempt) int {
+	if !domain.UsesCountdownDeadline(attempt.TimingMode) {
+		return 0
+	}
+	return attemptrepo.RemainingSeconds(attempt.ExpiresAt)
+}
+
+func elapsedSecondsSince(startedAt time.Time) int {
+	elapsed := int(time.Since(startedAt).Seconds())
+	if elapsed < 0 {
+		return 0
+	}
+	return elapsed
+}
+
 func mapSubjectBreakdown(items []scoringdomain.SubjectScore) []domain.SubjectBreakdown {
 	out := make([]domain.SubjectBreakdown, len(items))
 	for i, s := range items {
@@ -966,6 +1047,7 @@ func (uc *ExamAttemptUseCase) examSetRefWithOMRSettings(set *examsetdomain.ExamS
 		DurationMinutes:   set.DurationMinutes,
 		TotalQuestions:    set.TotalQuestions,
 		PassingScore:      set.PassingScore,
+		AccessType:        set.AccessType,
 		AnswerSheetLayout: layout,
 	}
 }

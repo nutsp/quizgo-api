@@ -5,14 +5,14 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
-	"virtual-exam-api/internal/apperrors"
 	admindomain "virtual-exam-api/internal/admin/domain"
+	"virtual-exam-api/internal/apperrors"
 	audituc "virtual-exam-api/internal/auditlog/usecase"
 	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/middleware"
-	"virtual-exam-api/internal/response"
 	tagrepo "virtual-exam-api/internal/questiontag/repository"
 	taguc "virtual-exam-api/internal/questiontag/usecase"
+	"virtual-exam-api/internal/response"
 	userrepo "virtual-exam-api/internal/user/repository"
 )
 
@@ -47,6 +47,13 @@ func (h *Handler) List(c echo.Context) error {
 	if v := c.QueryParam("is_active"); v != "" {
 		active := v == "true"
 		filter.IsActive = &active
+	}
+	if v := c.QueryParam("subject_id"); v != "" {
+		id, err := parseUUID(v)
+		if err != nil {
+			return response.Error(c, err)
+		}
+		filter.SubjectID = &id
 	}
 	result, err := h.tags.List(c.Request().Context(), filter)
 	if err != nil {
@@ -133,9 +140,9 @@ func (h *Handler) Delete(c echo.Context) error {
 		return response.JSON(c, 200, map[string]string{"status": "deleted"})
 	}
 	return response.JSON(c, 200, map[string]any{
-		"status":    "deactivated",
-		"tag":       result,
-		"message":   "กลุ่มคำถามนี้ถูกใช้งานอยู่ ระบบปิดใช้งานแทนการลบ",
+		"status":  "deactivated",
+		"tag":     result,
+		"message": "กลุ่มคำถามนี้ถูกใช้งานอยู่ ระบบปิดใช้งานแทนการลบ",
 	})
 }
 

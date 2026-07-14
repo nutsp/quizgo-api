@@ -5,6 +5,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
+
 	qdomain "virtual-exam-api/internal/question/domain"
 	"virtual-exam-api/internal/questionimport/domain"
 	"virtual-exam-api/internal/questionimport/mathconvert"
@@ -52,6 +54,7 @@ func validateRow(
 	warns := []string{}
 
 	data := normalizeImportRow(row)
+	var subjectID *uuid.UUID
 
 	if data.SubjectCode == "" {
 		errs = append(errs, "กรุณาระบุ subject_code")
@@ -61,6 +64,8 @@ func validateRow(
 			errs = append(errs, "ไม่พบ subject_code นี้")
 		} else if subject == nil {
 			errs = append(errs, "ไม่พบ subject_code นี้")
+		} else {
+			subjectID = &subject.ID
 		}
 	}
 
@@ -151,6 +156,13 @@ func validateRow(
 				for _, code := range codes {
 					if !foundCodes[code] {
 						errs = append(errs, "ไม่พบกลุ่มคำถาม: "+code)
+					}
+				}
+				if subjectID != nil {
+					for _, tag := range found {
+						if tag.SubjectID != nil && *tag.SubjectID != *subjectID {
+							errs = append(errs, "กลุ่มคำถามไม่ตรงกับหมวดวิชา: "+tag.Code)
+						}
 					}
 				}
 			}

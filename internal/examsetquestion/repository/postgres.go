@@ -14,6 +14,9 @@ import (
 )
 
 type Repository interface {
+	GetQuestionRules(ctx context.Context, examSetID uuid.UUID) ([]domain.QuestionRule, error)
+	ReplaceQuestionRules(ctx context.Context, examSetID uuid.UUID, rules []domain.QuestionRule) error
+	QuestionRuleCapacity(ctx context.Context, examSetID uuid.UUID, selection AutoAssignSelection) (int64, int64, error)
 	ListAvailable(ctx context.Context, examSetID uuid.UUID, filter domain.AvailableFilter) ([]domain.AvailableQuestion, int64, error)
 	ListAssigned(ctx context.Context, examSetID uuid.UUID, filter domain.AssignedFilter) ([]domain.AssignedQuestion, int64, error)
 	ListAllAssigned(ctx context.Context, examSetID uuid.UUID) ([]domain.AssignedQuestion, error)
@@ -25,6 +28,59 @@ type Repository interface {
 	HasSubmittedAttempts(ctx context.Context, examSetID uuid.UUID) (bool, error)
 	HasAnyAttempts(ctx context.Context, examSetID uuid.UUID) (bool, error)
 	AssignedQuestionIDs(ctx context.Context, examSetID uuid.UUID) (map[uuid.UUID]bool, error)
+	RandomAvailableQuestionIDs(ctx context.Context, examSetID uuid.UUID, selection AutoAssignSelection, limit int) ([]uuid.UUID, error)
+}
+
+func applyAutoAssignSelection(db *gorm.DB, selection AutoAssignSelection) *gorm.DB {
+	db = db.Where("questions.subject_id = ?", selection.SubjectID).
+		Where("questions.status = ? AND questions.is_active = ?", qdomain.StatusPublished, true)
+	if selection.TagID != uuid.Nil {
+		db = db.Where("questions.id IN (SELECT question_id FROM question_tag_mappings WHERE tag_id = ?)", selection.TagID)
+	}
+	if selection.Difficulty != "" {
+		db = db.Where("questions.difficulty = ?", selection.Difficulty)
+	}
+	return db
+}
+
+func (r *postgresRepository) QuestionRuleCapacity(ctx context.Context, examSetID uuid.UUID, selection AutoAssignSelection) (int64, int64, error) {
+	totalQuery := applyAutoAssignSelection(
+		r.db.WithContext(ctx).Model(&questionrepo.QuestionModel{}),
+		selection,
+	)
+	var total int64
+	if err := totalQuery.Count(&total).Error; err != nil {
+		return 0, 0, err
+	}
+	assignedQuery := applyAutoAssignSelection(
+		r.db.WithContext(ctx).Model(&questionrepo.QuestionModel{}).
+			Joins("JOIN exam_set_questions ON exam_set_questions.question_id = questions.id").
+			Where("exam_set_questions.exam_set_id = ?", examSetID),
+		selection,
+	)
+	var assigned int64
+	if err := assignedQuery.Count(&assigned).Error; err != nil {
+		return 0, 0, err
+	}
+	return total, assigned, nil
+}
+
+type QuestionRuleModel struct {
+	ID         uuid.UUID  `gorm:"type:uuid;primaryKey"`
+	ExamSetID  uuid.UUID  `gorm:"type:uuid;not null;index"`
+	RuleOrder  int        `gorm:"not null;default:1"`
+	SubjectID  uuid.UUID  `gorm:"type:uuid;not null"`
+	TagID      *uuid.UUID `gorm:"type:uuid"`
+	Difficulty string     `gorm:"type:varchar(20)"`
+	Count      int        `gorm:"not null"`
+}
+
+func (QuestionRuleModel) TableName() string { return "exam_set_question_rules" }
+
+type AutoAssignSelection struct {
+	SubjectID  uuid.UUID
+	TagID      uuid.UUID
+	Difficulty string
 }
 
 type postgresRepository struct {
@@ -33,6 +89,33 @@ type postgresRepository struct {
 
 func NewPostgresRepository(db *gorm.DB) Repository {
 	return &postgresRepository{db: db}
+}
+
+func (r *postgresRepository) GetQuestionRules(ctx context.Context, examSetID uuid.UUID) ([]domain.QuestionRule, error) {
+	var models []QuestionRuleModel
+	if err := r.db.WithContext(ctx).Where("exam_set_id = ?", examSetID).Order("rule_order ASC, id ASC").Find(&models).Error; err != nil {
+		return nil, err
+	}
+	rules := make([]domain.QuestionRule, len(models))
+	for i, model := range models {
+		rules[i] = domain.QuestionRule{ID: model.ID, ExamSetID: model.ExamSetID, Order: model.RuleOrder, SubjectID: model.SubjectID, TagID: model.TagID, Difficulty: model.Difficulty, Count: model.Count}
+	}
+	return rules, nil
+}
+
+func (r *postgresRepository) ReplaceQuestionRules(ctx context.Context, examSetID uuid.UUID, rules []domain.QuestionRule) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("exam_set_id = ?", examSetID).Delete(&QuestionRuleModel{}).Error; err != nil {
+			return err
+		}
+		for index, rule := range rules {
+			model := QuestionRuleModel{ID: uuid.New(), ExamSetID: examSetID, RuleOrder: index + 1, SubjectID: rule.SubjectID, TagID: rule.TagID, Difficulty: rule.Difficulty, Count: rule.Count}
+			if err := tx.Create(&model).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (r *postgresRepository) ListAvailable(ctx context.Context, examSetID uuid.UUID, filter domain.AvailableFilter) ([]domain.AvailableQuestion, int64, error) {
@@ -173,11 +256,26 @@ func (r *postgresRepository) ListAllAssigned(ctx context.Context, examSetID uuid
 	return items, nil
 }
 
+func (r *postgresRepository) RandomAvailableQuestionIDs(ctx context.Context, examSetID uuid.UUID, selection AutoAssignSelection, limit int) ([]uuid.UUID, error) {
+	if limit <= 0 {
+		return []uuid.UUID{}, nil
+	}
+
+	var ids []uuid.UUID
+	db := applyAutoAssignSelection(r.db.WithContext(ctx).
+		Model(&questionrepo.QuestionModel{}).
+		Select("questions.id").
+		Where("questions.id NOT IN (?)", r.db.Model(&questionrepo.ExamSetQuestionModel{}).
+			Select("question_id").Where("exam_set_id = ?", examSetID)).
+		Order("RANDOM()"), selection)
+	err := db.Limit(limit).Pluck("questions.id", &ids).Error
+	return ids, err
+}
+
 var availableSortColumns = map[string]string{
 	"created_at": "created_at",
 	"updated_at": "updated_at",
 	"difficulty": "difficulty",
-	"status":     "status",
 }
 
 var assignedSortColumns = map[string]string{

@@ -6,19 +6,21 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
-	"virtual-exam-api/internal/apperrors"
 	admindomain "virtual-exam-api/internal/admin/domain"
+	"virtual-exam-api/internal/apperrors"
 	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/questiontag/domain"
 	tagrepo "virtual-exam-api/internal/questiontag/repository"
+	subjectrepo "virtual-exam-api/internal/subject/repository"
 )
 
 type TagUseCase struct {
-	tags tagrepo.TagAdminRepository
+	tags     tagrepo.TagAdminRepository
+	subjects subjectrepo.SubjectAdminRepository
 }
 
-func NewTagUseCase(tags tagrepo.TagAdminRepository) *TagUseCase {
-	return &TagUseCase{tags: tags}
+func NewTagUseCase(tags tagrepo.TagAdminRepository, subjects subjectrepo.SubjectAdminRepository) *TagUseCase {
+	return &TagUseCase{tags: tags, subjects: subjects}
 }
 
 type TagInput struct {
@@ -27,6 +29,7 @@ type TagInput struct {
 	Description string `json:"description"`
 	Color       string `json:"color"`
 	IsActive    *bool  `json:"is_active"`
+	SubjectID   string `json:"subject_id"`
 }
 
 type TagResponse struct {
@@ -36,6 +39,7 @@ type TagResponse struct {
 	Description   string `json:"description,omitempty"`
 	Color         string `json:"color,omitempty"`
 	IsActive      bool   `json:"is_active"`
+	SubjectID     string `json:"subject_id,omitempty"`
 	QuestionCount int64  `json:"question_count"`
 	CreatedAt     string `json:"created_at"`
 	UpdatedAt     string `json:"updated_at"`
@@ -99,6 +103,13 @@ func (uc *TagUseCase) Create(ctx context.Context, input TagInput) (*TagResponse,
 		Color:       input.Color,
 		IsActive:    isActive,
 	}
+	if input.SubjectID != "" {
+		subjectID, err := uc.validateSubject(ctx, input.SubjectID)
+		if err != nil {
+			return nil, err
+		}
+		tag.SubjectID = &subjectID
+	}
 	if err := uc.tags.Create(ctx, &tag); err != nil {
 		return nil, err
 	}
@@ -136,6 +147,15 @@ func (uc *TagUseCase) Update(ctx context.Context, id uuid.UUID, input TagInput) 
 	t.Code = input.Code
 	t.Description = input.Description
 	t.Color = input.Color
+	if input.SubjectID == "" {
+		t.SubjectID = nil
+	} else {
+		subjectID, err := uc.validateSubject(ctx, input.SubjectID)
+		if err != nil {
+			return nil, err
+		}
+		t.SubjectID = &subjectID
+	}
 	if input.IsActive != nil {
 		t.IsActive = *input.IsActive
 	}
@@ -204,6 +224,10 @@ func (uc *TagUseCase) UpdateActiveStatus(ctx context.Context, id uuid.UUID, isAc
 }
 
 func (uc *TagUseCase) ValidateTagIDs(ctx context.Context, tagIDs []uuid.UUID) error {
+	return uc.ValidateTagIDsForSubject(ctx, tagIDs, uuid.Nil)
+}
+
+func (uc *TagUseCase) ValidateTagIDsForSubject(ctx context.Context, tagIDs []uuid.UUID, subjectID uuid.UUID) error {
 	if len(tagIDs) == 0 {
 		return nil
 	}
@@ -214,7 +238,32 @@ func (uc *TagUseCase) ValidateTagIDs(ctx context.Context, tagIDs []uuid.UUID) er
 	if len(tags) != len(tagIDs) {
 		return apperrors.ErrTagNotFound
 	}
+	if subjectID != uuid.Nil {
+		for _, tag := range tags {
+			if tag.SubjectID != nil && *tag.SubjectID != subjectID {
+				return apperrors.ValidationError("กลุ่มคำถามไม่ตรงกับหมวดวิชา")
+			}
+		}
+	}
 	return nil
+}
+
+func (uc *TagUseCase) validateSubject(ctx context.Context, raw string) (uuid.UUID, error) {
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		return uuid.Nil, apperrors.ErrInvalidUUID
+	}
+	if uc.subjects == nil {
+		return id, nil
+	}
+	subject, err := uc.subjects.FindByID(ctx, id)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if subject == nil {
+		return uuid.Nil, apperrors.ErrNotFound
+	}
+	return id, nil
 }
 
 func (uc *TagUseCase) Repository() tagrepo.TagAdminRepository {
@@ -224,6 +273,7 @@ func (uc *TagUseCase) Repository() tagrepo.TagAdminRepository {
 func toTagResponse(t domain.QuestionTag, count int64) TagResponse {
 	return TagResponse{
 		ID:            t.ID.String(),
+		SubjectID:     uuidPtrString(t.SubjectID),
 		Name:          t.Name,
 		Code:          t.Code,
 		Description:   t.Description,
@@ -233,4 +283,11 @@ func toTagResponse(t domain.QuestionTag, count int64) TagResponse {
 		CreatedAt:     t.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
 		UpdatedAt:     t.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
 	}
+}
+
+func uuidPtrString(id *uuid.UUID) string {
+	if id == nil {
+		return ""
+	}
+	return id.String()
 }

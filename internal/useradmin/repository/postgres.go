@@ -4,22 +4,25 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"virtual-exam-api/internal/common/pagination"
+	entdomain "virtual-exam-api/internal/entitlement/domain"
 	userdomain "virtual-exam-api/internal/user/domain"
 	userrepo "virtual-exam-api/internal/user/repository"
 )
 
 type UserAdminFilter struct {
-	Query  string
-	Role   string
-	Status string
-	Page   int
-	Limit  int
-	Sort   string
-	Order  string
+	Query      string
+	Role       string
+	Status     string
+	AccessType string
+	Page       int
+	Limit      int
+	Sort       string
+	Order      string
 }
 
 var userSortColumns = map[string]string{
@@ -68,6 +71,28 @@ func (r *userAdminRepository) List(ctx context.Context, filter UserAdminFilter) 
 	}
 	if filter.Status != "" {
 		q = q.Where("status = ?", filter.Status)
+	}
+	if filter.AccessType != "" {
+		now := time.Now().UTC()
+		activeEntitlement := `
+EXISTS (
+  SELECT 1
+  FROM user_entitlements ue
+  WHERE ue.user_id = users.id
+    AND ue.entitlement_type = ?
+    AND ue.is_active = true
+    AND ue.starts_at <= ?
+    AND (ue.expires_at IS NULL OR ue.expires_at > ?)
+)`
+		switch filter.AccessType {
+		case entdomain.TypePremium:
+			q = q.Where(activeEntitlement, entdomain.TypePremium, now, now)
+		case entdomain.TypeExamSet:
+			q = q.Where(activeEntitlement, entdomain.TypeExamSet, now, now)
+		case "free":
+			q = q.Where("NOT "+activeEntitlement, entdomain.TypePremium, now, now).
+				Where("NOT "+activeEntitlement, entdomain.TypeExamSet, now, now)
+		}
 	}
 	var total int64
 	if err := q.Count(&total).Error; err != nil {

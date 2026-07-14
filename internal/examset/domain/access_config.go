@@ -4,12 +4,8 @@ import "virtual-exam-api/internal/apperrors"
 
 func ValidateAccessConfig(accessType string, priceAmount float64, salePriceAmount *float64, allowSinglePurchase bool) error {
 	switch accessType {
-	case AccessFree, AccessTrial:
+	case AccessFree:
 		if priceAmount != 0 || allowSinglePurchase {
-			return apperrors.ErrInvalidAccessConfig
-		}
-	case AccessPaid:
-		if !allowSinglePurchase || priceAmount <= 0 {
 			return apperrors.ErrInvalidAccessConfig
 		}
 	case AccessPremium:
@@ -17,10 +13,6 @@ func ValidateAccessConfig(accessType string, priceAmount float64, salePriceAmoun
 			return apperrors.ErrInvalidAccessConfig
 		}
 		if allowSinglePurchase && priceAmount <= 0 {
-			return apperrors.ErrInvalidAccessConfig
-		}
-	case AccessPrivate:
-		if priceAmount != 0 || salePriceAmount != nil || allowSinglePurchase {
 			return apperrors.ErrInvalidAccessConfig
 		}
 	default:
@@ -31,13 +23,11 @@ func ValidateAccessConfig(accessType string, priceAmount float64, salePriceAmoun
 
 func NormalizeAccessConfig(accessType string, priceAmount float64, allowSinglePurchase bool) (float64, bool) {
 	switch accessType {
-	case AccessFree, AccessTrial, AccessPrivate:
+	case AccessFree:
 		return 0, false
-	case AccessPaid:
-		return priceAmount, true
 	case AccessPremium:
 		if !allowSinglePurchase {
-			return priceAmount, false
+			return 0, false
 		}
 		return priceAmount, true
 	default:

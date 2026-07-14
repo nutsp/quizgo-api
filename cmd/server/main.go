@@ -100,6 +100,7 @@ func main() {
 			&questionrepo.QuestionModel{},
 			&questionrepo.ChoiceModel{},
 			&questionrepo.ExamSetQuestionModel{},
+			&esqrepo.QuestionRuleModel{},
 			&attemptrepo.ExamAttemptModel{},
 			&attemptrepo.ExamAnswerModel{},
 			&attemptrepo.ProjectionOutboxModel{},
@@ -213,12 +214,12 @@ func main() {
 	trackAdminUC := trackadminuc.NewAdminUseCase(trackAdminRepo, trackRepository, cacheInvalidator)
 	examSetAdminUC := examsetuc.NewAdminUseCase(examSetAdminRepo, examSetRepository, trackRepository, trackAdminRepo, setQuestionAdminRepo, cacheInvalidator, leaderboardProjector)
 	subjectAdminUC := subjectuc.NewSubjectUseCase(subjectAdminRepo)
-	tagAdminUC := taguc.NewTagUseCase(tagAdminRepo)
+	tagAdminUC := taguc.NewTagUseCase(tagAdminRepo, subjectAdminRepo)
 	questionAdminUC := questionuc.NewAdminUseCase(questionAdminRepo, setQuestionAdminRepo, subjectAdminRepo, tagAdminUC, examSetRepository, examSetAdminRepo, trackAdminRepo, cacheInvalidator)
 	dashboardUC := dashboarduc.NewDashboardUseCase(db)
 
 	examSetQuestionRepo := esqrepo.NewPostgresRepository(db)
-	examSetQuestionUC := esquc.NewUseCase(examSetQuestionRepo, questionAdminRepo, examSetRepository, examSetAdminRepo, trackAdminRepo, cacheInvalidator)
+	examSetQuestionUC := esquc.NewUseCase(examSetQuestionRepo, questionAdminRepo, examSetRepository, examSetAdminRepo, trackAdminRepo, tagAdminRepo, cacheInvalidator)
 	examSetQuestionHandler := esqhttp.NewHandler(examSetQuestionUC)
 
 	importRepository := importrepo.NewRepository(db)

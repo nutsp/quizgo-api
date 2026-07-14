@@ -8,6 +8,7 @@ import (
 
 type QuestionTag struct {
 	ID          uuid.UUID
+	SubjectID   *uuid.UUID
 	Name        string
 	Code        string
 	Description string
@@ -18,8 +19,9 @@ type QuestionTag struct {
 }
 
 type TagRef struct {
-	ID    uuid.UUID
-	Name  string
-	Code  string
-	Color string
+	ID        uuid.UUID
+	SubjectID *uuid.UUID
+	Name      string
+	Code      string
+	Color     string
 }

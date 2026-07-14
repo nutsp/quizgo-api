@@ -364,7 +364,7 @@ func buildReadiness(set *domain.ExamSet, assigned []qdomain.ExamSetQuestion) *Re
 
 	premiumNoPrice := set.AccessType == domain.AccessPremium && set.PriceAmount <= 0
 	addWarning("has_price", "กำหนดราคา",
-		"กำหนดราคาแล้ว", "ชุด Premium ยังไม่ได้กำหนดราคา (ไม่บังคับ)", !premiumNoPrice)
+		"กำหนดราคาแล้ว", "ชุดสำหรับสมาชิกยังไม่ได้กำหนดราคา (ไม่บังคับ)", !premiumNoPrice)
 
 	addWarning("has_explanations", "มีคำอธิบายเฉลย",
 		"คำถามทุกข้อมีคำอธิบายเฉลย", "มีบางคำถามที่ยังไม่มีคำอธิบายเฉลย (ไม่บังคับ)", !missingExplanation)

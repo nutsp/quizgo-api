@@ -14,7 +14,25 @@ const (
 	StatusSubmitted  = "submitted"
 	StatusTimeout    = "timeout"
 	StatusCancelled  = "cancelled"
+
+	TimingModeCountdown = "countdown"
+	TimingModeElapsed   = "elapsed"
 )
+
+func NormalizeTimingMode(mode string) string {
+	if mode == TimingModeElapsed {
+		return TimingModeElapsed
+	}
+	return TimingModeCountdown
+}
+
+func usesCountdownDeadline(mode string) bool {
+	return NormalizeTimingMode(mode) == TimingModeCountdown
+}
+
+func UsesCountdownDeadline(mode string) bool {
+	return usesCountdownDeadline(mode)
+}
 
 type ExamAttempt struct {
 	ID                  uuid.UUID
@@ -22,6 +40,7 @@ type ExamAttempt struct {
 	ExamTrackID         uuid.UUID
 	ExamSetID           uuid.UUID
 	Status              string
+	TimingMode          string
 	StartedAt           time.Time
 	SubmittedAt         *time.Time
 	ExpiresAt           time.Time
@@ -48,7 +67,13 @@ type ExamSetRef struct {
 	DurationMinutes   int                                   `json:"duration_minutes"`
 	TotalQuestions    int                                   `json:"total_questions"`
 	PassingScore      int                                   `json:"passing_score,omitempty"`
+	AccessType        string                                `json:"access_type,omitempty"`
+	Access            *ResultAccessInfo                     `json:"access,omitempty"`
 	AnswerSheetLayout examsetdomain.AnswerSheetLayoutConfig `json:"answer_sheet_layout"`
+}
+
+type ResultAccessInfo struct {
+	HasPremium bool `json:"has_premium"`
 }
 
 type ExamTrackRef struct {
@@ -68,12 +93,17 @@ type ExamAnswer struct {
 
 type StartAttemptResponse struct {
 	AttemptID   string                                `json:"attempt_id"`
+	TimingMode  string                                `json:"timing_mode"`
 	ExamSet     ExamSetRef                            `json:"exam_set"`
 	OMRSettings settingsdomain.OMRAnswerSheetSettings `json:"omr_settings"`
 	StartedAt   time.Time                             `json:"started_at"`
 	ExpiresAt   time.Time                             `json:"expires_at"`
 	Questions   []QuestionForExam                     `json:"questions"`
 	Answers     map[int]string                        `json:"answers"`
+}
+
+type StartAttemptRequest struct {
+	TimingMode string `json:"timing_mode"`
 }
 
 type QuestionForExam struct {
@@ -96,11 +126,13 @@ type ChoicePublic struct {
 type GetAttemptResponse struct {
 	AttemptID        string                                `json:"attempt_id"`
 	Status           string                                `json:"status"`
+	TimingMode       string                                `json:"timing_mode"`
 	ExamSet          ExamSetRef                            `json:"exam_set"`
 	OMRSettings      settingsdomain.OMRAnswerSheetSettings `json:"omr_settings"`
 	StartedAt        time.Time                             `json:"started_at"`
 	ExpiresAt        time.Time                             `json:"expires_at"`
 	RemainingSeconds int                                   `json:"remaining_seconds"`
+	ElapsedSeconds   int                                   `json:"elapsed_seconds"`
 	Questions        []QuestionForExam                     `json:"questions"`
 	Answers          map[int]string                        `json:"answers"`
 	AnsweredCount    int                                   `json:"answered_count"`
@@ -216,6 +248,8 @@ type ContinueAttempt struct {
 	AnsweredCount    int       `json:"answered_count"`
 	TotalQuestions   int       `json:"total_questions"`
 	RemainingSeconds int       `json:"remaining_seconds"`
+	ElapsedSeconds   int       `json:"elapsed_seconds"`
+	TimingMode       string    `json:"timing_mode"`
 	ExpiresAt        time.Time `json:"expires_at"`
 }
 
@@ -228,6 +262,7 @@ type LatestAttemptSummary struct {
 	AccessSource *string
 	StartedAt    time.Time
 	ExpiresAt    time.Time
+	TimingMode   string
 }
 
 type UserExamActivity struct {

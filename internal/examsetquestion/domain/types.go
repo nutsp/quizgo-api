@@ -29,6 +29,16 @@ type AssignedFilter struct {
 	Order     string
 }
 
+type QuestionRule struct {
+	ID         uuid.UUID
+	ExamSetID  uuid.UUID
+	Order      int
+	SubjectID  uuid.UUID
+	TagID      *uuid.UUID
+	Difficulty string
+	Count      int
+}
+
 type SubjectRef struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`

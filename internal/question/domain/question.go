@@ -34,10 +34,11 @@ type Question struct {
 }
 
 type TagRef struct {
-	ID    uuid.UUID
-	Name  string
-	Code  string
-	Color string
+	ID        uuid.UUID
+	SubjectID *uuid.UUID
+	Name      string
+	Code      string
+	Color     string
 }
 
 type SubjectRef struct {
@@ -82,15 +83,15 @@ type QuestionForExam struct {
 }
 
 type QuestionForReview struct {
-	QuestionNo         int            `json:"question_no"`
-	QuestionID         string         `json:"question_id"`
-	QuestionText       string         `json:"question_text"`
-	Choices            []ChoicePublic `json:"choices"`
-	SelectedChoiceKey  *string        `json:"selected_choice_key"`
-	CorrectChoiceKey   string         `json:"correct_choice_key"`
-	IsCorrect          bool           `json:"is_correct"`
-	Explanation        string         `json:"explanation"`
-	Subject            string         `json:"subject"`
+	QuestionNo        int            `json:"question_no"`
+	QuestionID        string         `json:"question_id"`
+	QuestionText      string         `json:"question_text"`
+	Choices           []ChoicePublic `json:"choices"`
+	SelectedChoiceKey *string        `json:"selected_choice_key"`
+	CorrectChoiceKey  string         `json:"correct_choice_key"`
+	IsCorrect         bool           `json:"is_correct"`
+	Explanation       string         `json:"explanation"`
+	Subject           string         `json:"subject"`
 }
 
 const (

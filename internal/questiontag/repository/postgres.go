@@ -13,14 +13,15 @@ import (
 )
 
 type QuestionTagModel struct {
-	ID          uuid.UUID `gorm:"type:uuid;primaryKey"`
-	Name        string    `gorm:"type:varchar(100);not null"`
-	Code        string    `gorm:"type:varchar(100);not null;uniqueIndex"`
-	Description string    `gorm:"type:text"`
-	Color       string    `gorm:"type:varchar(20)"`
-	IsActive    bool      `gorm:"not null;default:true"`
-	CreatedAt   time.Time `gorm:"not null"`
-	UpdatedAt   time.Time `gorm:"not null"`
+	ID          uuid.UUID  `gorm:"type:uuid;primaryKey"`
+	SubjectID   *uuid.UUID `gorm:"type:uuid;index"`
+	Name        string     `gorm:"type:varchar(100);not null"`
+	Code        string     `gorm:"type:varchar(100);not null;uniqueIndex"`
+	Description string     `gorm:"type:text"`
+	Color       string     `gorm:"type:varchar(20)"`
+	IsActive    bool       `gorm:"not null;default:true"`
+	CreatedAt   time.Time  `gorm:"not null"`
+	UpdatedAt   time.Time  `gorm:"not null"`
 }
 
 func (QuestionTagModel) TableName() string { return "question_tags" }
@@ -35,12 +36,13 @@ type QuestionTagMappingModel struct {
 func (QuestionTagMappingModel) TableName() string { return "question_tag_mappings" }
 
 type TagAdminFilter struct {
-	Query    string
-	IsActive *bool
-	Page     int
-	Limit    int
-	Sort     string
-	Order    string
+	Query     string
+	SubjectID *uuid.UUID
+	IsActive  *bool
+	Page      int
+	Limit     int
+	Sort      string
+	Order     string
 }
 
 var tagSortColumns = map[string]string{
@@ -83,6 +85,9 @@ func (r *tagAdminRepository) List(ctx context.Context, filter TagAdminFilter) ([
 	if filter.Query != "" {
 		like := "%" + filter.Query + "%"
 		q = q.Where("name ILIKE ? OR code ILIKE ?", like, like)
+	}
+	if filter.SubjectID != nil {
+		q = q.Where("subject_id = ? OR subject_id IS NULL", *filter.SubjectID)
 	}
 	if filter.IsActive != nil {
 		q = q.Where("is_active = ?", *filter.IsActive)
@@ -174,6 +179,7 @@ func (r *tagAdminRepository) Create(ctx context.Context, tag *domain.QuestionTag
 	tag.UpdatedAt = now
 	model := QuestionTagModel{
 		ID:          tag.ID,
+		SubjectID:   tag.SubjectID,
 		Name:        tag.Name,
 		Code:        strings.ToLower(tag.Code),
 		Description: tag.Description,
@@ -188,6 +194,7 @@ func (r *tagAdminRepository) Create(ctx context.Context, tag *domain.QuestionTag
 func (r *tagAdminRepository) Update(ctx context.Context, tag *domain.QuestionTag) error {
 	tag.UpdatedAt = time.Now().UTC()
 	return r.db.WithContext(ctx).Model(&QuestionTagModel{}).Where("id = ?", tag.ID).Updates(map[string]any{
+		"subject_id":  tag.SubjectID,
 		"name":        tag.Name,
 		"code":        strings.ToLower(tag.Code),
 		"description": tag.Description,
@@ -249,6 +256,7 @@ func (r *tagAdminRepository) LoadTagsForQuestions(ctx context.Context, questionI
 	type row struct {
 		QuestionID uuid.UUID
 		TagID      uuid.UUID
+		SubjectID  *uuid.UUID
 		Name       string
 		Code       string
 		Color      string
@@ -256,7 +264,7 @@ func (r *tagAdminRepository) LoadTagsForQuestions(ctx context.Context, questionI
 	var rows []row
 	err := r.db.WithContext(ctx).
 		Table("question_tag_mappings m").
-		Select("m.question_id, t.id as tag_id, t.name, t.code, t.color").
+		Select("m.question_id, t.id as tag_id, t.subject_id, t.name, t.code, t.color").
 		Joins("JOIN question_tags t ON t.id = m.tag_id").
 		Where("m.question_id IN ?", questionIDs).
 		Order("t.name ASC").
@@ -266,10 +274,11 @@ func (r *tagAdminRepository) LoadTagsForQuestions(ctx context.Context, questionI
 	}
 	for _, row := range rows {
 		result[row.QuestionID] = append(result[row.QuestionID], domain.TagRef{
-			ID:    row.TagID,
-			Name:  row.Name,
-			Code:  row.Code,
-			Color: row.Color,
+			ID:        row.TagID,
+			SubjectID: row.SubjectID,
+			Name:      row.Name,
+			Code:      row.Code,
+			Color:     row.Color,
 		})
 	}
 	return result, nil
@@ -300,6 +309,7 @@ func (r *tagAdminRepository) ReplaceQuestionTagMappingsTx(tx *gorm.DB, questionI
 func tagToDomain(m *QuestionTagModel) domain.QuestionTag {
 	return domain.QuestionTag{
 		ID:          m.ID,
+		SubjectID:   m.SubjectID,
 		Name:        m.Name,
 		Code:        m.Code,
 		Description: m.Description,

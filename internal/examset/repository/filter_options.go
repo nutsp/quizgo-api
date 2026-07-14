@@ -277,7 +277,7 @@ func orderedValuesForColumn(column string) []string {
 	case "exam_sets.difficulty":
 		return []string{domain.DifficultyEasy, domain.DifficultyMedium, domain.DifficultyHard}
 	case "exam_sets.access_type":
-		return []string{domain.AccessFree, domain.AccessTrial, domain.AccessPremium, domain.AccessPaid}
+		return []string{domain.AccessFree, domain.AccessPremium}
 	case "exam_sets.mode":
 		return []string{domain.ModeMockExam, domain.ModePractice}
 	default:
@@ -288,9 +288,7 @@ func orderedValuesForColumn(column string) []string {
 func domainAccessTypeLabels() map[string]string {
 	return map[string]string{
 		domain.AccessFree:    "ฟรี",
-		domain.AccessTrial:   "ทดลองทำ",
-		domain.AccessPremium: "Premium",
-		domain.AccessPaid:    "ซื้อรายชุด",
+		domain.AccessPremium: "สำหรับสมาชิก",
 	}
 }
 

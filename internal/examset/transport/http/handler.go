@@ -1,6 +1,8 @@
 package http
 
 import (
+	"errors"
+	"io"
 	"strconv"
 	"strings"
 
@@ -91,7 +93,11 @@ func (h *Handler) StartAttempt(c echo.Context) error {
 		return response.Error(c, err)
 	}
 	code := c.Param("examSetCode")
-	result, err := h.attemptUC.Start(c.Request().Context(), userID, code)
+	var req attemptuc.StartAttemptRequest
+	if err := c.Bind(&req); err != nil && !errors.Is(err, io.EOF) {
+		return response.Error(c, err)
+	}
+	result, err := h.attemptUC.Start(c.Request().Context(), userID, code, req.ToDomain())
 	if err != nil {
 		return response.Error(c, err)
 	}

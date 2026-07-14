@@ -6,14 +6,15 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	attemptrepo "virtual-exam-api/internal/examattempt/repository"
 	"virtual-exam-api/internal/cache"
 	entitlementuc "virtual-exam-api/internal/entitlement/usecase"
+	attemptdomain "virtual-exam-api/internal/examattempt/domain"
+	attemptrepo "virtual-exam-api/internal/examattempt/repository"
 	examsetdomain "virtual-exam-api/internal/examset/domain"
 	examsetrepo "virtual-exam-api/internal/examset/repository"
-	"virtual-exam-api/internal/home/domain"
 	trackdomain "virtual-exam-api/internal/examtrack/domain"
 	trackrepo "virtual-exam-api/internal/examtrack/repository"
+	"virtual-exam-api/internal/home/domain"
 )
 
 type HomeUseCase struct {
@@ -77,6 +78,8 @@ func (uc *HomeUseCase) GetHome(ctx context.Context, userID *uuid.UUID) (*domain.
 			AnsweredCount:    cont.AnsweredCount,
 			TotalQuestions:   cont.TotalQuestions,
 			RemainingSeconds: cont.RemainingSeconds,
+			ElapsedSeconds:   cont.ElapsedSeconds,
+			TimingMode:       cont.TimingMode,
 		}
 	}
 
@@ -187,7 +190,10 @@ func (uc *HomeUseCase) getContinueAttempt(ctx context.Context, userID uuid.UUID)
 	if err != nil {
 		return nil, err
 	}
-	if attempt == nil || time.Now().UTC().After(attempt.ExpiresAt) {
+	if attempt == nil {
+		return nil, nil
+	}
+	if attemptdomain.UsesCountdownDeadline(attempt.TimingMode) && time.Now().UTC().After(attempt.ExpiresAt) {
 		return nil, nil
 	}
 
@@ -216,6 +222,13 @@ func (uc *HomeUseCase) getContinueAttempt(ctx context.Context, userID uuid.UUID)
 	if remaining < 0 {
 		remaining = 0
 	}
+	if !attemptdomain.UsesCountdownDeadline(attempt.TimingMode) {
+		remaining = 0
+	}
+	elapsed := int(time.Since(attempt.StartedAt).Seconds())
+	if elapsed < 0 {
+		elapsed = 0
+	}
 
 	return &domain.ContinueAttempt{
 		AttemptID:        attempt.ID.String(),
@@ -224,5 +237,7 @@ func (uc *HomeUseCase) getContinueAttempt(ctx context.Context, userID uuid.UUID)
 		AnsweredCount:    answeredCount,
 		TotalQuestions:   total,
 		RemainingSeconds: remaining,
+		ElapsedSeconds:   elapsed,
+		TimingMode:       attemptdomain.NormalizeTimingMode(attempt.TimingMode),
 	}, nil
 }

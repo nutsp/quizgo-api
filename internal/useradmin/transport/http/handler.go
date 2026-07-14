@@ -7,13 +7,13 @@ import (
 	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/middleware"
 	"virtual-exam-api/internal/response"
+	userrepo "virtual-exam-api/internal/user/repository"
 	useradminrepo "virtual-exam-api/internal/useradmin/repository"
 	useradminuc "virtual-exam-api/internal/useradmin/usecase"
-	userrepo "virtual-exam-api/internal/user/repository"
 )
 
 type Handler struct {
-	users   *useradminuc.UseCase
+	users    *useradminuc.UseCase
 	userRepo userrepo.Repository
 }
 
@@ -32,13 +32,14 @@ func (h *Handler) RegisterRoutes(admin *echo.Group) {
 func (h *Handler) List(c echo.Context) error {
 	pq := pagination.ParsePagination(c)
 	filter := useradminrepo.UserAdminFilter{
-		Query:  pq.Q,
-		Role:   c.QueryParam("role"),
-		Status: c.QueryParam("status"),
-		Page:   pq.Page,
-		Limit:  pq.Limit,
-		Sort:   pq.Sort,
-		Order:  pq.Order,
+		Query:      pq.Q,
+		Role:       c.QueryParam("role"),
+		Status:     c.QueryParam("status"),
+		AccessType: c.QueryParam("access_type"),
+		Page:       pq.Page,
+		Limit:      pq.Limit,
+		Sort:       pq.Sort,
+		Order:      pq.Order,
 	}
 	result, err := h.users.List(c.Request().Context(), filter)
 	if err != nil {

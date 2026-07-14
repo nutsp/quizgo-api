@@ -3,7 +3,6 @@ package domain
 import "testing"
 
 func TestValidateAccessConfig(t *testing.T) {
-	sale := 99.0
 	tests := []struct {
 		name                string
 		accessType          string
@@ -13,20 +12,15 @@ func TestValidateAccessConfig(t *testing.T) {
 		wantErr             bool
 	}{
 		{"free valid", AccessFree, 0, nil, false, false},
-		{"trial valid", AccessTrial, 0, nil, false, false},
-		{"trial invalid price", AccessTrial, 10, nil, false, true},
 		{"free invalid price", AccessFree, 10, nil, false, true},
 		{"free invalid allow single", AccessFree, 0, nil, true, true},
-		{"paid valid", AccessPaid, 49, nil, true, false},
-		{"paid invalid price", AccessPaid, 0, nil, true, true},
-		{"paid invalid no single", AccessPaid, 49, nil, false, true},
 		{"premium valid", AccessPremium, 0, nil, false, false},
 		{"premium single valid", AccessPremium, 99, nil, true, false},
 		{"premium single invalid price", AccessPremium, 0, nil, true, true},
-		{"private valid", AccessPrivate, 0, nil, false, false},
-		{"private invalid price", AccessPrivate, 10, nil, false, true},
-		{"private invalid sale", AccessPrivate, 0, &sale, false, true},
-		{"private invalid allow single", AccessPrivate, 0, nil, true, true},
+		{"trial no longer accepted", AccessTrial, 0, nil, false, true},
+		{"paid no longer accepted", AccessPaid, 49, nil, true, true},
+		{"private no longer accepted", AccessPrivate, 0, nil, false, true},
+		{"unknown invalid", "member", 0, nil, false, true},
 	}
 
 	for _, tt := range tests {
@@ -40,13 +34,17 @@ func TestValidateAccessConfig(t *testing.T) {
 }
 
 func TestNormalizeAccessConfig(t *testing.T) {
-	price, allow := NormalizeAccessConfig(AccessPaid, 99, false)
+	price, allow := NormalizeAccessConfig(AccessPremium, 99, true)
 	if price != 99 || !allow {
-		t.Fatalf("paid should force allow_single_purchase=true, got price=%v allow=%v", price, allow)
+		t.Fatalf("premium single purchase should preserve price and allow, got price=%v allow=%v", price, allow)
 	}
 	price, allow = NormalizeAccessConfig(AccessFree, 10, true)
 	if price != 0 || allow {
 		t.Fatalf("free should reset price and allow, got price=%v allow=%v", price, allow)
+	}
+	price, allow = NormalizeAccessConfig(AccessPremium, 99, false)
+	if price != 0 || allow {
+		t.Fatalf("premium without single purchase should reset price and allow, got price=%v allow=%v", price, allow)
 	}
 }
 
@@ -57,7 +55,7 @@ func TestIsPublicDiscoveryAccessType(t *testing.T) {
 	if !IsPublicDiscoveryAccessType(AccessFree) {
 		t.Fatal("free must be public discovery")
 	}
-	if !IsPublicDiscoveryAccessType(AccessTrial) {
-		t.Fatal("trial must be public discovery")
+	if !IsPublicDiscoveryAccessType(AccessPremium) {
+		t.Fatal("premium must be public discovery")
 	}
 }

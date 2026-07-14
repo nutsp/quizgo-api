@@ -6,8 +6,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"virtual-exam-api/internal/apperrors"
-	esquc "virtual-exam-api/internal/examsetquestion/usecase"
 	"virtual-exam-api/internal/common/pagination"
+	esquc "virtual-exam-api/internal/examsetquestion/usecase"
 	"virtual-exam-api/internal/response"
 )
 
@@ -22,11 +22,75 @@ func NewHandler(uc *esquc.UseCase) *Handler {
 func (h *Handler) RegisterRoutes(admin *echo.Group) {
 	admin.GET("/exam-sets/:id/available-questions", h.ListAvailable)
 	admin.GET("/exam-sets/:id/questions", h.ListAssigned)
+	admin.GET("/exam-sets/:id/question-rules", h.GetQuestionRules)
+	admin.PUT("/exam-sets/:id/question-rules", h.SetQuestionRules)
+	admin.POST("/exam-sets/:id/question-rules/capacity", h.GetQuestionRuleCapacities)
 	admin.POST("/exam-sets/:id/questions/bulk", h.BulkAdd)
+	admin.POST("/exam-sets/:id/questions/auto", h.AutoAssign)
 	admin.POST("/exam-sets/:id/questions", h.AddSingle)
 	admin.PUT("/exam-sets/:id/questions/reorder", h.Reorder)
 	admin.DELETE("/exam-sets/:id/questions", h.ClearAll)
 	admin.DELETE("/exam-sets/:id/questions/:questionId", h.Remove)
+}
+
+func (h *Handler) GetQuestionRuleCapacities(c echo.Context) error {
+	examSetID, err := parseUUID(c.Param("id"))
+	if err != nil {
+		return response.Error(c, err)
+	}
+	var input esquc.SetQuestionRulesInput
+	if err := c.Bind(&input); err != nil {
+		return response.Error(c, apperrors.ErrInvalidInput)
+	}
+	result, err := h.uc.GetQuestionRuleCapacities(c.Request().Context(), examSetID, input)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	return response.JSON(c, 200, result)
+}
+
+func (h *Handler) GetQuestionRules(c echo.Context) error {
+	examSetID, err := parseUUID(c.Param("id"))
+	if err != nil {
+		return response.Error(c, err)
+	}
+	result, err := h.uc.GetQuestionRules(c.Request().Context(), examSetID)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	return response.JSON(c, 200, result)
+}
+
+func (h *Handler) SetQuestionRules(c echo.Context) error {
+	examSetID, err := parseUUID(c.Param("id"))
+	if err != nil {
+		return response.Error(c, err)
+	}
+	var input esquc.SetQuestionRulesInput
+	if err := c.Bind(&input); err != nil {
+		return response.Error(c, apperrors.ErrInvalidInput)
+	}
+	result, err := h.uc.SetQuestionRules(c.Request().Context(), examSetID, input)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	return response.JSON(c, 200, result)
+}
+
+func (h *Handler) AutoAssign(c echo.Context) error {
+	examSetID, err := parseUUID(c.Param("id"))
+	if err != nil {
+		return response.Error(c, err)
+	}
+	var input esquc.AutoAssignInput
+	if err := c.Bind(&input); err != nil {
+		return response.Error(c, apperrors.ErrInvalidInput)
+	}
+	result, err := h.uc.AutoAssign(c.Request().Context(), examSetID, input)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	return response.JSON(c, 201, result)
 }
 
 func (h *Handler) ListAvailable(c echo.Context) error {

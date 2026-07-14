@@ -7,8 +7,8 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
-	"virtual-exam-api/internal/apperrors"
 	admindomain "virtual-exam-api/internal/admin/domain"
+	"virtual-exam-api/internal/apperrors"
 	"virtual-exam-api/internal/cache"
 	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/examset/domain"
@@ -16,8 +16,8 @@ import (
 	trackrepo "virtual-exam-api/internal/examtrack/repository"
 	qdomain "virtual-exam-api/internal/question/domain"
 	questionrepo "virtual-exam-api/internal/question/repository"
-	subjectrepo "virtual-exam-api/internal/subject/repository"
 	taguc "virtual-exam-api/internal/questiontag/usecase"
+	subjectrepo "virtual-exam-api/internal/subject/repository"
 )
 
 type AdminUseCase struct {
@@ -115,13 +115,13 @@ type QuestionResponse struct {
 type QuestionListResponse = pagination.PaginatedList[QuestionResponse]
 
 type ExamSetQuestionResponse struct {
-	QuestionNo      int    `json:"question_no"`
-	QuestionID      string `json:"question_id"`
-	QuestionPreview string `json:"question_preview"`
-	SubjectName     string `json:"subject_name,omitempty"`
-	Difficulty      string `json:"difficulty,omitempty"`
+	QuestionNo      int     `json:"question_no"`
+	QuestionID      string  `json:"question_id"`
+	QuestionPreview string  `json:"question_preview"`
+	SubjectName     string  `json:"subject_name,omitempty"`
+	Difficulty      string  `json:"difficulty,omitempty"`
 	Score           float64 `json:"score"`
-	CorrectAnswer   string `json:"correct_answer,omitempty"`
+	CorrectAnswer   string  `json:"correct_answer,omitempty"`
 }
 
 type AddSetQuestionInput struct {
@@ -164,7 +164,7 @@ func (uc *AdminUseCase) GetQuestion(ctx context.Context, id uuid.UUID) (*Questio
 }
 
 func (uc *AdminUseCase) CreateQuestion(ctx context.Context, input QuestionInput) (*QuestionResponse, error) {
-	q, err := uc.buildQuestion(input)
+	q, err := uc.buildQuestion(ctx, input)
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +183,7 @@ func (uc *AdminUseCase) UpdateQuestion(ctx context.Context, id uuid.UUID, input 
 	if existing == nil {
 		return nil, apperrors.ErrQuestionNotFound
 	}
-	q, err := uc.buildQuestion(input)
+	q, err := uc.buildQuestion(ctx, input)
 	if err != nil {
 		return nil, err
 	}
@@ -334,7 +334,7 @@ func (uc *AdminUseCase) syncExamSetQuestionCount(ctx context.Context, set *domai
 	return uc.trackAdmin.RefreshCounters(ctx, set.ExamTrackID)
 }
 
-func (uc *AdminUseCase) buildQuestion(input QuestionInput) (*qdomain.Question, error) {
+func (uc *AdminUseCase) buildQuestion(ctx context.Context, input QuestionInput) (*qdomain.Question, error) {
 	if input.SubjectID == "" {
 		return nil, apperrors.ErrInvalidInput
 	}
@@ -369,7 +369,7 @@ func (uc *AdminUseCase) buildQuestion(input QuestionInput) (*qdomain.Question, e
 	if err != nil {
 		return nil, err
 	}
-	tagRefs, err := uc.resolveTagRefs(context.Background(), input.TagIDs)
+	tagRefs, err := uc.resolveTagRefs(ctx, input.TagIDs, subjectID)
 	if err != nil {
 		return nil, err
 	}
@@ -389,7 +389,7 @@ func (uc *AdminUseCase) buildQuestion(input QuestionInput) (*qdomain.Question, e
 	}, nil
 }
 
-func (uc *AdminUseCase) resolveTagRefs(ctx context.Context, tagIDs []string) ([]qdomain.TagRef, error) {
+func (uc *AdminUseCase) resolveTagRefs(ctx context.Context, tagIDs []string, subjectID uuid.UUID) ([]qdomain.TagRef, error) {
 	if len(tagIDs) == 0 {
 		return nil, nil
 	}
@@ -404,7 +404,7 @@ func (uc *AdminUseCase) resolveTagRefs(ctx context.Context, tagIDs []string) ([]
 	if uc.tags == nil {
 		return nil, apperrors.ErrTagNotFound
 	}
-	if err := uc.tags.ValidateTagIDs(ctx, ids); err != nil {
+	if err := uc.tags.ValidateTagIDsForSubject(ctx, ids, subjectID); err != nil {
 		return nil, err
 	}
 	tags, err := uc.tags.Repository().FindActiveByIDs(ctx, ids)
@@ -413,7 +413,7 @@ func (uc *AdminUseCase) resolveTagRefs(ctx context.Context, tagIDs []string) ([]
 	}
 	refs := make([]qdomain.TagRef, len(tags))
 	for i, t := range tags {
-		refs[i] = qdomain.TagRef{ID: t.ID, Name: t.Name, Code: t.Code, Color: t.Color}
+		refs[i] = qdomain.TagRef{ID: t.ID, SubjectID: t.SubjectID, Name: t.Name, Code: t.Code, Color: t.Color}
 	}
 	return refs, nil
 }

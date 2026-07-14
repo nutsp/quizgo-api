@@ -14,17 +14,17 @@ import (
 )
 
 type AdminFilter struct {
-	Query       string
-	TrackID     uuid.UUID
-	AccessType  string
-	Difficulty  string
-	Mode        string
-	Status      string
-	IsActive    *bool
-	Page        int
-	Limit       int
-	Sort        string
-	Order       string
+	Query      string
+	TrackID    uuid.UUID
+	AccessType string
+	Difficulty string
+	Mode       string
+	Status     string
+	IsActive   *bool
+	Page       int
+	Limit      int
+	Sort       string
+	Order      string
 }
 
 var examSetSortColumns = map[string]string{
@@ -108,36 +108,36 @@ func (r *adminRepository) Create(ctx context.Context, set *domain.ExamSet) error
 		set.Currency = "THB"
 	}
 	model := ExamSetModel{
-		ID:              set.ID,
-		ExamTrackID:     set.ExamTrackID,
-		Code:            strings.ToLower(set.Code),
-		Title:           set.Title,
-		Description:     set.Description,
-		CoverImageURL:   set.CoverImageURL,
-		DurationMinutes: set.DurationMinutes,
-		TotalQuestions:  set.TotalQuestions,
-		PassingScore:    set.PassingScore,
-		Difficulty:      set.Difficulty,
-		AccessType:          set.AccessType,
-		AllowSinglePurchase: set.AllowSinglePurchase,
-		PriceAmount:         set.PriceAmount,
-		OriginalPriceAmount: set.OriginalPriceAmount,
-		Currency:            set.Currency,
-		SalePriceAmount:     set.SalePriceAmount,
-		Mode:            set.Mode,
-		IsOfficial:      set.IsOfficial,
-		IsFeatured:      set.IsFeatured,
-		IsActive:        set.IsActive,
-		Status:          domain.StatusDraft,
+		ID:                           set.ID,
+		ExamTrackID:                  set.ExamTrackID,
+		Code:                         strings.ToLower(set.Code),
+		Title:                        set.Title,
+		Description:                  set.Description,
+		CoverImageURL:                set.CoverImageURL,
+		DurationMinutes:              set.DurationMinutes,
+		TotalQuestions:               set.TotalQuestions,
+		PassingScore:                 set.PassingScore,
+		Difficulty:                   set.Difficulty,
+		AccessType:                   set.AccessType,
+		AllowSinglePurchase:          set.AllowSinglePurchase,
+		PriceAmount:                  set.PriceAmount,
+		OriginalPriceAmount:          set.OriginalPriceAmount,
+		Currency:                     set.Currency,
+		SalePriceAmount:              set.SalePriceAmount,
+		Mode:                         set.Mode,
+		IsOfficial:                   set.IsOfficial,
+		IsFeatured:                   set.IsFeatured,
+		IsActive:                     set.IsActive,
+		Status:                       domain.StatusDraft,
 		AnswerSheetBlockColumns:      set.AnswerSheetLayout.BlockColumns,
 		AnswerSheetQuestionsPerBlock: set.AnswerSheetLayout.QuestionsPerBlock,
 		AnswerSheetChoiceLabelStyle:  set.AnswerSheetLayout.ChoiceLabelStyle,
 		AnswerSheetShowHeader:        set.AnswerSheetLayout.ShowHeader,
 		AnswerSheetShowInstructions:  set.AnswerSheetLayout.ShowInstructions,
 		AnswerSheetShowCandidateInfo: set.AnswerSheetLayout.ShowCandidateInfo,
-		CreatedAt:       set.CreatedAt,
-		UpdatedAt:       set.UpdatedAt,
-		PublishedAt:     set.PublishedAt,
+		CreatedAt:                    set.CreatedAt,
+		UpdatedAt:                    set.UpdatedAt,
+		PublishedAt:                  set.PublishedAt,
 	}
 	return r.db.WithContext(ctx).Create(&model).Error
 }

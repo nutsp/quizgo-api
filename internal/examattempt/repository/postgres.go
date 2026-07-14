@@ -14,12 +14,13 @@ import (
 )
 
 type ExamAttemptModel struct {
-	ID                  uuid.UUID  `gorm:"type:uuid;primaryKey"`
-	UserID              uuid.UUID  `gorm:"type:uuid;not null;index"`
-	ExamTrackID         uuid.UUID  `gorm:"type:uuid;not null;index"`
-	ExamSetID           uuid.UUID  `gorm:"type:uuid;not null;index"`
-	Status              string     `gorm:"not null;index"`
-	StartedAt           time.Time  `gorm:"not null"`
+	ID                  uuid.UUID `gorm:"type:uuid;primaryKey"`
+	UserID              uuid.UUID `gorm:"type:uuid;not null;index"`
+	ExamTrackID         uuid.UUID `gorm:"type:uuid;not null;index"`
+	ExamSetID           uuid.UUID `gorm:"type:uuid;not null;index"`
+	Status              string    `gorm:"not null;index"`
+	TimingMode          string    `gorm:"not null;default:countdown"`
+	StartedAt           time.Time `gorm:"not null"`
 	SubmittedAt         *time.Time
 	ExpiresAt           time.Time  `gorm:"not null"`
 	AccessSource        *string    `gorm:"type:varchar(50)"`
@@ -27,32 +28,33 @@ type ExamAttemptModel struct {
 	AccessGrantedAt     *time.Time
 	AccessExpiresAt     *time.Time
 	DurationSeconds     *int
-	Score           float64    `gorm:"type:numeric(10,2);default:0"`
-	TotalScore      float64    `gorm:"type:numeric(10,2);default:0"`
-	ScorePercent    float64    `gorm:"type:numeric(10,2);default:0"`
-	CorrectCount    int        `gorm:"default:0"`
-	WrongCount      int        `gorm:"default:0"`
-	UnansweredCount int        `gorm:"default:0"`
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	Score               float64 `gorm:"type:numeric(10,2);default:0"`
+	TotalScore          float64 `gorm:"type:numeric(10,2);default:0"`
+	ScorePercent        float64 `gorm:"type:numeric(10,2);default:0"`
+	CorrectCount        int     `gorm:"default:0"`
+	WrongCount          int     `gorm:"default:0"`
+	UnansweredCount     int     `gorm:"default:0"`
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
 
 	ExamSet   ExamSetJoin   `gorm:"foreignKey:ExamSetID;references:ID"`
 	ExamTrack ExamTrackJoin `gorm:"foreignKey:ExamTrackID;references:ID"`
 }
 
 type ExamSetJoin struct {
-	ID              uuid.UUID `gorm:"type:uuid;primaryKey"`
-	Code            string
-	Title           string
-	DurationMinutes int
-	TotalQuestions  int
-	PassingScore    int
-	AnswerSheetBlockColumns          int
-	AnswerSheetQuestionsPerBlock     int
-	AnswerSheetChoiceLabelStyle      string
-	AnswerSheetShowHeader            bool
-	AnswerSheetShowInstructions      bool
-	AnswerSheetShowCandidateInfo     bool
+	ID                           uuid.UUID `gorm:"type:uuid;primaryKey"`
+	Code                         string
+	Title                        string
+	DurationMinutes              int
+	TotalQuestions               int
+	PassingScore                 int
+	AccessType                   string
+	AnswerSheetBlockColumns      int
+	AnswerSheetQuestionsPerBlock int
+	AnswerSheetChoiceLabelStyle  string
+	AnswerSheetShowHeader        bool
+	AnswerSheetShowInstructions  bool
+	AnswerSheetShowCandidateInfo bool
 }
 
 func (ExamSetJoin) TableName() string { return "exam_sets" }
@@ -68,10 +70,10 @@ func (ExamTrackJoin) TableName() string { return "exam_tracks" }
 func (ExamAttemptModel) TableName() string { return "exam_attempts" }
 
 type ExamAnswerModel struct {
-	ID                uuid.UUID  `gorm:"type:uuid;primaryKey"`
-	AttemptID         uuid.UUID  `gorm:"type:uuid;not null;uniqueIndex:uq_attempt_question,priority:1"`
-	QuestionID        uuid.UUID  `gorm:"type:uuid;not null;uniqueIndex:uq_attempt_question,priority:2"`
-	QuestionNo        int        `gorm:"not null;index"`
+	ID                uuid.UUID `gorm:"type:uuid;primaryKey"`
+	AttemptID         uuid.UUID `gorm:"type:uuid;not null;uniqueIndex:uq_attempt_question,priority:1"`
+	QuestionID        uuid.UUID `gorm:"type:uuid;not null;uniqueIndex:uq_attempt_question,priority:2"`
+	QuestionNo        int       `gorm:"not null;index"`
 	SelectedChoiceKey *string
 	IsCorrect         *bool
 	AnsweredAt        *time.Time
@@ -216,6 +218,7 @@ type latestAttemptRow struct {
 	AccessSource *string    `gorm:"column:access_source"`
 	StartedAt    time.Time  `gorm:"column:started_at"`
 	ExpiresAt    time.Time  `gorm:"column:expires_at"`
+	TimingMode   string     `gorm:"column:timing_mode"`
 }
 
 func (r *postgresRepository) FindLatestAttemptsByUserGroupedByExamSet(ctx context.Context, userID uuid.UUID) ([]domain.LatestAttemptSummary, error) {
@@ -228,7 +231,8 @@ SELECT DISTINCT ON (ea.exam_set_id)
   ea.submitted_at,
   ea.access_source,
   ea.started_at,
-  ea.expires_at
+  ea.expires_at,
+  ea.timing_mode
 FROM exam_attempts ea
 JOIN exam_sets es ON es.id = ea.exam_set_id
 WHERE ea.user_id = ?
@@ -252,6 +256,7 @@ ORDER BY ea.exam_set_id, ea.created_at DESC`
 			AccessSource: row.AccessSource,
 			StartedAt:    row.StartedAt,
 			ExpiresAt:    row.ExpiresAt,
+			TimingMode:   domain.NormalizeTimingMode(row.TimingMode),
 		}
 	}
 	return out, nil
@@ -285,7 +290,7 @@ func (r *postgresRepository) FindUserActivityForExamSet(ctx context.Context, use
 	}
 
 	activity := &domain.UserExamActivity{
-		HasSubmittedAttempts: true,
+		HasSubmittedAttempts:     true,
 		LatestSubmittedAttemptID: &latestSubmitted.ID,
 		LatestAttemptStatus:      &latestSubmitted.Status,
 		LatestScorePercent:       latestSubmitted.ScorePercent,
@@ -532,6 +537,7 @@ func toAttemptModel(a *domain.ExamAttempt) ExamAttemptModel {
 		ExamTrackID:         a.ExamTrackID,
 		ExamSetID:           a.ExamSetID,
 		Status:              a.Status,
+		TimingMode:          domain.NormalizeTimingMode(a.TimingMode),
 		StartedAt:           a.StartedAt,
 		SubmittedAt:         a.SubmittedAt,
 		ExpiresAt:           a.ExpiresAt,
@@ -556,6 +562,7 @@ func toAttemptDomain(m *ExamAttemptModel) domain.ExamAttempt {
 		ExamTrackID:         m.ExamTrackID,
 		ExamSetID:           m.ExamSetID,
 		Status:              m.Status,
+		TimingMode:          domain.NormalizeTimingMode(m.TimingMode),
 		StartedAt:           m.StartedAt,
 		SubmittedAt:         m.SubmittedAt,
 		ExpiresAt:           m.ExpiresAt,
@@ -580,6 +587,7 @@ func toAttemptDomain(m *ExamAttemptModel) domain.ExamAttempt {
 			DurationMinutes: m.ExamSet.DurationMinutes,
 			TotalQuestions:  m.ExamSet.TotalQuestions,
 			PassingScore:    m.ExamSet.PassingScore,
+			AccessType:      m.ExamSet.AccessType,
 			AnswerSheetLayout: examsetdomain.LayoutFromModel(
 				m.ExamSet.AnswerSheetBlockColumns,
 				m.ExamSet.AnswerSheetQuestionsPerBlock,

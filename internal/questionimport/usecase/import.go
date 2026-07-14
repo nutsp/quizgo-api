@@ -328,7 +328,7 @@ func (uc *UseCase) Confirm(ctx context.Context, adminUserID uuid.UUID, input dom
 				return apperrors.New("SUBJECT_NOT_FOUND", "ไม่พบหมวดวิชานี้ในระบบ", 400)
 			}
 			question := buildQuestion(subject.ID, row)
-			tagRefs, err := resolveImportTagRefs(ctx, uc.tags, row.Tags)
+			tagRefs, err := resolveImportTagRefs(ctx, uc.tags, row.Tags, subject.ID)
 			if err != nil {
 				return err
 			}
@@ -517,7 +517,7 @@ func previewRowToJobRow(jobID uuid.UUID, row domain.ImportPreviewRow, now time.T
 	}
 }
 
-func resolveImportTagRefs(ctx context.Context, tags tagrepo.TagAdminRepository, raw string) ([]qdomain.TagRef, error) {
+func resolveImportTagRefs(ctx context.Context, tags tagrepo.TagAdminRepository, raw string, subjectID uuid.UUID) ([]qdomain.TagRef, error) {
 	codes := parseTagCodes(raw)
 	if len(codes) == 0 {
 		return nil, nil
@@ -532,9 +532,14 @@ func resolveImportTagRefs(ctx context.Context, tags tagrepo.TagAdminRepository, 
 	if len(found) != len(codes) {
 		return nil, apperrors.ErrTagNotFound
 	}
+	for _, tag := range found {
+		if tag.SubjectID != nil && *tag.SubjectID != subjectID {
+			return nil, apperrors.ValidationError("กลุ่มคำถามไม่ตรงกับหมวดวิชา")
+		}
+	}
 	refs := make([]qdomain.TagRef, len(found))
 	for i, t := range found {
-		refs[i] = qdomain.TagRef{ID: t.ID, Name: t.Name, Code: t.Code, Color: t.Color}
+		refs[i] = qdomain.TagRef{ID: t.ID, SubjectID: t.SubjectID, Name: t.Name, Code: t.Code, Color: t.Color}
 	}
 	return refs, nil
 }

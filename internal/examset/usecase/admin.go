@@ -346,13 +346,7 @@ func (uc *AdminUseCase) buildSetFromInput(input CreateSetInput, existingLayout *
 		input.PriceAmount,
 		input.AllowSinglePurchase,
 	)
-	if input.AccessType == domain.AccessPrivate {
-		input.PriceAmount = 0
-		input.SalePriceAmount = nil
-		input.OriginalPriceAmount = nil
-		input.AllowSinglePurchase = false
-	}
-	if input.AccessType == domain.AccessFree || input.AccessType == domain.AccessTrial {
+	if input.AccessType == domain.AccessFree {
 		input.PriceAmount = 0
 		input.AllowSinglePurchase = false
 		input.OriginalPriceAmount = nil
@@ -414,7 +408,7 @@ func isValidDifficulty(d string) bool {
 }
 
 func isValidAccess(a string) bool {
-	return a == domain.AccessFree || a == domain.AccessTrial || a == domain.AccessPaid || a == domain.AccessPremium || a == domain.AccessPrivate
+	return a == domain.AccessFree || a == domain.AccessPremium
 }
 
 func isValidMode(m string) bool {

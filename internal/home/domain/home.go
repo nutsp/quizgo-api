@@ -3,10 +3,10 @@ package domain
 import examsetdomain "virtual-exam-api/internal/examset/domain"
 
 type HomeResponse struct {
-	RecommendedExamTracks []ExamTrackItem                    `json:"recommended_exam_tracks"`
-	PopularExamSets       []examsetdomain.ExamSetSummary       `json:"popular_exam_sets"`
-	ContinueAttempt       *ContinueAttempt                     `json:"continue_attempt"`
-	MyProgressSummary     *ProgressSummary                     `json:"my_progress_summary"`
+	RecommendedExamTracks []ExamTrackItem                `json:"recommended_exam_tracks"`
+	PopularExamSets       []examsetdomain.ExamSetSummary `json:"popular_exam_sets"`
+	ContinueAttempt       *ContinueAttempt               `json:"continue_attempt"`
+	MyProgressSummary     *ProgressSummary               `json:"my_progress_summary"`
 }
 
 type ExamTrackItem struct {
@@ -31,6 +31,8 @@ type ContinueAttempt struct {
 	AnsweredCount    int    `json:"answered_count"`
 	TotalQuestions   int    `json:"total_questions"`
 	RemainingSeconds int    `json:"remaining_seconds"`
+	ElapsedSeconds   int    `json:"elapsed_seconds"`
+	TimingMode       string `json:"timing_mode"`
 }
 
 type ProgressSummary struct {

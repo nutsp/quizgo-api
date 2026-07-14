@@ -8,6 +8,7 @@ import (
 	"virtual-exam-api/internal/database"
 	attemptrepo "virtual-exam-api/internal/examattempt/repository"
 	examsetrepo "virtual-exam-api/internal/examset/repository"
+	esqrepo "virtual-exam-api/internal/examsetquestion/repository"
 	trackrepo "virtual-exam-api/internal/examtrack/repository"
 	questionrepo "virtual-exam-api/internal/question/repository"
 	userrepo "virtual-exam-api/internal/user/repository"
@@ -33,6 +34,7 @@ func main() {
 		&questionrepo.QuestionModel{},
 		&questionrepo.ChoiceModel{},
 		&questionrepo.ExamSetQuestionModel{},
+		&esqrepo.QuestionRuleModel{},
 		&attemptrepo.ExamAttemptModel{},
 		&attemptrepo.ExamAnswerModel{},
 	)
