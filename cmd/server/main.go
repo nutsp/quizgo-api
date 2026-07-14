@@ -198,7 +198,8 @@ func main() {
 	resulthttp.NewHandler(resultUseCase).RegisterRoutes(api, authMiddleware)
 
 	leaderboardUseCase := leaderboarduc.NewLeaderboardUseCase(leaderboardRepository)
-	leaderboardhttp.NewHandler(leaderboardUseCase).RegisterRoutes(api, authMiddleware)
+	leaderboardReadLimiter := leaderboardhttp.NewRedisReadLimiter(rdb.Runtime, log.Default())
+	leaderboardhttp.NewHandler(leaderboardUseCase, leaderboardReadLimiter).RegisterRoutes(api, authMiddleware)
 
 	profileUseCase := profileuc.NewProfileUseCase(userRepository, resultRepository)
 	profilehttp.NewHandler(profileUseCase).RegisterRoutes(api, authMiddleware)

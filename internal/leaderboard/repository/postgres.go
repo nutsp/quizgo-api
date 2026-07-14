@@ -20,6 +20,8 @@ type SeasonRow struct {
 	Month       int
 	StartsAt    time.Time
 	EndsAt      time.Time
+	Status      string
+	FinalizedAt *time.Time
 }
 
 type BestScoreUpdate struct {
@@ -140,6 +142,48 @@ type ExamTrackUserRankRow struct {
 	PassRatePercent     float64
 }
 
+type SeasonLeaderboardRow struct {
+	Rank                 int
+	UserID               uuid.UUID
+	DisplayName          string
+	Email                string
+	TotalPoints          float64
+	CompletedExamSets    int
+	TotalDurationSeconds int64
+	ScoreAchievedAt      time.Time
+}
+
+type SeasonUserSummaryRow struct {
+	Rank                 int
+	UserID               uuid.UUID
+	TotalPoints          float64
+	CompletedExamSets    int
+	TotalDurationSeconds int64
+	ScoreAchievedAt      time.Time
+}
+
+type NextOpportunityRow struct {
+	Code          string
+	Title         string
+	ExamTrackName string
+}
+
+type AwardRow struct {
+	SeasonID  uuid.UUID
+	TrackCode string
+	Year      int
+	Month     int
+	Rank      int
+	AwardedAt time.Time
+}
+
+type FinalizationResult struct {
+	SeasonID    uuid.UUID
+	Finalized   bool
+	FinalizedAt time.Time
+	AwardCount  int64
+}
+
 type Repository interface {
 	EnsureSeason(ctx context.Context, examTrackID uuid.UUID, window domain.SeasonWindow) (*SeasonRow, error)
 	EnsureSeasonForPublish(ctx context.Context, examTrackID, examSetID uuid.UUID, window domain.SeasonWindow) (*SeasonRow, error)
@@ -161,6 +205,18 @@ type Repository interface {
 	CountExamTrackLeaderboard(ctx context.Context, trackID uuid.UUID) (int64, error)
 	ListExamTrackLeaderboard(ctx context.Context, trackID uuid.UUID, offset, limit int) ([]ExamTrackLeaderboardRow, error)
 	GetExamTrackUserRank(ctx context.Context, trackID, userID uuid.UUID) (*ExamTrackUserRankRow, error)
+
+	FindMostRecentAttemptedTrack(ctx context.Context, userID uuid.UUID) (*ExamTrackContextRow, error)
+	FindSeason(ctx context.Context, trackID uuid.UUID, year, month int) (*SeasonRow, error)
+	CountSeasonLeaderboard(ctx context.Context, seasonID uuid.UUID) (int64, error)
+	ListSeasonLeaderboard(ctx context.Context, seasonID uuid.UUID, offset, limit int) ([]SeasonLeaderboardRow, error)
+	ListSeasonTopThree(ctx context.Context, seasonID uuid.UUID) ([]SeasonLeaderboardRow, error)
+	ListSeasonLeaderboardAroundUser(ctx context.Context, seasonID, userID uuid.UUID, above, below int) ([]SeasonLeaderboardRow, error)
+	GetSeasonUserSummary(ctx context.Context, seasonID, userID uuid.UUID) (*SeasonUserSummaryRow, error)
+	ListNextOpportunities(ctx context.Context, seasonID, userID uuid.UUID) ([]NextOpportunityRow, error)
+	ListAwards(ctx context.Context, userID uuid.UUID) ([]AwardRow, error)
+	ListDueSeasons(ctx context.Context, at time.Time) ([]SeasonRow, error)
+	FinalizeSeason(ctx context.Context, seasonID uuid.UUID, finalizedAt time.Time) (*FinalizationResult, error)
 }
 
 type postgresRepository struct {
@@ -177,11 +233,11 @@ const insertSeasonSQL = `
 	)
 	VALUES (?, ?, ?, ?, ?, ?, 'active')
 	ON CONFLICT (exam_track_id, year, month) DO NOTHING
-	RETURNING id, exam_track_id, year, month, starts_at, ends_at
+	RETURNING id, exam_track_id, year, month, starts_at, ends_at, status, finalized_at
 `
 
 const findSeasonSQL = `
-	SELECT id, exam_track_id, year, month, starts_at, ends_at
+	SELECT id, exam_track_id, year, month, starts_at, ends_at, status, finalized_at
 	FROM leaderboard_seasons
 	WHERE exam_track_id = ? AND year = ? AND month = ?
 `
@@ -423,6 +479,13 @@ const acquireExamSetTransitionLockSQL = `
 
 const acquireSeasonProjectionLockSQL = `
 	SELECT pg_advisory_xact_lock(hashtextextended(CAST(? AS text), 1))
+`
+
+const findSeasonStatusAfterProjectionLockSQL = `
+	SELECT status
+	FROM leaderboard_seasons
+	WHERE id = ?
+	FOR SHARE
 `
 
 const findExactExamSetIntervalSQL = `
@@ -743,6 +806,16 @@ func (r *postgresRepository) ProjectBestScore(
 
 		if err := tx.Exec(acquireSeasonProjectionLockSQL, season.ID).Error; err != nil {
 			return err
+		}
+		var lockedSeason struct {
+			Status string
+		}
+		if err := tx.Raw(findSeasonStatusAfterProjectionLockSQL, season.ID).Scan(&lockedSeason).Error; err != nil {
+			return err
+		}
+		if lockedSeason.Status != "active" {
+			projection.Season = nil
+			return nil
 		}
 		projection.PreviousRank, err = getUserRank(tx, season.ID, userID)
 		if err != nil {
@@ -1085,6 +1158,329 @@ func (r *postgresRepository) FindActiveExamTrackByCode(ctx context.Context, code
 		return nil, nil
 	}
 	return &row, nil
+}
+
+func (r *postgresRepository) FindMostRecentAttemptedTrack(ctx context.Context, userID uuid.UUID) (*ExamTrackContextRow, error) {
+	var row ExamTrackContextRow
+	err := r.db.WithContext(ctx).Raw(`
+		SELECT et.id, et.code, et.name
+		FROM exam_attempts ea
+		JOIN exam_sets es ON es.id = ea.exam_set_id
+		JOIN exam_tracks et ON et.id = es.exam_track_id
+		WHERE ea.user_id = ?
+			AND ea.status IN ('submitted', 'timeout')
+			AND et.is_active = true
+		ORDER BY ea.submitted_at DESC NULLS LAST, ea.id
+		LIMIT 1
+	`, userID).Scan(&row).Error
+	if err != nil {
+		return nil, err
+	}
+	if row.ID == uuid.Nil {
+		return nil, nil
+	}
+	return &row, nil
+}
+
+func (r *postgresRepository) FindSeason(ctx context.Context, trackID uuid.UUID, year, month int) (*SeasonRow, error) {
+	var row SeasonRow
+	err := r.db.WithContext(ctx).Raw(`
+		SELECT id, exam_track_id, year, month, starts_at, ends_at, status, finalized_at
+		FROM leaderboard_seasons
+		WHERE exam_track_id = ? AND year = ? AND month = ?
+	`, trackID, year, month).Scan(&row).Error
+	if err != nil {
+		return nil, err
+	}
+	if row.ID == uuid.Nil {
+		return nil, nil
+	}
+	return &row, nil
+}
+
+const monthlyPublicRankedEntriesCTE = `
+	WITH visible_entries AS (
+		SELECT
+			e.user_id,
+			u.display_name,
+			u.email,
+			e.total_points,
+			e.completed_exam_sets,
+			e.total_duration_seconds,
+			e.score_achieved_at
+		FROM leaderboard_entries e
+		JOIN leaderboard_seasons s ON s.id = e.season_id
+		JOIN users u ON u.id = e.user_id
+		WHERE e.season_id = ?
+			AND (s.status = 'finalized' OR u.status = 'active')
+	),
+	ranked AS (
+		SELECT
+			RANK() OVER (ORDER BY ` + monthlyRankWindowSQL + `) AS rank,
+			user_id,
+			display_name,
+			email,
+			total_points,
+			completed_exam_sets,
+			total_duration_seconds,
+			score_achieved_at
+		FROM visible_entries
+	),
+	ordered AS (
+		SELECT * FROM ranked ORDER BY rank, user_id
+	)
+`
+
+func (r *postgresRepository) CountSeasonLeaderboard(ctx context.Context, seasonID uuid.UUID) (int64, error) {
+	var count int64
+	err := r.db.WithContext(ctx).Raw(monthlyPublicRankedEntriesCTE+`
+		SELECT COUNT(*) FROM ordered
+	`, seasonID).Scan(&count).Error
+	return count, err
+}
+
+func (r *postgresRepository) ListSeasonLeaderboard(
+	ctx context.Context,
+	seasonID uuid.UUID,
+	offset, limit int,
+) ([]SeasonLeaderboardRow, error) {
+	var rows []SeasonLeaderboardRow
+	err := r.db.WithContext(ctx).Raw(monthlyPublicRankedEntriesCTE+`
+		SELECT
+			rank, user_id, display_name, email, total_points,
+			completed_exam_sets, total_duration_seconds, score_achieved_at
+		FROM ordered
+		ORDER BY rank, user_id
+		LIMIT ? OFFSET ?
+	`, seasonID, limit, offset).Scan(&rows).Error
+	return rows, err
+}
+
+func (r *postgresRepository) ListSeasonTopThree(ctx context.Context, seasonID uuid.UUID) ([]SeasonLeaderboardRow, error) {
+	var rows []SeasonLeaderboardRow
+	err := r.db.WithContext(ctx).Raw(monthlyPublicRankedEntriesCTE+`
+		SELECT
+			rank, user_id, display_name, email, total_points,
+			completed_exam_sets, total_duration_seconds, score_achieved_at
+		FROM ordered
+		WHERE rank <= 3
+		ORDER BY rank, user_id
+	`, seasonID).Scan(&rows).Error
+	return rows, err
+}
+
+func (r *postgresRepository) ListSeasonLeaderboardAroundUser(
+	ctx context.Context,
+	seasonID, userID uuid.UUID,
+	above, below int,
+) ([]SeasonLeaderboardRow, error) {
+	var rows []SeasonLeaderboardRow
+	err := r.db.WithContext(ctx).Raw(monthlyPublicRankedEntriesCTE+`,
+	positioned AS (
+		SELECT ordered.*, ROW_NUMBER() OVER (ORDER BY rank, user_id) AS row_position
+		FROM ordered
+	),
+	current_position AS (
+		SELECT row_position FROM positioned WHERE user_id = ?
+	)
+	SELECT
+		p.rank, p.user_id, p.display_name, p.email, p.total_points,
+		p.completed_exam_sets, p.total_duration_seconds, p.score_achieved_at
+	FROM positioned p
+	CROSS JOIN current_position c
+	WHERE p.row_position BETWEEN GREATEST(1, c.row_position - ?) AND c.row_position + ?
+	ORDER BY p.rank, p.user_id
+	`, seasonID, userID, above, below).Scan(&rows).Error
+	return rows, err
+}
+
+func (r *postgresRepository) GetSeasonUserSummary(
+	ctx context.Context,
+	seasonID, userID uuid.UUID,
+) (*SeasonUserSummaryRow, error) {
+	var row SeasonUserSummaryRow
+	err := r.db.WithContext(ctx).Raw(monthlyPublicRankedEntriesCTE+`
+		SELECT
+			rank, user_id, total_points, completed_exam_sets,
+			total_duration_seconds, score_achieved_at
+		FROM ordered
+		WHERE user_id = ?
+	`, seasonID, userID).Scan(&row).Error
+	if err != nil {
+		return nil, err
+	}
+	if row.UserID == uuid.Nil {
+		return nil, nil
+	}
+	return &row, nil
+}
+
+func (r *postgresRepository) ListNextOpportunities(
+	ctx context.Context,
+	seasonID, userID uuid.UUID,
+) ([]NextOpportunityRow, error) {
+	var rows []NextOpportunityRow
+	err := r.db.WithContext(ctx).Raw(`
+		SELECT DISTINCT es.code, es.title, et.name AS exam_track_name
+		FROM leaderboard_season_exam_sets ses
+		JOIN leaderboard_seasons s ON s.id = ses.season_id
+		JOIN exam_sets es ON es.id = ses.exam_set_id
+		JOIN exam_tracks et ON et.id = s.exam_track_id
+		WHERE ses.season_id = ?
+			AND s.status = 'active'
+			AND ses.stopped_at IS NULL
+			AND es.status = ?
+			AND es.is_active = true
+			AND NOT EXISTS (
+				SELECT 1 FROM leaderboard_scores score
+				WHERE score.season_id = ses.season_id
+					AND score.exam_set_id = ses.exam_set_id
+					AND score.user_id = ?
+			)
+		ORDER BY es.code, es.title
+	`, seasonID, examsetdomain.StatusPublished, userID).Scan(&rows).Error
+	return rows, err
+}
+
+func (r *postgresRepository) ListAwards(ctx context.Context, userID uuid.UUID) ([]AwardRow, error) {
+	var rows []AwardRow
+	err := r.db.WithContext(ctx).Raw(`
+		SELECT
+			a.season_id,
+			et.code AS track_code,
+			s.year,
+			s.month,
+			a.rank,
+			a.created_at AS awarded_at
+		FROM leaderboard_awards a
+		JOIN leaderboard_seasons s ON s.id = a.season_id
+		JOIN exam_tracks et ON et.id = s.exam_track_id
+		WHERE a.user_id = ?
+		ORDER BY s.year DESC, s.month DESC, a.rank, et.code, a.id
+	`, userID).Scan(&rows).Error
+	return rows, err
+}
+
+func (r *postgresRepository) ListDueSeasons(ctx context.Context, at time.Time) ([]SeasonRow, error) {
+	var rows []SeasonRow
+	err := r.db.WithContext(ctx).Raw(`
+		SELECT id, exam_track_id, year, month, starts_at, ends_at, status, finalized_at
+		FROM leaderboard_seasons
+		WHERE status = 'active' AND ends_at <= ?
+		ORDER BY ends_at, id
+	`, at).Scan(&rows).Error
+	return rows, err
+}
+
+func (r *postgresRepository) FinalizeSeason(
+	ctx context.Context,
+	seasonID uuid.UUID,
+	finalizedAt time.Time,
+) (*FinalizationResult, error) {
+	result := &FinalizationResult{SeasonID: seasonID}
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(acquireSeasonProjectionLockSQL, seasonID).Error; err != nil {
+			return err
+		}
+		var season SeasonRow
+		query := tx.Raw(`
+			SELECT id, exam_track_id, year, month, starts_at, ends_at, status, finalized_at
+			FROM leaderboard_seasons
+			WHERE id = ?
+			FOR UPDATE
+		`, seasonID).Scan(&season)
+		if query.Error != nil {
+			return query.Error
+		}
+		if query.RowsAffected == 0 || season.ID == uuid.Nil {
+			return gorm.ErrRecordNotFound
+		}
+		if season.Status == "finalized" {
+			if season.FinalizedAt != nil {
+				result.FinalizedAt = *season.FinalizedAt
+			}
+			return nil
+		}
+		if finalizedAt.Before(season.EndsAt) {
+			return nil
+		}
+		if err := tx.Exec(`
+			DELETE FROM leaderboard_entries entry
+			WHERE entry.season_id = ?
+				AND NOT EXISTS (
+					SELECT 1 FROM leaderboard_scores score
+					WHERE score.season_id = entry.season_id AND score.user_id = entry.user_id
+				)
+		`, seasonID).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(`
+			INSERT INTO leaderboard_entries (
+				season_id, user_id, total_points, completed_exam_sets,
+				total_duration_seconds, score_achieved_at
+			)
+			SELECT
+				season_id,
+				user_id,
+				SUM(points),
+				COUNT(*)::int,
+				SUM(duration_seconds)::bigint,
+				MAX(achieved_at)
+			FROM leaderboard_scores
+			WHERE season_id = ?
+			GROUP BY season_id, user_id
+			ON CONFLICT (season_id, user_id) DO UPDATE SET
+				total_points = EXCLUDED.total_points,
+				completed_exam_sets = EXCLUDED.completed_exam_sets,
+				total_duration_seconds = EXCLUDED.total_duration_seconds,
+				score_achieved_at = EXCLUDED.score_achieved_at,
+				updated_at = now()
+		`, seasonID).Error; err != nil {
+			return err
+		}
+
+		awards := tx.Exec(`
+			WITH ranked AS (
+				SELECT
+					RANK() OVER (ORDER BY `+monthlyRankWindowSQL+`) AS rank,
+					user_id
+				FROM leaderboard_entries
+				WHERE season_id = ?
+			)
+			INSERT INTO leaderboard_awards (
+				id, season_id, user_id, rank, created_at, updated_at
+			)
+			SELECT gen_random_uuid(), ?, user_id, rank, ?, ?
+			FROM ranked
+			WHERE rank BETWEEN 1 AND 3
+			ORDER BY rank, user_id
+			ON CONFLICT (season_id, user_id, rank) DO NOTHING
+		`, seasonID, seasonID, finalizedAt, finalizedAt)
+		if awards.Error != nil {
+			return awards.Error
+		}
+
+		updated := tx.Exec(`
+			UPDATE leaderboard_seasons
+			SET status = 'finalized', finalized_at = ?, updated_at = now()
+			WHERE id = ? AND status = 'active'
+		`, finalizedAt, seasonID)
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return fmt.Errorf("finalize leaderboard season: affected %d rows", updated.RowsAffected)
+		}
+
+		result.Finalized = true
+		result.FinalizedAt = finalizedAt
+		result.AwardCount = awards.RowsAffected
+		return nil
+	}, projectionTxOptions)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 const examSetBestAttemptsCTE = `

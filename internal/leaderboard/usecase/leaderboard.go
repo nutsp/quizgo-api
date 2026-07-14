@@ -2,7 +2,9 @@ package usecase
 
 import (
 	"context"
+	"log"
 	"math"
+	"time"
 
 	"github.com/google/uuid"
 	"virtual-exam-api/internal/apperrors"
@@ -11,12 +13,37 @@ import (
 	userdomain "virtual-exam-api/internal/user/domain"
 )
 
-type LeaderboardUseCase struct {
-	repo leaderboardrepo.Repository
+type LeaderboardRepository interface {
+	FindPublishedExamSetByCode(context.Context, string) (*leaderboardrepo.ExamSetContextRow, error)
+	FindActiveExamTrackByCode(context.Context, string) (*leaderboardrepo.ExamTrackContextRow, error)
+	CountExamSetLeaderboard(context.Context, uuid.UUID) (int64, error)
+	ListExamSetLeaderboard(context.Context, uuid.UUID, int, int) ([]leaderboardrepo.ExamSetLeaderboardRow, error)
+	GetExamSetUserRank(context.Context, uuid.UUID, uuid.UUID) (*leaderboardrepo.ExamSetUserRankRow, error)
+	CountExamTrackLeaderboard(context.Context, uuid.UUID) (int64, error)
+	ListExamTrackLeaderboard(context.Context, uuid.UUID, int, int) ([]leaderboardrepo.ExamTrackLeaderboardRow, error)
+	GetExamTrackUserRank(context.Context, uuid.UUID, uuid.UUID) (*leaderboardrepo.ExamTrackUserRankRow, error)
+	EnsureSeason(context.Context, uuid.UUID, domain.SeasonWindow) (*leaderboardrepo.SeasonRow, error)
+	FindMostRecentAttemptedTrack(context.Context, uuid.UUID) (*leaderboardrepo.ExamTrackContextRow, error)
+	FindSeason(context.Context, uuid.UUID, int, int) (*leaderboardrepo.SeasonRow, error)
+	CountSeasonLeaderboard(context.Context, uuid.UUID) (int64, error)
+	ListSeasonLeaderboard(context.Context, uuid.UUID, int, int) ([]leaderboardrepo.SeasonLeaderboardRow, error)
+	ListSeasonTopThree(context.Context, uuid.UUID) ([]leaderboardrepo.SeasonLeaderboardRow, error)
+	ListSeasonLeaderboardAroundUser(context.Context, uuid.UUID, uuid.UUID, int, int) ([]leaderboardrepo.SeasonLeaderboardRow, error)
+	GetSeasonUserSummary(context.Context, uuid.UUID, uuid.UUID) (*leaderboardrepo.SeasonUserSummaryRow, error)
+	ListNextOpportunities(context.Context, uuid.UUID, uuid.UUID) ([]leaderboardrepo.NextOpportunityRow, error)
+	ListAwards(context.Context, uuid.UUID) ([]leaderboardrepo.AwardRow, error)
+	ListDueSeasons(context.Context, time.Time) ([]leaderboardrepo.SeasonRow, error)
+	FinalizeSeason(context.Context, uuid.UUID, time.Time) (*leaderboardrepo.FinalizationResult, error)
 }
 
-func NewLeaderboardUseCase(repo leaderboardrepo.Repository) *LeaderboardUseCase {
-	return &LeaderboardUseCase{repo: repo}
+type LeaderboardUseCase struct {
+	repo   LeaderboardRepository
+	now    func() time.Time
+	logger *log.Logger
+}
+
+func NewLeaderboardUseCase(repo LeaderboardRepository) *LeaderboardUseCase {
+	return &LeaderboardUseCase{repo: repo, now: time.Now, logger: log.Default()}
 }
 
 func (uc *LeaderboardUseCase) GetExamSetLeaderboard(ctx context.Context, userID uuid.UUID, examSetCode string, filter domain.ListFilter) (*domain.ExamSetLeaderboardResponse, error) {

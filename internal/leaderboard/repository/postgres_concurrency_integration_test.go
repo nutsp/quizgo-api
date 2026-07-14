@@ -934,7 +934,12 @@ func openLeaderboardIntegrationDB(t *testing.T) *gorm.DB {
 	})
 
 	for _, statement := range []string{
-		`CREATE TABLE exam_tracks (id uuid PRIMARY KEY)`,
+		`CREATE TABLE exam_tracks (
+				id uuid PRIMARY KEY,
+				code varchar(100) NOT NULL DEFAULT '',
+				name varchar(255) NOT NULL DEFAULT '',
+				is_active boolean NOT NULL DEFAULT true
+			)`,
 		`CREATE TABLE exam_sets (
 				id uuid PRIMARY KEY,
 				exam_track_id uuid NOT NULL REFERENCES exam_tracks(id),
@@ -966,7 +971,12 @@ func openLeaderboardIntegrationDB(t *testing.T) *gorm.DB {
 				created_at timestamptz NOT NULL DEFAULT now(),
 				updated_at timestamptz NOT NULL DEFAULT now()
 			)`,
-		`CREATE TABLE users (id uuid PRIMARY KEY)`,
+		`CREATE TABLE users (
+				id uuid PRIMARY KEY,
+				display_name varchar(255) NOT NULL DEFAULT '',
+				email varchar(255) NOT NULL DEFAULT '',
+				status varchar(30) NOT NULL DEFAULT 'active'
+			)`,
 		`CREATE TABLE exam_attempts (id uuid PRIMARY KEY, exam_set_id uuid REFERENCES exam_sets(id))`,
 	} {
 		mustExec(t, testDB, statement)
@@ -1095,6 +1105,10 @@ func assertPostgresEligibility(
 }
 
 func waitForPostgresLockWait(t *testing.T, db *gorm.DB, queryFragments ...string) {
+	waitForPostgresLockWaitCount(t, db, 1, queryFragments...)
+}
+
+func waitForPostgresLockWaitCount(t *testing.T, db *gorm.DB, want int, queryFragments ...string) {
 	t.Helper()
 	deadline := time.Now().Add(postgresRaceBound)
 	for {
@@ -1114,11 +1128,11 @@ func waitForPostgresLockWait(t *testing.T, db *gorm.DB, queryFragments ...string
 		if err := db.Raw(query, args...).Scan(&count).Error; err != nil {
 			t.Fatalf("inspect PostgreSQL lock waits: %v", err)
 		}
-		if count > 0 {
+		if count >= want {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("no PostgreSQL lock wait observed for query fragments %q", queryFragments)
+			t.Fatalf("PostgreSQL lock waits = %d, want at least %d for query fragments %q", count, want, queryFragments)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

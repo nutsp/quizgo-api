@@ -82,10 +82,12 @@ type ExamTrackLeaderboardResponse struct {
 }
 
 type SeasonWindow struct {
-	Year     int       `json:"year"`
-	Month    int       `json:"month"`
-	StartsAt time.Time `json:"starts_at"`
-	EndsAt   time.Time `json:"ends_at"`
+	Year        int        `json:"year"`
+	Month       int        `json:"month"`
+	StartsAt    time.Time  `json:"starts_at"`
+	EndsAt      time.Time  `json:"ends_at"`
+	Status      string     `json:"status"`
+	FinalizedAt *time.Time `json:"finalized_at"`
 }
 
 type ScoreCandidate struct {
@@ -143,7 +145,17 @@ type Award struct {
 	Year      int       `json:"year"`
 	Month     int       `json:"month"`
 	Rank      int       `json:"rank"`
+	Medal     string    `json:"medal"`
 	AwardedAt time.Time `json:"awarded_at"`
+}
+
+type OverviewResponse struct {
+	DefaultTrackCode  *string             `json:"default_track_code"`
+	Season            *SeasonWindow       `json:"season"`
+	ExamTrack         *ExamTrackRef       `json:"exam_track"`
+	CurrentUser       *CurrentUserSummary `json:"current_user"`
+	TopThree          []LeaderboardEntry  `json:"top_three"`
+	NextOpportunities []ExamSetRef        `json:"next_opportunities"`
 }
 
 type HubResponse struct {
