@@ -180,9 +180,13 @@ func parseHubQuery(c echo.Context) (int, int, string, domain.ListFilter, error) 
 }
 
 func parseListFilter(c echo.Context, defaultLimit int) (domain.ListFilter, error) {
-	page, err := parseOptionalPositiveInt(c.QueryParam("page"), "page", 1)
-	if err != nil {
-		return domain.ListFilter{}, err
+	page := 1
+	if rawPage := c.QueryParam("page"); rawPage != "" {
+		var err error
+		page, err = parseBoundedInt(rawPage, "page", 1, 100000)
+		if err != nil {
+			return domain.ListFilter{}, err
+		}
 	}
 	limit, err := parseOptionalPositiveInt(c.QueryParam("limit"), "limit", defaultLimit)
 	if err != nil {
