@@ -285,7 +285,6 @@ func (uc *UseCase) itemFromInput(ctx context.Context, input MutationInput, exclu
 	}
 	examDate, _ := parseExamDate(input.ExamDate)
 	if input.Type != domain.TypeExamSchedule {
-		input.ExamTrackID = nil
 		examDate = nil
 		input.DaysBeforeStart = 0
 	}
