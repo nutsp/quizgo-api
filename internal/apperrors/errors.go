@@ -74,4 +74,7 @@ var (
 	ErrTagHasQuestions                = New("TAG_HAS_QUESTIONS", "ไม่สามารถลบกลุ่มคำถามที่มีคำถามอยู่ ระบบปิดใช้งานแทน", http.StatusBadRequest)
 	ErrAccountSuspended               = New("ACCOUNT_SUSPENDED", "บัญชีนี้ถูกระงับการใช้งาน กรุณาติดต่อผู้ดูแลระบบ", http.StatusForbidden)
 	ErrLastAdmin                      = New("LAST_ADMIN", "ไม่สามารถเปลี่ยนแปลงผู้ดูแลระบบคนสุดท้ายได้", http.StatusBadRequest)
+	ErrAnnouncementNotFound           = New("ANNOUNCEMENT_NOT_FOUND", "ไม่พบประกาศ", http.StatusNotFound)
+	ErrAnnouncementSlugTaken          = New("ANNOUNCEMENT_SLUG_TAKEN", "Slug นี้ถูกใช้งานแล้ว", http.StatusConflict)
+	ErrAnnouncementInvalidStatus      = New("ANNOUNCEMENT_INVALID_STATUS", "สถานะประกาศไม่ถูกต้อง", http.StatusBadRequest)
 )

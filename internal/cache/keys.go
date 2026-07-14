@@ -17,6 +17,7 @@ const (
 	TTLMyExams               = 3 * time.Minute
 	TTLUserAccess            = 1 * time.Minute
 	TTLResult                = 3 * time.Hour
+	TTLAnnouncements         = 5 * time.Minute
 	TTLIndexBuffer           = 10 * time.Minute
 )
 
@@ -118,4 +119,20 @@ func LockSubmitAttempt(attemptID string) string {
 
 func LockDuplicateCreateAttempt(userID, examSetID string) string {
 	return fmt.Sprintf("duplicate:create_attempt:%s:%s", userID, examSetID)
+}
+
+func AnnouncementsActive() string {
+	return "announcements:active"
+}
+
+func AnnouncementsActiveByType(announcementType string) string {
+	return "announcements:active:type:" + announcementType
+}
+
+func AnnouncementsByTrack(trackSlug string) string {
+	return "announcements:track:" + trackSlug
+}
+
+func IndexAnnouncements() string {
+	return "index:announcements"
 }

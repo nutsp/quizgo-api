@@ -50,3 +50,7 @@ func (inv *Invalidator) OnAttemptResultChanged(ctx context.Context, attemptID st
 	}
 	_ = inv.result.DeleteByIndex(ctx, IndexAttemptResult(attemptID))
 }
+
+func (inv *Invalidator) OnAnnouncementChanged(ctx context.Context) {
+	_ = inv.content.DeleteByIndex(ctx, IndexAnnouncements())
+}

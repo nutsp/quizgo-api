@@ -16,6 +16,9 @@ import (
 	accessuc "virtual-exam-api/internal/accesslog/usecase"
 	dashboarduc "virtual-exam-api/internal/admin/dashboard/usecase"
 	adminhttp "virtual-exam-api/internal/admin/transport/http"
+	announcementrepo "virtual-exam-api/internal/announcement/repository"
+	announcementhttp "virtual-exam-api/internal/announcement/transport/http"
+	announcementuc "virtual-exam-api/internal/announcement/usecase"
 	auditrepo "virtual-exam-api/internal/auditlog/repository"
 	audithttp "virtual-exam-api/internal/auditlog/transport/http"
 	audituc "virtual-exam-api/internal/auditlog/usecase"
@@ -93,6 +96,8 @@ func main() {
 			&oauthrepo.OAuthAccountModel{},
 			&accessrepo.AccessLogModel{},
 			&auditrepo.AuditLogModel{},
+			&announcementrepo.AnnouncementModel{},
+			&announcementrepo.AnnouncementExamSetModel{},
 			&trackrepo.ExamTrackModel{},
 			&examsetrepo.ExamSetModel{},
 			&examsetrepo.LifecycleEventModel{},
@@ -147,6 +152,7 @@ func main() {
 	userRepository := userrepo.NewPostgresRepository(db)
 	trackRepository := trackrepo.NewPostgresRepository(db)
 	examSetRepository := examsetrepo.NewPostgresRepository(db)
+	announcementRepository := announcementrepo.NewPostgresRepository(db)
 	examSetAdminRepo := examsetrepo.NewAdminRepository(db)
 	questionRepository := questionrepo.NewPostgresRepository(db)
 	attemptRepository := attemptrepo.NewPostgresRepository(db)
@@ -179,6 +185,7 @@ func main() {
 		leaderboardDispatcher,
 	)
 	homeUseCase := homeuc.NewHomeUseCase(trackRepository, examSetRepository, attemptRepository, entitlementUseCase, contentCache)
+	announcementUseCase := announcementuc.NewUseCase(announcementRepository, trackRepository, examSetRepository, contentCache, cacheInvalidator)
 
 	e := echo.New()
 	e.HideBanner = true
@@ -236,11 +243,14 @@ func main() {
 	auditLogRepo := auditrepo.NewPostgresRepository(db)
 	auditLogger := audituc.NewLogger(auditLogRepo)
 	auditLogAdminUC := audituc.NewAdminUseCase(auditLogRepo)
+	announcementHandler := announcementhttp.NewHandler(announcementUseCase, auditLogger, userRepository)
+	announcementHandler.RegisterPublicRoutes(api)
 
 	userAdminRepo := useradminrepo.NewUserAdminRepository(db)
 	userAdminUC := useradminuc.NewUseCase(userAdminRepo, entitlementRepository, accessLogRepo, auditLogRepo, auditLogger)
 
 	adminRoute := api.Group("/admin", authMiddleware, middleware.AdminOnly())
+	announcementHandler.RegisterAdminRoutes(adminRoute)
 	taghttp.NewHandler(tagAdminUC, auditLogger, userRepository).RegisterRoutes(adminRoute)
 	accesshttp.NewHandler(accessLogAdminUC).RegisterRoutes(adminRoute)
 	audithttp.NewHandler(auditLogAdminUC).RegisterRoutes(adminRoute)
