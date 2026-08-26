@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	echomw "github.com/labstack/echo/v4/middleware"
 	accessrepo "virtual-exam-api/internal/accesslog/repository"
@@ -32,6 +33,7 @@ import (
 	entrepo "virtual-exam-api/internal/entitlement/repository"
 	enthttp "virtual-exam-api/internal/entitlement/transport/http"
 	entuc "virtual-exam-api/internal/entitlement/usecase"
+	attemptquota "virtual-exam-api/internal/examattempt/quota"
 	attemptrepo "virtual-exam-api/internal/examattempt/repository"
 	attempthttp "virtual-exam-api/internal/examattempt/transport/http"
 	attemptuc "virtual-exam-api/internal/examattempt/usecase"
@@ -53,6 +55,12 @@ import (
 	"virtual-exam-api/internal/media/storage"
 	mediahttp "virtual-exam-api/internal/media/transport/http"
 	"virtual-exam-api/internal/middleware"
+	paymentcatalog "virtual-exam-api/internal/payment/catalog"
+	paymentproof "virtual-exam-api/internal/payment/proofstore"
+	paymentprovider "virtual-exam-api/internal/payment/provider"
+	paymentrepo "virtual-exam-api/internal/payment/repository"
+	paymenthttp "virtual-exam-api/internal/payment/transport/http"
+	paymentuc "virtual-exam-api/internal/payment/usecase"
 	profilehttp "virtual-exam-api/internal/profile/transport/http"
 	profileuc "virtual-exam-api/internal/profile/usecase"
 	questionrepo "virtual-exam-api/internal/question/repository"
@@ -91,6 +99,10 @@ func main() {
 	}
 
 	if cfg.AutoMigrate {
+		reviewStatusColumnExisted := db.Migrator().HasColumn(&questionrepo.QuestionModel{}, "ReviewStatus")
+		if err := trackrepo.PrepareBlueprintSectionsMigration(db); err != nil {
+			log.Fatalf("prepare blueprint sections migration: %v", err)
+		}
 		database.MustMigrate(db,
 			&userrepo.UserModel{},
 			&oauthrepo.OAuthAccountModel{},
@@ -121,8 +133,12 @@ func main() {
 			&tagrepo.QuestionTagModel{},
 			&tagrepo.QuestionTagMappingModel{},
 			&entrepo.EntitlementModel{},
+			&paymentrepo.PaymentRequestModel{},
 			&settingsrepo.SystemSettingModel{},
 		)
+		if err := questionrepo.ReconcileLegacyReviewStatus(db, reviewStatusColumnExisted); err != nil {
+			log.Fatalf("reconcile legacy question review status: %v", err)
+		}
 		if err := examsetrepo.ReconcilePublicationState(db); err != nil {
 			log.Fatalf("reconcile exam set publication state: %v", err)
 		}
@@ -171,6 +187,15 @@ func main() {
 	settingsUseCase := settingsuc.NewUseCase(settingsRepository, contentCache)
 	examSetUseCase := examsetuc.NewExamSetUseCaseWithAttempts(examSetRepository, questionRepository, entitlementUseCase, attemptRepository, contentCache)
 	scoringUseCase := scoringuc.NewScoringUseCase()
+	packages, err := paymentcatalog.LoadDefault()
+	if err != nil {
+		log.Fatalf("load payment catalog: %v", err)
+	}
+	freePackage, ok := paymentcatalog.Find(packages, "free")
+	if !ok || freePackage.AccessPolicy.DailyCompletedAttempts == nil {
+		log.Fatal("free package is missing daily attempt policy")
+	}
+	dailyAttemptQuota := attemptquota.NewService(attemptquota.NewRedisStore(rdb.Runtime), attemptRepository, *freePackage.AccessPolicy.DailyCompletedAttempts)
 	attemptUseCase := attemptuc.NewExamAttemptUseCase(
 		attemptRepository,
 		attemptCache,
@@ -180,6 +205,7 @@ func main() {
 		entitlementUseCase,
 		resultCache,
 		runtimeLocks,
+		dailyAttemptQuota,
 		cacheInvalidator,
 		settingsUseCase,
 		leaderboardDispatcher,
@@ -202,7 +228,7 @@ func main() {
 	examsethttp.NewHandler(examSetUseCase, attemptUseCase).RegisterRoutes(api, authMiddleware, optionalAuth)
 	attempthttp.NewHandler(attemptUseCase).RegisterRoutes(api, authMiddleware)
 	resultRepository := resultrepo.NewPostgresRepository(db)
-	resultUseCase := resultuc.NewResultUseCase(resultRepository)
+	resultUseCase := resultuc.NewResultUseCase(resultRepository, entitlementUseCase)
 	resulthttp.NewHandler(resultUseCase).RegisterRoutes(api, authMiddleware)
 
 	leaderboardUseCase := leaderboarduc.NewLeaderboardUseCase(leaderboardRepository)
@@ -243,6 +269,19 @@ func main() {
 	auditLogRepo := auditrepo.NewPostgresRepository(db)
 	auditLogger := audituc.NewLogger(auditLogRepo)
 	auditLogAdminUC := audituc.NewAdminUseCase(auditLogRepo)
+	paymentProofStore, err := paymentproof.NewLocal(cfg.PaymentProofDir)
+	if err != nil {
+		log.Fatalf("payment proof storage: %v", err)
+	}
+	paymentRepository := paymentrepo.NewPostgresRepository(db)
+	paymentProvider := paymentprovider.NewMock(cfg.PaymentQRImageURL, cfg.PaymentQRExpiresIn)
+	paymentUseCase := paymentuc.New(paymentRepository, paymentProvider, paymentProofStore, packages)
+	paymentUseCase.SetOnAccessChanged(func(ctx context.Context, userID uuid.UUID) {
+		cacheInvalidator.OnUserAccessChanged(ctx, userID.String())
+	})
+	paymentHandler := paymenthttp.NewHandler(paymentUseCase, auditLogger)
+	paymentHandler.RegisterPublicRoutes(api)
+	paymentHandler.RegisterUserRoutes(api, authMiddleware)
 	announcementHandler := announcementhttp.NewHandler(announcementUseCase, auditLogger, userRepository)
 	announcementHandler.RegisterPublicRoutes(api)
 
@@ -250,6 +289,7 @@ func main() {
 	userAdminUC := useradminuc.NewUseCase(userAdminRepo, entitlementRepository, accessLogRepo, auditLogRepo, auditLogger)
 
 	adminRoute := api.Group("/admin", authMiddleware, middleware.AdminOnly())
+	paymentHandler.RegisterAdminRoutes(adminRoute)
 	announcementHandler.RegisterAdminRoutes(adminRoute)
 	taghttp.NewHandler(tagAdminUC, auditLogger, userRepository).RegisterRoutes(adminRoute)
 	accesshttp.NewHandler(accessLogAdminUC).RegisterRoutes(adminRoute)

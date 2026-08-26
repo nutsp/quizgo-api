@@ -149,6 +149,9 @@ func (r *questionAdminRepository) createWithChoicesTx(tx *gorm.DB, question *dom
 	now := time.Now().UTC()
 	question.CreatedAt = now
 	question.UpdatedAt = now
+	if !domain.IsValidReviewStatus(question.ReviewStatus) {
+		question.ReviewStatus = domain.ReviewStatusUnreviewed
+	}
 	qModel := QuestionModel{
 		ID:                  question.ID,
 		SubjectID:           question.SubjectID,
@@ -159,6 +162,8 @@ func (r *questionAdminRepository) createWithChoicesTx(tx *gorm.DB, question *dom
 		ExplanationImageURL: question.ExplanationImageURL,
 		Difficulty:          question.Difficulty,
 		Status:              question.Status,
+		ReviewStatus:        question.ReviewStatus,
+		ReviewedAt:          question.ReviewedAt,
 		IsActive:            question.IsActive,
 		CreatedAt:           question.CreatedAt,
 		UpdatedAt:           question.UpdatedAt,
@@ -194,6 +199,9 @@ func (r *questionAdminRepository) createWithChoicesTx(tx *gorm.DB, question *dom
 func (r *questionAdminRepository) UpdateWithChoices(ctx context.Context, question *domain.Question) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		question.UpdatedAt = time.Now().UTC()
+		if !domain.IsValidReviewStatus(question.ReviewStatus) {
+			question.ReviewStatus = domain.ReviewStatusUnreviewed
+		}
 		if err := tx.Model(&QuestionModel{}).Where("id = ?", question.ID).Updates(map[string]any{
 			"subject_id":            question.SubjectID,
 			"question_text":         question.QuestionText,
@@ -203,6 +211,8 @@ func (r *questionAdminRepository) UpdateWithChoices(ctx context.Context, questio
 			"explanation_image_url": question.ExplanationImageURL,
 			"difficulty":            question.Difficulty,
 			"status":                question.Status,
+			"review_status":         question.ReviewStatus,
+			"reviewed_at":           question.ReviewedAt,
 			"is_active":             question.IsActive,
 			"updated_at":            question.UpdatedAt,
 		}).Error; err != nil {
@@ -476,6 +486,8 @@ func mapQuestion(m QuestionModel) domain.Question {
 		ExplanationImageURL: m.ExplanationImageURL,
 		Difficulty:          m.Difficulty,
 		Status:              m.Status,
+		ReviewStatus:        m.ReviewStatus,
+		ReviewedAt:          m.ReviewedAt,
 		IsActive:            m.IsActive,
 		CreatedAt:           m.CreatedAt,
 		UpdatedAt:           m.UpdatedAt,

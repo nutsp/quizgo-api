@@ -13,8 +13,8 @@ const (
 	AccessPremium = "premium"
 	AccessPrivate = "private"
 
-	ModePractice  = "practice"
-	ModeMockExam  = "mock_exam"
+	ModePractice = "practice"
+	ModeMockExam = "mock_exam"
 
 	DifficultyEasy   = "easy"
 	DifficultyMedium = "medium"
@@ -26,37 +26,38 @@ const (
 )
 
 type ExamSet struct {
-	ID              uuid.UUID
-	ExamTrackID     uuid.UUID
-	Code            string
-	Title           string
-	Description     string
-	CoverImageURL   *string
-	DurationMinutes int
-	TotalQuestions  int
-	PassingScore    int
-	Difficulty      string
-	AccessType           string
-	AllowSinglePurchase  bool
-	PriceAmount          float64
-	OriginalPriceAmount  *float64
-	Currency             string
-	SalePriceAmount      *float64
-	Mode            string
-	IsOfficial      bool
-	IsFeatured      bool
-	IsActive        bool
-	Status          string
-	AnswerSheetLayout AnswerSheetLayoutConfig
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	PublishedAt     *time.Time
-	ExamTrack       *ExamTrackRef
+	ID                  uuid.UUID
+	ExamTrackID         uuid.UUID
+	Code                string
+	Title               string
+	Description         string
+	CoverImageURL       *string
+	DurationMinutes     int
+	TotalQuestions      int
+	PassingScore        int
+	Difficulty          string
+	AccessType          string
+	AllowSinglePurchase bool
+	PriceAmount         float64
+	OriginalPriceAmount *float64
+	Currency            string
+	SalePriceAmount     *float64
+	Mode                string
+	IsOfficial          bool
+	IsFeatured          bool
+	IsActive            bool
+	Status              string
+	AnswerSheetLayout   AnswerSheetLayoutConfig
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	PublishedAt         *time.Time
+	ExamTrack           *ExamTrackRef
 }
 
 type ExamTrackRef struct {
-	Code string `json:"code"`
-	Name string `json:"name"`
+	Code             string `json:"code"`
+	Name             string `json:"name"`
+	BlueprintVersion int    `json:"blueprint_version"`
 }
 
 type AccessInfo struct {
@@ -74,30 +75,30 @@ type UserExamActivitySummary struct {
 }
 
 type ExamSetSummary struct {
-	ID              string        `json:"id,omitempty"`
-	Code            string        `json:"code"`
-	Title           string        `json:"title"`
-	Description     string        `json:"description,omitempty"`
-	CoverImageURL   *string       `json:"cover_image_url,omitempty"`
-	DurationMinutes int           `json:"duration_minutes"`
-	TotalQuestions  int           `json:"total_questions"`
-	PassingScore    int           `json:"passing_score"`
-	Difficulty      string        `json:"difficulty"`
-	AccessType           string        `json:"access_type"`
-	AllowSinglePurchase  bool          `json:"allow_single_purchase"`
-	PriceAmount          float64       `json:"price_amount"`
-	OriginalPriceAmount  *float64      `json:"original_price_amount,omitempty"`
-	Currency             string        `json:"currency"`
-	SalePriceAmount      *float64      `json:"sale_price_amount,omitempty"`
-	Mode            string        `json:"mode"`
-	IsOfficial      bool          `json:"is_official"`
-	IsFeatured      bool          `json:"is_featured,omitempty"`
-	IsActive        bool          `json:"is_active,omitempty"`
-	Status          string        `json:"status,omitempty"`
-	AnswerSheetLayout AnswerSheetLayoutConfig `json:"answer_sheet_layout,omitempty"`
-	ExamTrack       *ExamTrackRef             `json:"exam_track,omitempty"`
-	Access          *AccessInfo               `json:"access,omitempty"`
-	UserActivity    *UserExamActivitySummary  `json:"user_activity,omitempty"`
+	ID                  string                   `json:"id,omitempty"`
+	Code                string                   `json:"code"`
+	Title               string                   `json:"title"`
+	Description         string                   `json:"description,omitempty"`
+	CoverImageURL       *string                  `json:"cover_image_url,omitempty"`
+	DurationMinutes     int                      `json:"duration_minutes"`
+	TotalQuestions      int                      `json:"total_questions"`
+	PassingScore        int                      `json:"passing_score"`
+	Difficulty          string                   `json:"difficulty"`
+	AccessType          string                   `json:"access_type"`
+	AllowSinglePurchase bool                     `json:"allow_single_purchase"`
+	PriceAmount         float64                  `json:"price_amount"`
+	OriginalPriceAmount *float64                 `json:"original_price_amount,omitempty"`
+	Currency            string                   `json:"currency"`
+	SalePriceAmount     *float64                 `json:"sale_price_amount,omitempty"`
+	Mode                string                   `json:"mode"`
+	IsOfficial          bool                     `json:"is_official"`
+	IsFeatured          bool                     `json:"is_featured,omitempty"`
+	IsActive            bool                     `json:"is_active,omitempty"`
+	Status              string                   `json:"status,omitempty"`
+	AnswerSheetLayout   AnswerSheetLayoutConfig  `json:"answer_sheet_layout,omitempty"`
+	ExamTrack           *ExamTrackRef            `json:"exam_track,omitempty"`
+	Access              *AccessInfo              `json:"access,omitempty"`
+	UserActivity        *UserExamActivitySummary `json:"user_activity,omitempty"`
 }
 
 type ExamSetDetailResponse struct {
@@ -106,27 +107,27 @@ type ExamSetDetailResponse struct {
 
 func (s ExamSet) ToSummary() ExamSetSummary {
 	summary := ExamSetSummary{
-		ID:              s.ID.String(),
-		Code:            s.Code,
-		Title:           s.Title,
-		Description:     s.Description,
-		CoverImageURL:   s.CoverImageURL,
-		DurationMinutes: s.DurationMinutes,
-		TotalQuestions:  s.TotalQuestions,
-		PassingScore:    s.PassingScore,
-		Difficulty:      s.Difficulty,
+		ID:                  s.ID.String(),
+		Code:                s.Code,
+		Title:               s.Title,
+		Description:         s.Description,
+		CoverImageURL:       s.CoverImageURL,
+		DurationMinutes:     s.DurationMinutes,
+		TotalQuestions:      s.TotalQuestions,
+		PassingScore:        s.PassingScore,
+		Difficulty:          s.Difficulty,
 		AccessType:          s.AccessType,
 		AllowSinglePurchase: s.AllowSinglePurchase,
 		PriceAmount:         s.PriceAmount,
 		OriginalPriceAmount: s.OriginalPriceAmount,
 		Currency:            s.Currency,
 		SalePriceAmount:     s.SalePriceAmount,
-		Mode:            s.Mode,
-		IsOfficial:      s.IsOfficial,
-		IsFeatured:      s.IsFeatured,
-		IsActive:        s.IsActive,
-		Status:          s.Status,
-		AnswerSheetLayout: s.AnswerSheetLayout,
+		Mode:                s.Mode,
+		IsOfficial:          s.IsOfficial,
+		IsFeatured:          s.IsFeatured,
+		IsActive:            s.IsActive,
+		Status:              s.Status,
+		AnswerSheetLayout:   s.AnswerSheetLayout,
 	}
 	if s.ExamTrack != nil {
 		summary.ExamTrack = s.ExamTrack
@@ -135,25 +136,25 @@ func (s ExamSet) ToSummary() ExamSetSummary {
 }
 
 type ListFilter struct {
-	Query          string
-	TrackCode      string
-	TrackCodes     []string
-	TrackID        uuid.UUID
-	SubjectCodes   []string
-	QuestionTypes  []string
-	AccessType     string
-	AccessTypes    []string
-	Difficulty     string
-	Difficulties   []string
-	Mode           string
-	Modes          []string
-	Statuses       []string
-	Sort           string
-	Page           int
-	Limit          int
-	OnlyActive     bool
-	OnlyPublished  bool
-	Visibility     VisibilityScope
+	Query         string
+	TrackCode     string
+	TrackCodes    []string
+	TrackID       uuid.UUID
+	SubjectCodes  []string
+	QuestionTypes []string
+	AccessType    string
+	AccessTypes   []string
+	Difficulty    string
+	Difficulties  []string
+	Mode          string
+	Modes         []string
+	Statuses      []string
+	Sort          string
+	Page          int
+	Limit         int
+	OnlyActive    bool
+	OnlyPublished bool
+	Visibility    VisibilityScope
 }
 
 type PaginatedResult struct {

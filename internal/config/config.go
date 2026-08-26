@@ -39,6 +39,9 @@ type Config struct {
 	OAuthStateSecret   string
 	UploadDir          string
 	UploadURLPath      string
+	PaymentProofDir    string
+	PaymentQRImageURL  string
+	PaymentQRExpiresIn time.Duration
 }
 
 func Load() (*Config, error) {
@@ -68,6 +71,10 @@ func Load() (*Config, error) {
 	redisRuntimeDB, err := strconv.Atoi(getEnv("REDIS_RUNTIME_DB", "3"))
 	if err != nil {
 		return nil, fmt.Errorf("parse REDIS_RUNTIME_DB: %w", err)
+	}
+	paymentQRExpiresIn, err := time.ParseDuration(getEnv("PAYMENT_QR_EXPIRES_IN", "30m"))
+	if err != nil {
+		return nil, fmt.Errorf("parse PAYMENT_QR_EXPIRES_IN: %w", err)
 	}
 
 	cfg := &Config{
@@ -99,6 +106,9 @@ func Load() (*Config, error) {
 		OAuthStateSecret:   getEnv("OAUTH_STATE_SECRET", "change-me"),
 		UploadDir:          getEnv("UPLOAD_DIR", "uploads"),
 		UploadURLPath:      getEnv("UPLOAD_URL_PATH", "/uploads"),
+		PaymentProofDir:    getEnv("PAYMENT_PROOF_DIR", "private/payment-proofs"),
+		PaymentQRImageURL:  getEnv("PAYMENT_QR_IMAGE_URL", ""),
+		PaymentQRExpiresIn: paymentQRExpiresIn,
 	}
 
 	return cfg, nil

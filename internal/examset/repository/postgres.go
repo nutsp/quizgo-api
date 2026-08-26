@@ -12,44 +12,45 @@ import (
 )
 
 type ExamSetModel struct {
-	ID              uuid.UUID `gorm:"type:uuid;primaryKey"`
-	ExamTrackID     uuid.UUID `gorm:"type:uuid;not null;index"`
-	Code            string    `gorm:"uniqueIndex:uq_exam_sets_code;not null"`
-	Title           string    `gorm:"not null"`
-	Description     string
-	CoverImageURL   *string   `gorm:"type:text"`
-	DurationMinutes int       `gorm:"not null"`
-	TotalQuestions  int       `gorm:"not null"`
-	PassingScore    int       `gorm:"not null"`
-	Difficulty      string    `gorm:"not null"`
-	AccessType               string    `gorm:"not null"`
-	AllowSinglePurchase      bool      `gorm:"not null;default:false"`
-	PriceAmount              float64   `gorm:"type:numeric;not null;default:0"`
-	OriginalPriceAmount      *float64  `gorm:"type:numeric"`
-	Currency                 string    `gorm:"type:varchar(10);not null;default:THB"`
-	SalePriceAmount          *float64  `gorm:"type:numeric"`
-	Mode            string    `gorm:"not null"`
-	IsOfficial      bool      `gorm:"default:false"`
-	IsFeatured      bool      `gorm:"not null;default:false"`
-	IsActive        bool      `gorm:"default:true"`
-	Status          string    `gorm:"type:varchar(50);not null;default:draft"`
-	AnswerSheetBlockColumns          int    `gorm:"not null;default:2"`
-	AnswerSheetQuestionsPerBlock     int    `gorm:"not null;default:10"`
-	AnswerSheetChoiceLabelStyle      string `gorm:"type:varchar(20);not null;default:thai"`
-	AnswerSheetShowHeader            bool   `gorm:"not null;default:true"`
-	AnswerSheetShowInstructions      bool   `gorm:"not null;default:true"`
-	AnswerSheetShowCandidateInfo     bool   `gorm:"not null;default:true"`
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	PublishedAt     *time.Time
+	ID                           uuid.UUID `gorm:"type:uuid;primaryKey"`
+	ExamTrackID                  uuid.UUID `gorm:"type:uuid;not null;index"`
+	Code                         string    `gorm:"uniqueIndex:uq_exam_sets_code;not null"`
+	Title                        string    `gorm:"not null"`
+	Description                  string
+	CoverImageURL                *string  `gorm:"type:text"`
+	DurationMinutes              int      `gorm:"not null"`
+	TotalQuestions               int      `gorm:"not null"`
+	PassingScore                 int      `gorm:"not null"`
+	Difficulty                   string   `gorm:"not null"`
+	AccessType                   string   `gorm:"not null"`
+	AllowSinglePurchase          bool     `gorm:"not null;default:false"`
+	PriceAmount                  float64  `gorm:"type:numeric;not null;default:0"`
+	OriginalPriceAmount          *float64 `gorm:"type:numeric"`
+	Currency                     string   `gorm:"type:varchar(10);not null;default:THB"`
+	SalePriceAmount              *float64 `gorm:"type:numeric"`
+	Mode                         string   `gorm:"not null"`
+	IsOfficial                   bool     `gorm:"default:false"`
+	IsFeatured                   bool     `gorm:"not null;default:false"`
+	IsActive                     bool     `gorm:"default:true"`
+	Status                       string   `gorm:"type:varchar(50);not null;default:draft"`
+	AnswerSheetBlockColumns      int      `gorm:"not null;default:2"`
+	AnswerSheetQuestionsPerBlock int      `gorm:"not null;default:10"`
+	AnswerSheetChoiceLabelStyle  string   `gorm:"type:varchar(20);not null;default:thai"`
+	AnswerSheetShowHeader        bool     `gorm:"not null;default:true"`
+	AnswerSheetShowInstructions  bool     `gorm:"not null;default:true"`
+	AnswerSheetShowCandidateInfo bool     `gorm:"not null;default:true"`
+	CreatedAt                    time.Time
+	UpdatedAt                    time.Time
+	PublishedAt                  *time.Time
 
 	ExamTrack ExamTrackJoin `gorm:"foreignKey:ExamTrackID;references:ID"`
 }
 
 type ExamTrackJoin struct {
-	ID   uuid.UUID `gorm:"type:uuid;primaryKey"`
-	Code string
-	Name string
+	ID               uuid.UUID `gorm:"type:uuid;primaryKey"`
+	Code             string
+	Name             string
+	BlueprintVersion int
 }
 
 func (ExamTrackJoin) TableName() string { return "exam_tracks" }
@@ -182,27 +183,27 @@ func (r *postgresRepository) ListPopular(ctx context.Context, limit int) ([]doma
 
 func toDomain(m *ExamSetModel) domain.ExamSet {
 	set := domain.ExamSet{
-		ID:              m.ID,
-		ExamTrackID:     m.ExamTrackID,
-		Code:            m.Code,
-		Title:           m.Title,
-		Description:     m.Description,
-		CoverImageURL:   m.CoverImageURL,
-		DurationMinutes: m.DurationMinutes,
-		TotalQuestions:  m.TotalQuestions,
-		PassingScore:    m.PassingScore,
-		Difficulty:      m.Difficulty,
+		ID:                  m.ID,
+		ExamTrackID:         m.ExamTrackID,
+		Code:                m.Code,
+		Title:               m.Title,
+		Description:         m.Description,
+		CoverImageURL:       m.CoverImageURL,
+		DurationMinutes:     m.DurationMinutes,
+		TotalQuestions:      m.TotalQuestions,
+		PassingScore:        m.PassingScore,
+		Difficulty:          m.Difficulty,
 		AccessType:          m.AccessType,
 		AllowSinglePurchase: m.AllowSinglePurchase,
 		PriceAmount:         m.PriceAmount,
 		OriginalPriceAmount: m.OriginalPriceAmount,
 		Currency:            m.Currency,
 		SalePriceAmount:     m.SalePriceAmount,
-		Mode:            m.Mode,
-		IsOfficial:      m.IsOfficial,
-		IsFeatured:      m.IsFeatured,
-		IsActive:        m.IsActive,
-		Status:          m.Status,
+		Mode:                m.Mode,
+		IsOfficial:          m.IsOfficial,
+		IsFeatured:          m.IsFeatured,
+		IsActive:            m.IsActive,
+		Status:              m.Status,
 		AnswerSheetLayout: domain.LayoutFromModel(
 			m.AnswerSheetBlockColumns,
 			m.AnswerSheetQuestionsPerBlock,
@@ -211,12 +212,12 @@ func toDomain(m *ExamSetModel) domain.ExamSet {
 			m.AnswerSheetShowInstructions,
 			m.AnswerSheetShowCandidateInfo,
 		),
-		CreatedAt:       m.CreatedAt,
-		UpdatedAt:       m.UpdatedAt,
-		PublishedAt:     m.PublishedAt,
+		CreatedAt:   m.CreatedAt,
+		UpdatedAt:   m.UpdatedAt,
+		PublishedAt: m.PublishedAt,
 	}
 	if m.ExamTrack.Code != "" {
-		set.ExamTrack = &domain.ExamTrackRef{Code: m.ExamTrack.Code, Name: m.ExamTrack.Name}
+		set.ExamTrack = &domain.ExamTrackRef{Code: m.ExamTrack.Code, Name: m.ExamTrack.Name, BlueprintVersion: m.ExamTrack.BlueprintVersion}
 	}
 	return set
 }

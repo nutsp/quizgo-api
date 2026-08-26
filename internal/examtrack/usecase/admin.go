@@ -2,11 +2,13 @@ package usecase
 
 import (
 	"context"
+	"reflect"
+	"time"
 
 	"github.com/google/uuid"
+	admindomain "virtual-exam-api/internal/admin/domain"
 	"virtual-exam-api/internal/apperrors"
 	"virtual-exam-api/internal/cache"
-	admindomain "virtual-exam-api/internal/admin/domain"
 	"virtual-exam-api/internal/common/pagination"
 	"virtual-exam-api/internal/examtrack/domain"
 	trackrepo "virtual-exam-api/internal/examtrack/repository"
@@ -23,27 +25,29 @@ func NewAdminUseCase(tracks trackrepo.AdminRepository, reads trackrepo.Repositor
 }
 
 type CreateTrackInput struct {
-	Name          string  `json:"name"`
-	Code          string  `json:"code"`
-	Description   string  `json:"description"`
-	CoverImageURL *string `json:"cover_image_url"`
-	IsActive      bool    `json:"is_active"`
+	Name          string           `json:"name"`
+	Code          string           `json:"code"`
+	Description   string           `json:"description"`
+	CoverImageURL *string          `json:"cover_image_url"`
+	IsActive      bool             `json:"is_active"`
+	Blueprint     domain.Blueprint `json:"blueprint"`
 }
 
 type UpdateTrackInput = CreateTrackInput
 
 type TrackAdminResponse struct {
-	ID             string  `json:"id"`
-	Code           string  `json:"code"`
-	Name           string  `json:"name"`
-	Description    string  `json:"description,omitempty"`
-	CoverImageURL  *string `json:"cover_image_url,omitempty"`
-	TotalExamSets  int     `json:"total_exam_sets"`
-	TotalQuestions int     `json:"total_questions"`
-	TotalAttempts  int     `json:"total_attempts"`
-	IsActive       bool    `json:"is_active"`
-	CreatedAt      string  `json:"created_at"`
-	UpdatedAt      string  `json:"updated_at"`
+	ID             string           `json:"id"`
+	Code           string           `json:"code"`
+	Name           string           `json:"name"`
+	Description    string           `json:"description,omitempty"`
+	CoverImageURL  *string          `json:"cover_image_url,omitempty"`
+	TotalExamSets  int              `json:"total_exam_sets"`
+	TotalQuestions int              `json:"total_questions"`
+	TotalAttempts  int              `json:"total_attempts"`
+	IsActive       bool             `json:"is_active"`
+	CreatedAt      string           `json:"created_at"`
+	UpdatedAt      string           `json:"updated_at"`
+	Blueprint      domain.Blueprint `json:"blueprint"`
 }
 
 type TrackListResponse = pagination.PaginatedList[TrackAdminResponse]
@@ -88,12 +92,22 @@ func (uc *AdminUseCase) Create(ctx context.Context, input CreateTrackInput) (*Tr
 	if existing != nil {
 		return nil, apperrors.ErrCodeTaken
 	}
+	blueprint := input.Blueprint
+	blueprint.Normalize()
+	if blueprint.Status == domain.BlueprintStatusReviewed {
+		if err := blueprint.ValidateForReview(); err != nil {
+			return nil, apperrors.ErrInvalidInput
+		}
+		now := time.Now().UTC()
+		blueprint.ReviewedAt = &now
+	}
 	track := domain.ExamTrack{
 		Code:          input.Code,
 		Name:          input.Name,
 		Description:   input.Description,
 		CoverImageURL: input.CoverImageURL,
 		IsActive:      input.IsActive,
+		Blueprint:     blueprint,
 	}
 	if err := uc.tracks.Create(ctx, &track); err != nil {
 		return nil, err
@@ -133,6 +147,31 @@ func (uc *AdminUseCase) Update(ctx context.Context, id uuid.UUID, input UpdateTr
 	track.Description = input.Description
 	track.CoverImageURL = input.CoverImageURL
 	track.IsActive = input.IsActive
+	if !input.Blueprint.IsEmpty() {
+		blueprint := input.Blueprint
+		blueprint.Normalize()
+		if blueprint.Status == domain.BlueprintStatusReviewed {
+			if err := blueprint.ValidateForReview(); err != nil {
+				return nil, apperrors.ErrInvalidInput
+			}
+		}
+		if !sameBlueprintContent(track.Blueprint, blueprint) {
+			blueprint.Version = track.Blueprint.Version + 1
+			if blueprint.Version < 1 {
+				blueprint.Version = 1
+			}
+			if blueprint.Status == domain.BlueprintStatusReviewed {
+				now := time.Now().UTC()
+				blueprint.ReviewedAt = &now
+			} else {
+				blueprint.ReviewedAt = nil
+			}
+		} else {
+			blueprint.Version = track.Blueprint.Version
+			blueprint.ReviewedAt = track.Blueprint.ReviewedAt
+		}
+		track.Blueprint = blueprint
+	}
 	if err := uc.tracks.Update(ctx, track); err != nil {
 		return nil, err
 	}
@@ -199,5 +238,12 @@ func toTrackAdminResponse(t domain.ExamTrack) TrackAdminResponse {
 		IsActive:       t.IsActive,
 		CreatedAt:      t.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
 		UpdatedAt:      t.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		Blueprint:      t.Blueprint,
 	}
+}
+
+func sameBlueprintContent(a, b domain.Blueprint) bool {
+	a.Version, b.Version = 0, 0
+	a.ReviewedAt, b.ReviewedAt = nil, nil
+	return reflect.DeepEqual(a, b)
 }

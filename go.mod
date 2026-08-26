@@ -3,12 +3,14 @@ module virtual-exam-api
 go 1.24.0
 
 require (
+	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/go-playground/validator/v10 v10.25.0
 	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
 	github.com/labstack/echo/v4 v4.13.3
 	github.com/redis/go-redis/v9 v9.7.0
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/xuri/excelize/v2 v2.10.1
 	golang.org/x/crypto v0.48.0
 	gorm.io/driver/postgres v1.5.11
@@ -38,6 +40,7 @@ require (
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	github.com/xuri/efp v0.0.1 // indirect
 	github.com/xuri/nfp v0.0.2-0.20250530014748-2ddeb826f9a9 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	golang.org/x/net v0.50.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect

@@ -25,6 +25,8 @@ type Question struct {
 	ExplanationImageURL *string
 	Difficulty          string
 	Status              string
+	ReviewStatus        string
+	ReviewedAt          *time.Time
 	IsActive            bool
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
@@ -104,6 +106,10 @@ const (
 	StatusPublished = "published"
 	StatusArchived  = "archived"
 
+	ReviewStatusUnreviewed  = "unreviewed"
+	ReviewStatusReviewed    = "reviewed"
+	ReviewStatusNeedsReview = "needs_review"
+
 	DifficultyEasy   = "easy"
 	DifficultyMedium = "medium"
 	DifficultyHard   = "hard"
@@ -119,4 +125,8 @@ var ValidChoiceKeys = map[string]string{
 func IsValidChoiceKey(key string) bool {
 	_, ok := ValidChoiceKeys[key]
 	return ok
+}
+
+func IsValidReviewStatus(status string) bool {
+	return status == ReviewStatusUnreviewed || status == ReviewStatusReviewed || status == ReviewStatusNeedsReview
 }

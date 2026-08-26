@@ -39,6 +39,7 @@ type ExamAttempt struct {
 	UserID              uuid.UUID
 	ExamTrackID         uuid.UUID
 	ExamSetID           uuid.UUID
+	BlueprintVersion    int
 	Status              string
 	TimingMode          string
 	StartedAt           time.Time
@@ -68,6 +69,7 @@ type ExamSetRef struct {
 	TotalQuestions    int                                   `json:"total_questions"`
 	PassingScore      int                                   `json:"passing_score,omitempty"`
 	AccessType        string                                `json:"access_type,omitempty"`
+	BlueprintVersion  int                                   `json:"blueprint_version"`
 	Access            *ResultAccessInfo                     `json:"access,omitempty"`
 	AnswerSheetLayout examsetdomain.AnswerSheetLayoutConfig `json:"answer_sheet_layout"`
 }

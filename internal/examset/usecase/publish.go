@@ -292,6 +292,7 @@ func buildReadiness(set *domain.ExamSet, assigned []qdomain.ExamSetQuestion) *Re
 	allActive := assignedCount > 0
 	allHave4Choices := assignedCount > 0
 	allHaveCorrect := assignedCount > 0
+	allReviewed := assignedCount > 0
 	missingExplanation := false
 
 	for _, sq := range assigned {
@@ -320,6 +321,9 @@ func buildReadiness(set *domain.ExamSet, assigned []qdomain.ExamSetQuestion) *Re
 		if !q.IsActive {
 			allActive = false
 		}
+		if q.ReviewStatus != "" && q.ReviewStatus != qdomain.ReviewStatusReviewed {
+			allReviewed = false
+		}
 		if len(q.Choices) != 4 {
 			allHave4Choices = false
 			invalidCount++
@@ -345,6 +349,11 @@ func buildReadiness(set *domain.ExamSet, assigned []qdomain.ExamSetQuestion) *Re
 		"คำถามทั้งหมดเผยแพร่และเปิดใช้งานแล้ว",
 		"มีคำถาม draft หรือ archived อยู่ในชุดข้อสอบ",
 		questionsReady)
+
+	addBlocking("questions_are_reviewed", "คำถามทั้งหมดผ่านการตรวจทาน",
+		"คำถามทุกข้อผ่านการตรวจทานแล้ว",
+		"มีคำถามที่ยังไม่ผ่านการตรวจทานหรือจำเป็นต้องตรวจทานใหม่",
+		allReviewed)
 
 	choicesMsg := "ทุกคำถามมีตัวเลือกครบ 4 ตัวเลือก"
 	if !allHave4Choices {

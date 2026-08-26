@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/go-playground/validator/v10"
@@ -13,6 +14,7 @@ import (
 	entdomain "virtual-exam-api/internal/entitlement/domain"
 	entitlementuc "virtual-exam-api/internal/entitlement/usecase"
 	"virtual-exam-api/internal/examattempt/domain"
+	attemptquota "virtual-exam-api/internal/examattempt/quota"
 	attemptrepo "virtual-exam-api/internal/examattempt/repository"
 	examsetdomain "virtual-exam-api/internal/examset/domain"
 	examsetrepo "virtual-exam-api/internal/examset/repository"
@@ -33,6 +35,11 @@ type LeaderboardProjector interface {
 	RecordProjectionFailure(context.Context, uuid.UUID, error) error
 }
 
+type DailyQuota interface {
+	Status(context.Context, uuid.UUID, time.Time) (attemptquota.Status, error)
+	WithSubmission(context.Context, uuid.UUID, time.Time, func() error) error
+}
+
 const leaderboardProjectionDeliveryTimeout = 5 * time.Second
 
 type ExamAttemptUseCase struct {
@@ -44,6 +51,7 @@ type ExamAttemptUseCase struct {
 	entitlements *entitlementuc.UseCase
 	resultCache  appcache.CacheService
 	runtimeLocks *appcache.RuntimeLocks
+	dailyQuota   DailyQuota
 	invalidator  *appcache.Invalidator
 	omrSettings  OMRSettingsProvider
 	leaderboard  LeaderboardProjector
@@ -68,6 +76,7 @@ func NewExamAttemptUseCase(
 	entitlements *entitlementuc.UseCase,
 	resultCache appcache.CacheService,
 	runtimeLocks *appcache.RuntimeLocks,
+	dailyQuota DailyQuota,
 	invalidator *appcache.Invalidator,
 	omrSettings OMRSettingsProvider,
 	leaderboard LeaderboardProjector,
@@ -84,6 +93,7 @@ func NewExamAttemptUseCase(
 		entitlements: entitlements,
 		resultCache:  resultCache,
 		runtimeLocks: runtimeLocks,
+		dailyQuota:   dailyQuota,
 		invalidator:  invalidator,
 		omrSettings:  omrSettings,
 		leaderboard:  leaderboard,
@@ -133,6 +143,15 @@ func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examS
 			return nil, uc.entitlements.AccessDeniedError(set, check)
 		}
 	}
+	if uc.dailyQuota != nil && usesFreeDailyQuotaAccess(check) {
+		status, err := uc.dailyQuota.Status(ctx, userID, now)
+		if err != nil {
+			return nil, uc.dailyQuotaError(ctx, userID, err)
+		}
+		if status.Remaining == 0 {
+			return nil, uc.dailyQuotaError(ctx, userID, attemptquota.ErrLimitReached)
+		}
+	}
 
 	if !uc.runtimeLocks.TryDuplicateCreateLock(ctx, userID.String(), set.ID.String()) {
 		return nil, apperrors.ErrDuplicateRequest
@@ -144,14 +163,15 @@ func (uc *ExamAttemptUseCase) Start(ctx context.Context, userID uuid.UUID, examS
 	attemptID := uuid.New()
 
 	attempt := &domain.ExamAttempt{
-		ID:          attemptID,
-		UserID:      userID,
-		ExamTrackID: set.ExamTrackID,
-		ExamSetID:   set.ID,
-		Status:      domain.StatusInProgress,
-		TimingMode:  timingMode,
-		StartedAt:   now,
-		ExpiresAt:   expiresAt,
+		ID:               attemptID,
+		UserID:           userID,
+		ExamTrackID:      set.ExamTrackID,
+		ExamSetID:        set.ID,
+		Status:           domain.StatusInProgress,
+		TimingMode:       timingMode,
+		StartedAt:        now,
+		ExpiresAt:        expiresAt,
+		BlueprintVersion: blueprintVersion(set),
 	}
 	uc.applyAccessSnapshot(attempt, check, now)
 
@@ -447,7 +467,47 @@ func (uc *ExamAttemptUseCase) Submit(ctx context.Context, userID, attemptID uuid
 	if attempt.Status != domain.StatusInProgress {
 		return nil, apperrors.ErrAttemptNotEditable
 	}
+	if uc.dailyQuota != nil {
+		hasPremium, err := uc.hasActivePremium(ctx, userID)
+		if err != nil {
+			return nil, err
+		}
+		if !hasPremium && usesFreeDailyQuotaAttempt(attempt) {
+			var response *domain.SubmitResponse
+			err = uc.dailyQuota.WithSubmission(ctx, userID, uc.now(), func() error {
+				var submitErr error
+				response, submitErr = uc.submitInProgressAttempt(ctx, userID, attempt)
+				return submitErr
+			})
+			if err != nil {
+				return nil, uc.dailyQuotaError(ctx, userID, err)
+			}
+			return response, nil
+		}
+	}
 
+	return uc.submitInProgressAttempt(ctx, userID, attempt)
+}
+
+func usesFreeDailyQuotaAccess(check entdomain.ExamSetAccessResult) bool {
+	if check.HasPremium {
+		return false
+	}
+	return check.AccessSource == "" || check.AccessSource == entdomain.AccessSourceFree || check.AccessSource == entdomain.AccessSourceTrial
+}
+
+func usesFreeDailyQuotaAttempt(attempt *domain.ExamAttempt) bool {
+	if attempt == nil {
+		return false
+	}
+	if attempt.AccessSource != nil {
+		return *attempt.AccessSource == entdomain.AccessSourceFree || *attempt.AccessSource == entdomain.AccessSourceTrial
+	}
+	return attempt.ExamSet == nil || attempt.ExamSet.AccessType == examsetdomain.AccessFree || attempt.ExamSet.AccessType == examsetdomain.AccessTrial
+}
+
+func (uc *ExamAttemptUseCase) submitInProgressAttempt(ctx context.Context, userID uuid.UUID, attempt *domain.ExamAttempt) (*domain.SubmitResponse, error) {
+	attemptID := attempt.ID
 	set, err := uc.examSets.FindByID(ctx, attempt.ExamSetID)
 	if err != nil {
 		return nil, err
@@ -545,6 +605,41 @@ func (uc *ExamAttemptUseCase) Submit(ctx context.Context, userID, attemptID uuid
 	return response, nil
 }
 
+func (uc *ExamAttemptUseCase) dailyQuotaError(ctx context.Context, userID uuid.UUID, err error) error {
+	if errors.Is(err, attemptquota.ErrBusy) {
+		return apperrors.ErrDuplicateRequest
+	}
+	if errors.Is(err, attemptquota.ErrLimitReached) {
+		status, statusErr := uc.dailyQuota.Status(ctx, userID, uc.now())
+		if statusErr != nil {
+			return statusErr
+		}
+		return apperrors.NewWithDetails(
+			"FREE_DAILY_LIMIT_REACHED",
+			"วันนี้ใช้สิทธิ์ทำข้อสอบฟรีครบแล้ว",
+			http.StatusTooManyRequests,
+			map[string]any{"resetAt": status.ResetAt.Format(time.RFC3339)},
+		)
+	}
+	return apperrors.New("DAILY_QUOTA_UNAVAILABLE", "ไม่สามารถตรวจสอบสิทธิ์รายวันได้ กรุณาลองใหม่อีกครั้ง", http.StatusServiceUnavailable)
+}
+
+func (uc *ExamAttemptUseCase) GetDailyQuotaStatus(ctx context.Context, userID uuid.UUID) (attemptquota.Status, error) {
+	if uc.entitlements != nil {
+		hasPremium, expiresAt, err := uc.entitlements.HasActivePremiumEntitlement(ctx, userID)
+		if err != nil {
+			return attemptquota.Status{}, err
+		}
+		if hasPremium {
+			return attemptquota.Status{Unlimited: true, PremiumExpiresAt: expiresAt}, nil
+		}
+	}
+	if uc.dailyQuota == nil {
+		return attemptquota.Status{}, apperrors.New("DAILY_QUOTA_UNAVAILABLE", "ไม่สามารถตรวจสอบสิทธิ์รายวันได้ กรุณาลองใหม่อีกครั้ง", http.StatusServiceUnavailable)
+	}
+	return uc.dailyQuota.Status(ctx, userID, uc.now())
+}
+
 func (uc *ExamAttemptUseCase) projectAttemptNonBlocking(ctx context.Context, attempt *domain.ExamAttempt) *leaderboarddomain.ProjectionUpdate {
 	if uc.leaderboard == nil || attempt == nil {
 		return nil
@@ -617,7 +712,7 @@ func (uc *ExamAttemptUseCase) GetResult(ctx context.Context, userID, attemptID u
 	key := appcache.ResultSummary(attemptID.String())
 	var cached domain.ResultResponse
 	if ok, _ := uc.resultCache.GetJSON(ctx, key, &cached); ok {
-		if err := uc.attachResultAccess(ctx, userID, &cached); err != nil {
+		if err := uc.attachResultAccess(ctx, userID, attempt, &cached); err != nil {
 			return nil, err
 		}
 		return &cached, nil
@@ -631,18 +726,22 @@ func (uc *ExamAttemptUseCase) GetResult(ctx context.Context, userID, attemptID u
 	_ = uc.resultCache.SetJSON(ctx, key, result, appcache.TTLResult)
 	_ = uc.resultCache.AddIndex(ctx, appcache.IndexAttemptResult(attemptID.String()), key, appcache.TTLResult+appcache.TTLIndexBuffer)
 
-	if err := uc.attachResultAccess(ctx, userID, result); err != nil {
+	if err := uc.attachResultAccess(ctx, userID, attempt, result); err != nil {
 		return nil, err
 	}
 	return result, nil
 }
 
-func (uc *ExamAttemptUseCase) attachResultAccess(ctx context.Context, userID uuid.UUID, result *domain.ResultResponse) error {
+func (uc *ExamAttemptUseCase) attachResultAccess(ctx context.Context, userID uuid.UUID, attempt *domain.ExamAttempt, result *domain.ResultResponse) error {
 	hasPremium, err := uc.hasActivePremium(ctx, userID)
 	if err != nil {
 		return err
 	}
 	result.ExamSet.Access = &domain.ResultAccessInfo{HasPremium: hasPremium}
+	if !hasPremium && summaryOnlyWithoutPremium(attempt) {
+		result.SubjectBreakdown = []domain.SubjectBreakdown{}
+		result.WeaknessAnalysis = []domain.WeaknessAnalysisItem{}
+	}
 	return nil
 }
 
@@ -757,15 +856,22 @@ func (uc *ExamAttemptUseCase) isSummaryOnlyAttempt(ctx context.Context, userID u
 	if hasPremium {
 		return false, nil
 	}
+	return summaryOnlyWithoutPremium(attempt), nil
+}
+
+func summaryOnlyWithoutPremium(attempt *domain.ExamAttempt) bool {
+	if attempt == nil {
+		return false
+	}
 	if attempt.AccessSource != nil {
 		return *attempt.AccessSource == entdomain.AccessSourceFree ||
-			*attempt.AccessSource == entdomain.AccessSourceTrial, nil
+			*attempt.AccessSource == entdomain.AccessSourceTrial
 	}
 	if attempt.ExamSet == nil {
-		return false, nil
+		return false
 	}
 	return attempt.ExamSet.AccessType == examsetdomain.AccessFree ||
-		attempt.ExamSet.AccessType == examsetdomain.AccessTrial, nil
+		attempt.ExamSet.AccessType == examsetdomain.AccessTrial
 }
 
 func (uc *ExamAttemptUseCase) hasActivePremium(ctx context.Context, userID uuid.UUID) (bool, error) {
@@ -1048,8 +1154,16 @@ func (uc *ExamAttemptUseCase) examSetRefWithOMRSettings(set *examsetdomain.ExamS
 		TotalQuestions:    set.TotalQuestions,
 		PassingScore:      set.PassingScore,
 		AccessType:        set.AccessType,
+		BlueprintVersion:  blueprintVersion(set),
 		AnswerSheetLayout: layout,
 	}
+}
+
+func blueprintVersion(set *examsetdomain.ExamSet) int {
+	if set != nil && set.ExamTrack != nil && set.ExamTrack.BlueprintVersion > 0 {
+		return set.ExamTrack.BlueprintVersion
+	}
+	return 1
 }
 
 func (uc *ExamAttemptUseCase) currentOMRSettings(ctx context.Context) settingsdomain.OMRAnswerSheetSettings {

@@ -1,0 +1,109 @@
+[
+  {
+    "id": "free",
+    "group": "free",
+    "name": "ฟรี",
+    "description": "เหมาะสำหรับเริ่มลองซ้อมสอบทีละชุด",
+    "currency": "THB",
+    "features": [
+      "ทำข้อสอบฟรีที่เปิดให้ใช้งาน",
+      "จับเวลาและใช้หน้ากระดาษคำตอบเหมือนสอบจริง",
+      "ดูคะแนนและสรุปผลเฉพาะชุดที่ทำ"
+    ],
+    "accessPolicy": {
+      "dailyCompletedAttempts": 1,
+      "resultAccess": "summary",
+      "examCatalog": "free_only",
+      "explanations": false,
+      "weaknessAnalysis": false,
+      "history": false
+    },
+    "purchasable": false
+  },
+  {
+    "id": "premium-1m",
+    "group": "premium",
+    "name": "Premium 1 เดือน",
+    "description": "เริ่มต้นฝึกแบบจริงจัง",
+    "durationMonths": 1,
+    "originalPrice": 199,
+    "salePrice": 149,
+    "currency": "THB",
+    "features": [
+      "ทำชุดข้อสอบสำหรับสมาชิกได้ทั้งหมด",
+      "ดูคำอธิบายคำตอบและเฉลยรายข้อ",
+      "วิเคราะห์จุดอ่อนและดูพัฒนาการย้อนหลัง"
+    ],
+    "accessPolicy": {
+      "resultAccess": "full",
+      "examCatalog": "all_member",
+      "explanations": true,
+      "weaknessAnalysis": true,
+      "history": true
+    },
+    "purchasable": true
+  },
+  {
+    "id": "premium-3m",
+    "group": "premium",
+    "name": "Premium 3 เดือน",
+    "description": "เหมาะกับช่วงเตรียมสอบ",
+    "durationMonths": 3,
+    "originalPrice": 499,
+    "salePrice": 399,
+    "currency": "THB",
+    "badge": "แนะนำ",
+    "features": [
+      "ทำชุดข้อสอบสำหรับสมาชิกได้ทั้งหมด",
+      "ดูคำอธิบายคำตอบและเฉลยรายข้อ",
+      "วิเคราะห์จุดอ่อนและดูพัฒนาการย้อนหลัง"
+    ],
+    "accessPolicy": {
+      "resultAccess": "full",
+      "examCatalog": "all_member",
+      "explanations": true,
+      "weaknessAnalysis": true,
+      "history": true
+    },
+    "purchasable": true
+  },
+  {
+    "id": "premium-12m",
+    "group": "premium",
+    "name": "Premium 12 เดือน",
+    "description": "คุ้มสำหรับแผนเตรียมสอบระยะยาว",
+    "durationMonths": 12,
+    "originalPrice": 1990,
+    "salePrice": 1490,
+    "currency": "THB",
+    "badge": "คุ้มที่สุด",
+    "features": [
+      "ทำชุดข้อสอบสำหรับสมาชิกได้ทั้งหมด",
+      "ดูคำอธิบายคำตอบและเฉลยรายข้อ",
+      "วิเคราะห์จุดอ่อนและดูพัฒนาการย้อนหลัง"
+    ],
+    "accessPolicy": {
+      "resultAccess": "full",
+      "examCatalog": "all_member",
+      "explanations": true,
+      "weaknessAnalysis": true,
+      "history": true
+    },
+    "purchasable": true
+  },
+  {
+    "id": "business",
+    "group": "business",
+    "name": "Business",
+    "description": "สำหรับสถาบัน ทีม และองค์กรที่ดูแลผู้เรียนหลายคน",
+    "currency": "THB",
+    "features": [
+      "จัดการผู้เรียนหลายบัญชี",
+      "ดูรายงานภาพรวมของทีม",
+      "กำหนดสิทธิ์และชุดข้อสอบให้ผู้เรียน"
+    ],
+    "accessPolicy": {},
+    "purchasable": false,
+    "comingSoon": true
+  }
+]

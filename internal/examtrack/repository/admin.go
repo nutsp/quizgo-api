@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"regexp"
 	"strings"
@@ -85,27 +86,49 @@ func (r *adminRepository) Create(ctx context.Context, track *domain.ExamTrack) e
 	track.CreatedAt = now
 	track.UpdatedAt = now
 	model := ExamTrackModel{
-		ID:            track.ID,
-		Code:          strings.ToLower(track.Code),
-		Name:          track.Name,
-		Description:   track.Description,
-		CoverImageURL: track.CoverImageURL,
-		IsActive:      track.IsActive,
-		CreatedAt:     track.CreatedAt,
-		UpdatedAt:     track.UpdatedAt,
+		ID:                       track.ID,
+		Code:                     strings.ToLower(track.Code),
+		Name:                     track.Name,
+		Description:              track.Description,
+		CoverImageURL:            track.CoverImageURL,
+		BlueprintVersion:         track.Blueprint.Version,
+		BlueprintStatus:          track.Blueprint.Status,
+		BlueprintQuestionCount:   track.Blueprint.QuestionCount,
+		BlueprintDurationMinutes: track.Blueprint.DurationMinutes,
+		BlueprintPassingScore:    track.Blueprint.PassingScore,
+		BlueprintEffectiveDate:   track.Blueprint.EffectiveDate,
+		BlueprintReviewedAt:      track.Blueprint.ReviewedAt,
+		BlueprintSourceNote:      track.Blueprint.SourceNote,
+		BlueprintSections:        track.Blueprint.Sections,
+		IsActive:                 track.IsActive,
+		CreatedAt:                track.CreatedAt,
+		UpdatedAt:                track.UpdatedAt,
 	}
 	return r.db.WithContext(ctx).Create(&model).Error
 }
 
 func (r *adminRepository) Update(ctx context.Context, track *domain.ExamTrack) error {
 	track.UpdatedAt = time.Now().UTC()
+	sections, err := json.Marshal(track.Blueprint.Sections)
+	if err != nil {
+		return err
+	}
 	return r.db.WithContext(ctx).Model(&ExamTrackModel{}).Where("id = ?", track.ID).Updates(map[string]any{
-		"name":            track.Name,
-		"code":            strings.ToLower(track.Code),
-		"description":     track.Description,
-		"cover_image_url": track.CoverImageURL,
-		"is_active":       track.IsActive,
-		"updated_at":      track.UpdatedAt,
+		"name":                       track.Name,
+		"code":                       strings.ToLower(track.Code),
+		"description":                track.Description,
+		"cover_image_url":            track.CoverImageURL,
+		"blueprint_version":          track.Blueprint.Version,
+		"blueprint_status":           track.Blueprint.Status,
+		"blueprint_question_count":   track.Blueprint.QuestionCount,
+		"blueprint_duration_minutes": track.Blueprint.DurationMinutes,
+		"blueprint_passing_score":    track.Blueprint.PassingScore,
+		"blueprint_effective_date":   track.Blueprint.EffectiveDate,
+		"blueprint_reviewed_at":      track.Blueprint.ReviewedAt,
+		"blueprint_source_note":      track.Blueprint.SourceNote,
+		"blueprint_sections":         sections,
+		"is_active":                  track.IsActive,
+		"updated_at":                 track.UpdatedAt,
 	}).Error
 }
 

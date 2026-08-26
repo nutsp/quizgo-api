@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -71,6 +72,7 @@ type QuestionInput struct {
 	ExplanationImageURL *string       `json:"explanation_image_url"`
 	Difficulty          string        `json:"difficulty"`
 	Status              string        `json:"status"`
+	ReviewStatus        string        `json:"review_status"`
 	TagIDs              []string      `json:"tag_ids"`
 	Choices             []ChoiceInput `json:"choices"`
 }
@@ -104,6 +106,8 @@ type QuestionResponse struct {
 	Explanation         string               `json:"explanation,omitempty"`
 	ExplanationImageURL *string              `json:"explanation_image_url,omitempty"`
 	Status              string               `json:"status"`
+	ReviewStatus        string               `json:"review_status"`
+	ReviewedAt          *string              `json:"reviewed_at,omitempty"`
 	IsActive            bool                 `json:"is_active"`
 	CorrectAnswer       string               `json:"correct_answer,omitempty"`
 	Choices             []ChoiceResponse     `json:"choices,omitempty"`
@@ -361,7 +365,11 @@ func (uc *AdminUseCase) buildQuestion(ctx context.Context, input QuestionInput) 
 	if subject == nil {
 		return nil, apperrors.ErrNotFound
 	}
-	if !isValidQuestionDifficulty(input.Difficulty) || !isValidQuestionStatus(input.Status) {
+	reviewStatus := input.ReviewStatus
+	if reviewStatus == "" {
+		reviewStatus = qdomain.ReviewStatusUnreviewed
+	}
+	if !isValidQuestionDifficulty(input.Difficulty) || !isValidQuestionStatus(input.Status) || !qdomain.IsValidReviewStatus(reviewStatus) {
 		return nil, apperrors.ErrInvalidInput
 	}
 	contentFormat := qdomain.NormalizeContentFormat(input.ContentFormat)
@@ -373,6 +381,11 @@ func (uc *AdminUseCase) buildQuestion(ctx context.Context, input QuestionInput) 
 	if err != nil {
 		return nil, err
 	}
+	var reviewedAt *time.Time
+	if reviewStatus == qdomain.ReviewStatusReviewed {
+		now := time.Now().UTC()
+		reviewedAt = &now
+	}
 	return &qdomain.Question{
 		SubjectID:           subjectID,
 		QuestionText:        questionText,
@@ -382,6 +395,8 @@ func (uc *AdminUseCase) buildQuestion(ctx context.Context, input QuestionInput) 
 		ExplanationImageURL: explanationImageURL,
 		Difficulty:          input.Difficulty,
 		Status:              input.Status,
+		ReviewStatus:        reviewStatus,
+		ReviewedAt:          reviewedAt,
 		IsActive:            input.Status != qdomain.StatusArchived,
 		Subject:             &qdomain.SubjectRef{Code: subject.Code, Name: subject.Name},
 		Choices:             choices,
@@ -494,9 +509,14 @@ func toQuestionResponse(q qdomain.Question) QuestionResponse {
 		Explanation:         q.Explanation,
 		ExplanationImageURL: q.ExplanationImageURL,
 		Status:              q.Status,
+		ReviewStatus:        q.ReviewStatus,
 		IsActive:            q.IsActive,
 		CreatedAt:           q.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
 		UpdatedAt:           q.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+	}
+	if q.ReviewedAt != nil {
+		formatted := q.ReviewedAt.Format("2006-01-02T15:04:05Z07:00")
+		resp.ReviewedAt = &formatted
 	}
 	if q.Subject != nil {
 		resp.SubjectName = q.Subject.Name

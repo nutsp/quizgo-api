@@ -15,20 +15,22 @@ type ExamTrack struct {
 	TotalExamSets  int
 	TotalQuestions int
 	TotalAttempts  int
+	Blueprint      Blueprint
 	IsActive       bool
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 }
 
 type ExamTrackSummary struct {
-	ID             string  `json:"id"`
-	Code           string  `json:"code"`
-	Name           string  `json:"name"`
-	Description    string  `json:"description,omitempty"`
-	CoverImageURL  *string `json:"cover_image_url,omitempty"`
-	TotalExamSets  int     `json:"total_exam_sets"`
-	TotalQuestions int     `json:"total_questions"`
-	TotalAttempts  int     `json:"total_attempts"`
+	ID             string    `json:"id"`
+	Code           string    `json:"code"`
+	Name           string    `json:"name"`
+	Description    string    `json:"description,omitempty"`
+	CoverImageURL  *string   `json:"cover_image_url,omitempty"`
+	TotalExamSets  int       `json:"total_exam_sets"`
+	TotalQuestions int       `json:"total_questions"`
+	TotalAttempts  int       `json:"total_attempts"`
+	Blueprint      Blueprint `json:"blueprint"`
 }
 
 func (t *ExamTrack) ToSummary() ExamTrackSummary {
@@ -41,6 +43,7 @@ func (t *ExamTrack) ToSummary() ExamTrackSummary {
 		TotalExamSets:  t.TotalExamSets,
 		TotalQuestions: t.TotalQuestions,
 		TotalAttempts:  t.TotalAttempts,
+		Blueprint:      t.Blueprint,
 	}
 }
 

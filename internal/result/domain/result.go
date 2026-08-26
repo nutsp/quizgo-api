@@ -1,6 +1,10 @@
 package domain
 
-import "time"
+import (
+	"time"
+
+	"virtual-exam-api/internal/readiness"
+)
 
 type WeakSubject struct {
 	SubjectCode         string  `json:"subject_code,omitempty"`
@@ -44,48 +48,49 @@ type ExamSetRef struct {
 }
 
 type OverallSummary struct {
-	TotalAttempts           int64        `json:"total_attempts"`
-	CompletedExamSets       int64        `json:"completed_exam_sets"`
-	CompletedExamTracks     int64        `json:"completed_exam_tracks"`
-	AverageScorePercent     float64      `json:"average_score_percent"`
-	BestScorePercent        float64      `json:"best_score_percent"`
-	LatestScorePercent      float64      `json:"latest_score_percent"`
-	PassedAttempts          int64        `json:"passed_attempts"`
-	FailedAttempts          int64        `json:"failed_attempts"`
-	PassRatePercent         float64      `json:"pass_rate_percent"`
-	AverageDurationSeconds  float64      `json:"average_duration_seconds"`
-	MostPracticedExamTrack  *ExamTrackRef            `json:"most_practiced_exam_track,omitempty"`
-	WeakSubjects            []WeakSubject            `json:"weak_subjects"`
-	ScoreTrend              []ScoreTrendPoint        `json:"score_trend"`
-	SubjectPerformance      []SubjectPerformanceItem `json:"subject_performance"`
+	TotalAttempts          int64                    `json:"total_attempts"`
+	CompletedExamSets      int64                    `json:"completed_exam_sets"`
+	CompletedExamTracks    int64                    `json:"completed_exam_tracks"`
+	AverageScorePercent    float64                  `json:"average_score_percent"`
+	BestScorePercent       float64                  `json:"best_score_percent"`
+	LatestScorePercent     float64                  `json:"latest_score_percent"`
+	PassedAttempts         int64                    `json:"passed_attempts"`
+	FailedAttempts         int64                    `json:"failed_attempts"`
+	PassRatePercent        float64                  `json:"pass_rate_percent"`
+	AverageDurationSeconds float64                  `json:"average_duration_seconds"`
+	MostPracticedExamTrack *ExamTrackRef            `json:"most_practiced_exam_track,omitempty"`
+	WeakSubjects           []WeakSubject            `json:"weak_subjects"`
+	ScoreTrend             []ScoreTrendPoint        `json:"score_trend"`
+	SubjectPerformance     []SubjectPerformanceItem `json:"subject_performance"`
 }
 
 type ExamTrackSummaryItem struct {
-	ExamTrack                ExamTrackRef  `json:"exam_track"`
-	CompletedExamSets        int           `json:"completed_exam_sets"`
-	TotalExamSets            int           `json:"total_exam_sets"`
-	TotalAttempts            int64         `json:"total_attempts"`
-	AverageBestScorePercent  float64       `json:"average_best_score_percent"`
-	BestScorePercent         float64       `json:"best_score_percent"`
-	LatestScorePercent       float64       `json:"latest_score_percent"`
-	PassedExamSets           int           `json:"passed_exam_sets"`
-	FailedExamSets           int           `json:"failed_exam_sets"`
-	AverageDurationSeconds   float64       `json:"average_duration_seconds"`
-	LastAttemptAt            *time.Time    `json:"last_attempt_at,omitempty"`
-	WeakSubjects             []WeakSubject `json:"weak_subjects"`
+	ExamTrack               ExamTrackRef  `json:"exam_track"`
+	CompletedExamSets       int           `json:"completed_exam_sets"`
+	TotalExamSets           int           `json:"total_exam_sets"`
+	TotalAttempts           int64         `json:"total_attempts"`
+	AverageBestScorePercent float64       `json:"average_best_score_percent"`
+	BestScorePercent        float64       `json:"best_score_percent"`
+	LatestScorePercent      float64       `json:"latest_score_percent"`
+	PassedExamSets          int           `json:"passed_exam_sets"`
+	FailedExamSets          int           `json:"failed_exam_sets"`
+	AverageDurationSeconds  float64       `json:"average_duration_seconds"`
+	LastAttemptAt           *time.Time    `json:"last_attempt_at,omitempty"`
+	WeakSubjects            []WeakSubject `json:"weak_subjects"`
 }
 
 type TrackSummaryStats struct {
-	CompletedExamSets       int     `json:"completed_exam_sets"`
-	TotalExamSets           int     `json:"total_exam_sets"`
-	TotalAttempts           int64   `json:"total_attempts"`
-	AverageBestScorePercent float64 `json:"average_best_score_percent"`
-	BestScorePercent        float64 `json:"best_score_percent"`
-	LatestScorePercent      float64 `json:"latest_score_percent"`
-	PassedExamSets          int     `json:"passed_exam_sets"`
-	FailedExamSets          int     `json:"failed_exam_sets"`
-	AverageDurationSeconds  float64 `json:"average_duration_seconds"`
-	ReadinessPercent        float64 `json:"readiness_percent"`
+	CompletedExamSets       int              `json:"completed_exam_sets"`
+	TotalExamSets           int              `json:"total_exam_sets"`
+	TotalAttempts           int64            `json:"total_attempts"`
+	AverageBestScorePercent float64          `json:"average_best_score_percent"`
+	BestScorePercent        float64          `json:"best_score_percent"`
+	LatestScorePercent      float64          `json:"latest_score_percent"`
+	PassedExamSets          int              `json:"passed_exam_sets"`
+	FailedExamSets          int              `json:"failed_exam_sets"`
+	AverageDurationSeconds  float64          `json:"average_duration_seconds"`
+	ReadinessPercent        float64          `json:"readiness_percent"`
+	Readiness               readiness.Result `json:"readiness"`
 }
 
 type ExamSetProgressItem struct {
@@ -109,21 +114,21 @@ type ExamTrackDetailResponse struct {
 }
 
 type AttemptHistoryItem struct {
-	AttemptID        string       `json:"attempt_id"`
-	ExamTrack        ExamTrackRef `json:"exam_track"`
-	ExamSet          ExamSetRef   `json:"exam_set"`
-	AttemptNo        int          `json:"attempt_no"`
-	Score            float64      `json:"score"`
-	TotalScore       float64      `json:"total_score"`
-	ScorePercent     float64      `json:"score_percent"`
-	Passed           bool         `json:"passed"`
-	CorrectCount     int          `json:"correct_count"`
-	WrongCount       int          `json:"wrong_count"`
-	UnansweredCount  int          `json:"unanswered_count"`
-	DurationSeconds  int          `json:"duration_seconds"`
-	Status           string       `json:"status"`
-	StartedAt        time.Time    `json:"started_at"`
-	SubmittedAt      *time.Time   `json:"submitted_at,omitempty"`
+	AttemptID       string       `json:"attempt_id"`
+	ExamTrack       ExamTrackRef `json:"exam_track"`
+	ExamSet         ExamSetRef   `json:"exam_set"`
+	AttemptNo       int          `json:"attempt_no"`
+	Score           float64      `json:"score"`
+	TotalScore      float64      `json:"total_score"`
+	ScorePercent    float64      `json:"score_percent"`
+	Passed          bool         `json:"passed"`
+	CorrectCount    int          `json:"correct_count"`
+	WrongCount      int          `json:"wrong_count"`
+	UnansweredCount int          `json:"unanswered_count"`
+	DurationSeconds int          `json:"duration_seconds"`
+	Status          string       `json:"status"`
+	StartedAt       time.Time    `json:"started_at"`
+	SubmittedAt     *time.Time   `json:"submitted_at,omitempty"`
 }
 
 type AttemptHistoryFilter struct {
@@ -167,7 +172,7 @@ type ExamSetAttemptItem struct {
 }
 
 type ExamSetDetailResponse struct {
-	ExamSet  ExamSetRef            `json:"exam_set"`
-	Summary  ExamSetSummaryStats   `json:"summary"`
-	Attempts []ExamSetAttemptItem  `json:"attempts"`
+	ExamSet  ExamSetRef           `json:"exam_set"`
+	Summary  ExamSetSummaryStats  `json:"summary"`
+	Attempts []ExamSetAttemptItem `json:"attempts"`
 }

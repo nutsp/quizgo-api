@@ -1,6 +1,7 @@
 package http
 
 import (
+	"net/http"
 	"strconv"
 
 	"github.com/google/uuid"
@@ -21,6 +22,7 @@ func NewHandler(attemptUC *usecase.ExamAttemptUseCase) *Handler {
 }
 
 func (h *Handler) RegisterRoutes(g *echo.Group, authMiddleware echo.MiddlewareFunc) {
+	g.GET("/me/daily-attempt-quota", h.GetDailyQuotaStatus, authMiddleware)
 	attempts := g.Group("/attempts", authMiddleware)
 	attempts.GET("/:attemptId", h.Get)
 	attempts.PUT("/:attemptId/answers/:questionNo", h.SaveAnswer)
@@ -28,6 +30,18 @@ func (h *Handler) RegisterRoutes(g *echo.Group, authMiddleware echo.MiddlewareFu
 	attempts.POST("/:attemptId/submit", h.Submit)
 	attempts.GET("/:attemptId/result", h.GetResult)
 	attempts.GET("/:attemptId/review", h.GetReview)
+}
+
+func (h *Handler) GetDailyQuotaStatus(c echo.Context) error {
+	userID, err := middleware.RequireUserID(c)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	status, err := h.attemptUC.GetDailyQuotaStatus(c.Request().Context(), userID)
+	if err != nil {
+		return response.Error(c, err)
+	}
+	return response.JSON(c, http.StatusOK, status)
 }
 
 func (h *Handler) Get(c echo.Context) error {

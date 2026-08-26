@@ -23,19 +23,19 @@ type OverallStatsRow struct {
 }
 
 type TrackPracticeRow struct {
-	TrackID   uuid.UUID
-	TrackCode string
-	TrackName string
+	TrackID      uuid.UUID
+	TrackCode    string
+	TrackName    string
 	AttemptCount int64
 }
 
 type BestAttemptRow struct {
-	ExamSetID      uuid.UUID
-	ExamTrackID    uuid.UUID
-	ScorePercent   float64
+	ExamSetID       uuid.UUID
+	ExamTrackID     uuid.UUID
+	ScorePercent    float64
 	DurationSeconds *int
-	SubmittedAt    *time.Time
-	PassingScore   int
+	SubmittedAt     *time.Time
+	PassingScore    int
 }
 
 type AttemptRow struct {
@@ -82,6 +82,20 @@ type SubjectPerformanceRow struct {
 	TotalQuestions      int64
 }
 
+type ReadinessSectionRow struct {
+	WeightPercent  float64
+	Answered       int
+	Correct        int
+	RecentAnswered int
+	RecentCorrect  int
+}
+
+type ReadinessEvidenceRow struct {
+	TotalAnswered          int
+	AverageDurationSeconds float64
+	Sections               []ReadinessSectionRow
+}
+
 type Repository interface {
 	GetOverallStats(ctx context.Context, userID uuid.UUID) (*OverallStatsRow, error)
 	GetMostPracticedTrack(ctx context.Context, userID uuid.UUID) (*TrackPracticeRow, error)
@@ -99,14 +113,17 @@ type Repository interface {
 	FindTrackByID(ctx context.Context, id uuid.UUID) (*TrackRow, error)
 	FindExamSetByCode(ctx context.Context, code string) (*ExamSetRow, error)
 	ListActiveExamSetsByTrack(ctx context.Context, trackID uuid.UUID) ([]ExamSetRow, error)
+	GetReadinessEvidence(ctx context.Context, userID, trackID uuid.UUID) (*ReadinessEvidenceRow, error)
 }
 
 type TrackRow struct {
-	ID            uuid.UUID
-	Code          string
-	Name          string
-	Description   string
-	CoverImageURL *string
+	ID                       uuid.UUID
+	Code                     string
+	Name                     string
+	Description              string
+	CoverImageURL            *string
+	BlueprintStatus          string
+	BlueprintDurationMinutes int
 }
 
 type ExamSetRow struct {
@@ -123,6 +140,41 @@ type ExamSetRow struct {
 type postgresRepository struct {
 	db *gorm.DB
 }
+
+const trackSelectColumns = `id, code, name, description, cover_image_url,
+	blueprint_status, blueprint_duration_minutes`
+
+const readinessSectionsQuery = `
+	WITH sections AS (
+		SELECT
+			(section->>'subject_id')::uuid AS subject_id,
+			NULLIF(section->>'tag_id', '')::uuid AS tag_id,
+			(section->>'weight_percent')::numeric AS weight_percent
+		FROM exam_tracks et
+		CROSS JOIN LATERAL jsonb_array_elements(et.blueprint_sections) section
+		WHERE et.id = ?
+	)
+	SELECT
+		s.weight_percent,
+		COUNT(DISTINCT ans.id) FILTER (WHERE q.id IS NOT NULL) AS answered,
+		COUNT(DISTINCT ans.id) FILTER (WHERE ans.is_correct = true AND q.id IS NOT NULL) AS correct,
+		COUNT(DISTINCT ans.id) FILTER (WHERE q.id IS NOT NULL AND att.submitted_at >= NOW() - INTERVAL '30 days') AS recent_answered,
+		COUNT(DISTINCT ans.id) FILTER (WHERE ans.is_correct = true AND q.id IS NOT NULL AND att.submitted_at >= NOW() - INTERVAL '30 days') AS recent_correct
+	FROM sections s
+	LEFT JOIN exam_attempts att
+		ON att.user_id = ? AND att.exam_track_id = ? AND att.status IN ('submitted', 'timeout')
+	LEFT JOIN exam_answers ans ON ans.attempt_id = att.id
+	LEFT JOIN questions q
+		ON q.id = ans.question_id
+		AND q.subject_id = s.subject_id
+		AND (
+			s.tag_id IS NULL OR EXISTS (
+				SELECT 1 FROM question_tag_mappings qtm
+				WHERE qtm.question_id = q.id AND qtm.tag_id = s.tag_id
+			)
+		)
+	GROUP BY s.subject_id, s.tag_id, s.weight_percent
+	ORDER BY s.subject_id, s.tag_id NULLS FIRST`
 
 func NewPostgresRepository(db *gorm.DB) Repository {
 	return &postgresRepository{db: db}
@@ -314,6 +366,39 @@ func (r *postgresRepository) CountAttemptsByTrack(ctx context.Context, userID, t
 	return count, err
 }
 
+func (r *postgresRepository) GetReadinessEvidence(ctx context.Context, userID, trackID uuid.UUID) (*ReadinessEvidenceRow, error) {
+	var sections []ReadinessSectionRow
+	err := r.db.WithContext(ctx).Raw(readinessSectionsQuery, trackID, userID, trackID).Scan(&sections).Error
+	if err != nil {
+		return nil, err
+	}
+
+	var totals struct {
+		TotalAnswered          int
+		AverageDurationSeconds float64
+	}
+	err = r.db.WithContext(ctx).Raw(`
+		SELECT
+			(SELECT COUNT(ans.id)
+			 FROM exam_attempts att
+			 JOIN exam_answers ans ON ans.attempt_id = att.id
+			 WHERE att.user_id = ? AND att.exam_track_id = ?
+			   AND att.status IN ('submitted', 'timeout')) AS total_answered,
+			(SELECT COALESCE(AVG(att.duration_seconds), 0)
+			 FROM exam_attempts att
+			 WHERE att.user_id = ? AND att.exam_track_id = ?
+			   AND att.status IN ('submitted', 'timeout')) AS average_duration_seconds
+	`, userID, trackID, userID, trackID).Scan(&totals).Error
+	if err != nil {
+		return nil, err
+	}
+	return &ReadinessEvidenceRow{
+		TotalAnswered:          totals.TotalAnswered,
+		AverageDurationSeconds: totals.AverageDurationSeconds,
+		Sections:               sections,
+	}, nil
+}
+
 func (r *postgresRepository) GetLatestAttemptScoreByTrack(ctx context.Context, userID, trackID uuid.UUID) (float64, bool, error) {
 	var score *float64
 	err := r.db.WithContext(ctx).Raw(`
@@ -444,10 +529,8 @@ func (r *postgresRepository) ListAttempts(ctx context.Context, userID uuid.UUID,
 
 func (r *postgresRepository) FindTrackByCode(ctx context.Context, code string) (*TrackRow, error) {
 	var row TrackRow
-	err := r.db.WithContext(ctx).Raw(`
-		SELECT id, code, name, description, cover_image_url
-		FROM exam_tracks WHERE code = ? AND is_active = true
-	`, code).Scan(&row).Error
+	err := r.db.WithContext(ctx).Raw(`SELECT `+trackSelectColumns+`
+		FROM exam_tracks WHERE code = ? AND is_active = true`, code).Scan(&row).Error
 	if err != nil {
 		return nil, err
 	}
@@ -459,10 +542,8 @@ func (r *postgresRepository) FindTrackByCode(ctx context.Context, code string) (
 
 func (r *postgresRepository) FindTrackByID(ctx context.Context, id uuid.UUID) (*TrackRow, error) {
 	var row TrackRow
-	err := r.db.WithContext(ctx).Raw(`
-		SELECT id, code, name, description, cover_image_url
-		FROM exam_tracks WHERE id = ?
-	`, id).Scan(&row).Error
+	err := r.db.WithContext(ctx).Raw(`SELECT `+trackSelectColumns+`
+		FROM exam_tracks WHERE id = ?`, id).Scan(&row).Error
 	if err != nil {
 		return nil, err
 	}

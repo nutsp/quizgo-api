@@ -29,8 +29,10 @@ type QuestionModel struct {
 	Explanation         string    `gorm:"type:text"`
 	ExplanationImageURL *string   `gorm:"type:text"`
 	Difficulty          string
-	Status              string    `gorm:"type:varchar(50);not null;default:draft"`
-	IsActive            bool      `gorm:"not null;default:true"`
+	Status              string `gorm:"type:varchar(50);not null;default:draft"`
+	ReviewStatus        string `gorm:"type:varchar(20);not null;default:unreviewed"`
+	ReviewedAt          *time.Time
+	IsActive            bool `gorm:"not null;default:true"`
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 
@@ -39,6 +41,19 @@ type QuestionModel struct {
 }
 
 func (QuestionModel) TableName() string { return "questions" }
+
+const legacyReviewBackfillSQL = `
+	UPDATE questions
+	SET review_status = 'reviewed', reviewed_at = COALESCE(updated_at, created_at)
+	WHERE status = 'published' AND review_status = 'unreviewed'
+`
+
+func ReconcileLegacyReviewStatus(db *gorm.DB, reviewStatusColumnExisted bool) error {
+	if reviewStatusColumnExisted {
+		return nil
+	}
+	return db.Exec(legacyReviewBackfillSQL).Error
+}
 
 type ChoiceModel struct {
 	ID             uuid.UUID `gorm:"type:uuid;primaryKey"`
@@ -91,7 +106,7 @@ func (r *postgresRepository) ListByExamSetID(ctx context.Context, examSetID uuid
 		}).
 		Joins("JOIN questions ON questions.id = exam_set_questions.question_id").
 		Where("exam_set_questions.exam_set_id = ?", examSetID).
-		Where("questions.status = ? AND questions.is_active = ?", domain.StatusPublished, true).
+		Where("questions.status = ? AND questions.review_status = ? AND questions.is_active = ?", domain.StatusPublished, domain.ReviewStatusReviewed, true).
 		Order("exam_set_questions.question_no ASC").
 		Find(&models).Error
 	if err != nil {
@@ -106,7 +121,7 @@ func (r *postgresRepository) ListPreviewByExamSetID(ctx context.Context, examSet
 		Preload("Question.Subject").
 		Joins("JOIN questions ON questions.id = exam_set_questions.question_id").
 		Where("exam_set_questions.exam_set_id = ?", examSetID).
-		Where("questions.status = ? AND questions.is_active = ?", domain.StatusPublished, true).
+		Where("questions.status = ? AND questions.review_status = ? AND questions.is_active = ?", domain.StatusPublished, domain.ReviewStatusReviewed, true).
 		Order("exam_set_questions.question_no ASC").
 		Find(&models).Error
 	if err != nil {
@@ -154,6 +169,8 @@ func mapExamSetQuestions(models []ExamSetQuestionModel) []domain.ExamSetQuestion
 				ExplanationImageURL: m.Question.ExplanationImageURL,
 				Difficulty:          m.Question.Difficulty,
 				Status:              m.Question.Status,
+				ReviewStatus:        m.Question.ReviewStatus,
+				ReviewedAt:          m.Question.ReviewedAt,
 				IsActive:            m.Question.IsActive,
 			}
 			if m.Question.Subject.ID != uuid.Nil {

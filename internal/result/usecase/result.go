@@ -7,19 +7,28 @@ import (
 
 	"github.com/google/uuid"
 	"virtual-exam-api/internal/apperrors"
+	"virtual-exam-api/internal/readiness"
 	"virtual-exam-api/internal/result/domain"
 	resultrepo "virtual-exam-api/internal/result/repository"
 )
 
 type ResultUseCase struct {
-	repo resultrepo.Repository
+	repo    resultrepo.Repository
+	premium PremiumAccessChecker
 }
 
-func NewResultUseCase(repo resultrepo.Repository) *ResultUseCase {
-	return &ResultUseCase{repo: repo}
+type PremiumAccessChecker interface {
+	HasActivePremiumEntitlement(context.Context, uuid.UUID) (bool, *time.Time, error)
+}
+
+func NewResultUseCase(repo resultrepo.Repository, premium PremiumAccessChecker) *ResultUseCase {
+	return &ResultUseCase{repo: repo, premium: premium}
 }
 
 func (uc *ResultUseCase) GetMyResultsSummary(ctx context.Context, userID uuid.UUID) (*domain.OverallSummary, error) {
+	if err := uc.requirePremium(ctx, userID); err != nil {
+		return nil, err
+	}
 	stats, err := uc.repo.GetOverallStats(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -99,6 +108,9 @@ func (uc *ResultUseCase) GetMyResultsSummary(ctx context.Context, userID uuid.UU
 }
 
 func (uc *ResultUseCase) GetMyExamTrackResults(ctx context.Context, userID uuid.UUID) ([]domain.ExamTrackSummaryItem, error) {
+	if err := uc.requirePremium(ctx, userID); err != nil {
+		return nil, err
+	}
 	trackIDs, err := uc.repo.ListTracksWithAttempts(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -118,6 +130,9 @@ func (uc *ResultUseCase) GetMyExamTrackResults(ctx context.Context, userID uuid.
 }
 
 func (uc *ResultUseCase) GetMyExamTrackResultDetail(ctx context.Context, userID uuid.UUID, trackCode string) (*domain.ExamTrackDetailResponse, error) {
+	if err := uc.requirePremium(ctx, userID); err != nil {
+		return nil, err
+	}
 	track, err := uc.repo.FindTrackByCode(ctx, trackCode)
 	if err != nil {
 		return nil, err
@@ -158,6 +173,33 @@ func (uc *ResultUseCase) GetMyExamTrackResultDetail(ctx context.Context, userID 
 		}
 	}
 
+	evidence, err := uc.repo.GetReadinessEvidence(ctx, userID, track.ID)
+	if err != nil {
+		return nil, err
+	}
+	sections := make([]readiness.SectionEvidence, len(evidence.Sections))
+	for i, section := range evidence.Sections {
+		sections[i] = readiness.SectionEvidence{
+			WeightPercent:  section.WeightPercent,
+			Answered:       section.Answered,
+			Correct:        section.Correct,
+			RecentAnswered: section.RecentAnswered,
+			RecentCorrect:  section.RecentCorrect,
+		}
+	}
+	resp.Summary.Readiness = readiness.NewCalculator(readiness.DefaultConfig()).Calculate(readiness.Input{
+		BlueprintReady:         track.BlueprintStatus == "reviewed",
+		Sections:               sections,
+		TotalAnswered:          evidence.TotalAnswered,
+		DurationLimitSeconds:   float64(track.BlueprintDurationMinutes * 60),
+		AverageDurationSeconds: evidence.AverageDurationSeconds,
+	})
+	if resp.Summary.Readiness.Score != nil {
+		resp.Summary.ReadinessPercent = *resp.Summary.Readiness.Score
+	} else {
+		resp.Summary.ReadinessPercent = 0
+	}
+
 	sets, err := uc.repo.ListActiveExamSetsByTrack(ctx, track.ID)
 	if err != nil {
 		return nil, err
@@ -190,6 +232,9 @@ func (uc *ResultUseCase) GetMyExamTrackResultDetail(ctx context.Context, userID 
 }
 
 func (uc *ResultUseCase) ListMyAttemptResults(ctx context.Context, userID uuid.UUID, filter domain.AttemptHistoryFilter) (*domain.PaginatedAttempts, error) {
+	if err := uc.requirePremium(ctx, userID); err != nil {
+		return nil, err
+	}
 	if filter.Page < 1 {
 		filter.Page = 1
 	}
@@ -220,6 +265,9 @@ func (uc *ResultUseCase) ListMyAttemptResults(ctx context.Context, userID uuid.U
 }
 
 func (uc *ResultUseCase) GetMyExamSetResultDetail(ctx context.Context, userID uuid.UUID, examSetCode string) (*domain.ExamSetDetailResponse, error) {
+	if err := uc.requirePremium(ctx, userID); err != nil {
+		return nil, err
+	}
 	set, err := uc.repo.FindExamSetByCode(ctx, examSetCode)
 	if err != nil {
 		return nil, err
@@ -270,6 +318,20 @@ func (uc *ResultUseCase) GetMyExamSetResultDetail(ctx context.Context, userID uu
 	}
 
 	return resp, nil
+}
+
+func (uc *ResultUseCase) requirePremium(ctx context.Context, userID uuid.UUID) error {
+	if uc.premium == nil {
+		return apperrors.ErrPremiumRequired
+	}
+	active, _, err := uc.premium.HasActivePremiumEntitlement(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if !active {
+		return apperrors.ErrPremiumRequired
+	}
+	return nil
 }
 
 func (uc *ResultUseCase) buildTrackSummary(ctx context.Context, userID, trackID uuid.UUID) (*domain.ExamTrackSummaryItem, error) {

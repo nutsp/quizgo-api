@@ -8,8 +8,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"virtual-exam-api/internal/apperrors"
 	appcache "virtual-exam-api/internal/cache"
+	entdomain "virtual-exam-api/internal/entitlement/domain"
 	"virtual-exam-api/internal/examattempt/domain"
+	attemptquota "virtual-exam-api/internal/examattempt/quota"
 	attemptrepo "virtual-exam-api/internal/examattempt/repository"
 	examsetdomain "virtual-exam-api/internal/examset/domain"
 	examsetrepo "virtual-exam-api/internal/examset/repository"
@@ -18,6 +21,20 @@ import (
 	questionrepo "virtual-exam-api/internal/question/repository"
 	scoringuc "virtual-exam-api/internal/scoring/usecase"
 )
+
+type rejectingDailyQuota struct {
+	called  int
+	resetAt time.Time
+}
+
+func (q *rejectingDailyQuota) Status(context.Context, uuid.UUID, time.Time) (attemptquota.Status, error) {
+	return attemptquota.Status{Limit: 1, Used: 1, Remaining: 0, ResetAt: q.resetAt}, nil
+}
+
+func (q *rejectingDailyQuota) WithSubmission(context.Context, uuid.UUID, time.Time, func() error) error {
+	q.called++
+	return attemptquota.ErrLimitReached
+}
 
 type projectionRecorder struct {
 	inputs         []leaderboarddomain.ProjectionInput
@@ -228,6 +245,7 @@ func newProjectionAttemptUseCase(store *projectionAttemptStore, projector Leader
 		nil,
 		nil,
 		nil,
+		nil,
 		projector,
 	)
 	uc.now = projectionFixtureNow
@@ -236,6 +254,114 @@ func newProjectionAttemptUseCase(store *projectionAttemptStore, projector Leader
 
 func projectionFixtureNow() time.Time {
 	return time.Date(2026, 7, 14, 7, 0, 0, 0, time.UTC)
+}
+
+func TestFreeDailyQuotaRejectsSubmitBeforePersistence(t *testing.T) {
+	attempt := projectionAttempt(domain.StatusInProgress)
+	store := &projectionAttemptStore{current: attempt}
+	uc := newProjectionAttemptUseCase(store, nil)
+	limiter := &rejectingDailyQuota{resetAt: projectionFixtureNow().Add(10 * time.Hour)}
+	uc.dailyQuota = limiter
+
+	_, err := uc.Submit(context.Background(), attempt.UserID, attempt.ID)
+	var appErr *apperrors.AppError
+	if !errors.As(err, &appErr) || appErr.Code != "FREE_DAILY_LIMIT_REACHED" {
+		t.Fatalf("Submit() error = %#v, want FREE_DAILY_LIMIT_REACHED", err)
+	}
+	if limiter.called != 1 || store.submittedWrites != 0 {
+		t.Fatalf("quota calls/submitted writes = %d/%d, want 1/0", limiter.called, store.submittedWrites)
+	}
+}
+
+func TestDailyQuotaDoesNotLimitSinglePurchaseAttempt(t *testing.T) {
+	attempt := projectionAttempt(domain.StatusInProgress)
+	singlePurchase := entdomain.AccessSourceSinglePurchase
+	attempt.AccessSource = &singlePurchase
+	store := &projectionAttemptStore{current: attempt}
+	uc := newProjectionAttemptUseCase(store, nil)
+	limiter := &rejectingDailyQuota{resetAt: projectionFixtureNow().Add(10 * time.Hour)}
+	uc.dailyQuota = limiter
+
+	if _, err := uc.Submit(context.Background(), attempt.UserID, attempt.ID); err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	if limiter.called != 0 || store.submittedWrites != 1 {
+		t.Fatalf("quota calls/submitted writes = %d/%d, want 0/1", limiter.called, store.submittedWrites)
+	}
+}
+
+func TestFreeDailyQuotaRejectsStartingAnotherAttempt(t *testing.T) {
+	previous := projectionAttempt(domain.StatusSubmitted)
+	store := &projectionAttemptStore{current: previous}
+	uc := newProjectionAttemptUseCase(store, nil)
+	uc.dailyQuota = &rejectingDailyQuota{resetAt: projectionFixtureNow().Add(10 * time.Hour)}
+
+	_, err := uc.Start(context.Background(), previous.UserID, "set-001", domain.StartAttemptRequest{})
+	var appErr *apperrors.AppError
+	if !errors.As(err, &appErr) || appErr.Code != "FREE_DAILY_LIMIT_REACHED" {
+		t.Fatalf("Start() error = %#v, want FREE_DAILY_LIMIT_REACHED", err)
+	}
+	if store.createWrites != 0 {
+		t.Fatalf("create writes = %d, want 0", store.createWrites)
+	}
+}
+
+func TestDailyQuotaStatusReturnsFreeAllowance(t *testing.T) {
+	attempt := projectionAttempt(domain.StatusSubmitted)
+	uc := newProjectionAttemptUseCase(&projectionAttemptStore{current: attempt}, nil)
+	resetAt := projectionFixtureNow().Add(10 * time.Hour)
+	uc.dailyQuota = &rejectingDailyQuota{resetAt: resetAt}
+
+	status, err := uc.GetDailyQuotaStatus(context.Background(), attempt.UserID)
+	if err != nil {
+		t.Fatalf("GetDailyQuotaStatus() error = %v", err)
+	}
+	if status.Unlimited || status.Remaining != 0 || !status.ResetAt.Equal(resetAt) {
+		t.Fatalf("status = %#v, want exhausted free allowance", status)
+	}
+}
+
+func TestFreeResultOmitsDetailedAnalysis(t *testing.T) {
+	attempt := projectionAttempt(domain.StatusSubmitted)
+	submittedAt := projectionFixtureNow()
+	attempt.SubmittedAt = &submittedAt
+	attempt.Score = 1
+	attempt.TotalScore = 1
+	attempt.ScorePercent = 100
+	attempt.CorrectCount = 1
+	free := entdomain.AccessSourceFree
+	attempt.AccessSource = &free
+	store := &projectionAttemptStore{current: attempt}
+	uc := newProjectionAttemptUseCase(store, nil)
+
+	result, err := uc.GetResult(context.Background(), attempt.UserID, attempt.ID)
+	if err != nil {
+		t.Fatalf("GetResult() error = %v", err)
+	}
+	if len(result.SubjectBreakdown) != 0 || len(result.WeaknessAnalysis) != 0 {
+		t.Fatalf("free result leaked detailed analysis: subjects=%d weaknesses=%d", len(result.SubjectBreakdown), len(result.WeaknessAnalysis))
+	}
+	if result.ExamSet.Access == nil || result.ExamSet.Access.HasPremium {
+		t.Fatalf("free result access = %#v", result.ExamSet.Access)
+	}
+}
+
+func TestSinglePurchaseResultKeepsDetailedAnalysis(t *testing.T) {
+	attempt := projectionAttempt(domain.StatusSubmitted)
+	submittedAt := projectionFixtureNow()
+	attempt.SubmittedAt = &submittedAt
+	singlePurchase := entdomain.AccessSourceSinglePurchase
+	attempt.AccessSource = &singlePurchase
+	store := &projectionAttemptStore{current: attempt}
+	uc := newProjectionAttemptUseCase(store, nil)
+
+	result, err := uc.GetResult(context.Background(), attempt.UserID, attempt.ID)
+	if err != nil {
+		t.Fatalf("GetResult() error = %v", err)
+	}
+	if len(result.SubjectBreakdown) == 0 {
+		t.Fatal("single-purchase result lost detailed analysis")
+	}
 }
 
 func projectionAttempt(status string) *domain.ExamAttempt {

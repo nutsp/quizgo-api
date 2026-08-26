@@ -11,20 +11,36 @@ import (
 )
 
 type ExamTrackModel struct {
-	ID             uuid.UUID `gorm:"type:uuid;primaryKey"`
-	Code           string    `gorm:"uniqueIndex:uq_exam_tracks_code;not null"`
-	Name           string    `gorm:"not null"`
-	Description    string
-	CoverImageURL  *string
-	TotalExamSets  int  `gorm:"default:0"`
-	TotalQuestions int  `gorm:"default:0"`
-	TotalAttempts  int  `gorm:"default:0"`
-	IsActive       bool `gorm:"default:true"`
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID                       uuid.UUID `gorm:"type:uuid;primaryKey"`
+	Code                     string    `gorm:"uniqueIndex:uq_exam_tracks_code;not null"`
+	Name                     string    `gorm:"not null"`
+	Description              string
+	CoverImageURL            *string
+	TotalExamSets            int        `gorm:"default:0"`
+	TotalQuestions           int        `gorm:"default:0"`
+	TotalAttempts            int        `gorm:"default:0"`
+	BlueprintVersion         int        `gorm:"not null;default:1"`
+	BlueprintStatus          string     `gorm:"type:varchar(20);not null;default:draft"`
+	BlueprintQuestionCount   int        `gorm:"not null;default:0"`
+	BlueprintDurationMinutes int        `gorm:"not null;default:0"`
+	BlueprintPassingScore    int        `gorm:"not null;default:0"`
+	BlueprintEffectiveDate   *time.Time `gorm:"type:date"`
+	BlueprintReviewedAt      *time.Time
+	BlueprintSourceNote      string                    `gorm:"type:text;not null;default:''"`
+	BlueprintSections        []domain.BlueprintSection `gorm:"serializer:json;type:jsonb;not null;default:'[]'"`
+	IsActive                 bool                      `gorm:"default:true"`
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
 }
 
 func (ExamTrackModel) TableName() string { return "exam_tracks" }
+
+func PrepareBlueprintSectionsMigration(db *gorm.DB) error {
+	if !db.Migrator().HasColumn(&ExamTrackModel{}, "BlueprintSections") {
+		return nil
+	}
+	return db.Exec(`UPDATE exam_tracks SET blueprint_sections = '[]'::jsonb WHERE blueprint_sections IS NULL`).Error
+}
 
 type Repository interface {
 	ListActive(ctx context.Context) ([]domain.ExamTrack, error)
@@ -83,6 +99,18 @@ func (r *postgresRepository) FindByID(ctx context.Context, id uuid.UUID) (*domai
 }
 
 func toDomain(m *ExamTrackModel) domain.ExamTrack {
+	blueprint := domain.Blueprint{
+		Version:         m.BlueprintVersion,
+		Status:          m.BlueprintStatus,
+		QuestionCount:   m.BlueprintQuestionCount,
+		DurationMinutes: m.BlueprintDurationMinutes,
+		PassingScore:    m.BlueprintPassingScore,
+		EffectiveDate:   m.BlueprintEffectiveDate,
+		ReviewedAt:      m.BlueprintReviewedAt,
+		SourceNote:      m.BlueprintSourceNote,
+		Sections:        m.BlueprintSections,
+	}
+	blueprint.Normalize()
 	return domain.ExamTrack{
 		ID:             m.ID,
 		Code:           m.Code,
@@ -92,6 +120,7 @@ func toDomain(m *ExamTrackModel) domain.ExamTrack {
 		TotalExamSets:  m.TotalExamSets,
 		TotalQuestions: m.TotalQuestions,
 		TotalAttempts:  m.TotalAttempts,
+		Blueprint:      blueprint,
 		IsActive:       m.IsActive,
 		CreatedAt:      m.CreatedAt,
 		UpdatedAt:      m.UpdatedAt,

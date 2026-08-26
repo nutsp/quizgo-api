@@ -18,6 +18,7 @@ type ExamAttemptModel struct {
 	UserID              uuid.UUID `gorm:"type:uuid;not null;index"`
 	ExamTrackID         uuid.UUID `gorm:"type:uuid;not null;index"`
 	ExamSetID           uuid.UUID `gorm:"type:uuid;not null;index"`
+	BlueprintVersion    int       `gorm:"not null;default:1"`
 	Status              string    `gorm:"not null;index"`
 	TimingMode          string    `gorm:"not null;default:countdown"`
 	StartedAt           time.Time `gorm:"not null"`
@@ -98,6 +99,7 @@ type Repository interface {
 	UpdateAttemptSubmitted(ctx context.Context, attempt *domain.ExamAttempt, answers []domain.ExamAnswer, allowAfterDeadline bool) (AttemptTransition, error)
 	MarkAttemptTimeout(ctx context.Context, attemptID uuid.UUID) (changed bool, err error)
 	CountCompletedByUser(ctx context.Context, userID uuid.UUID) (int64, error)
+	CountSubmittedBetween(ctx context.Context, userID uuid.UUID, from, to time.Time) (int, error)
 	AverageScorePercentByUser(ctx context.Context, userID uuid.UUID) (float64, error)
 	ListAnswersWithQuestions(ctx context.Context, attemptID uuid.UUID) ([]AnswerWithQuestion, error)
 }
@@ -457,6 +459,15 @@ func (r *postgresRepository) CountCompletedByUser(ctx context.Context, userID uu
 	return count, err
 }
 
+func (r *postgresRepository) CountSubmittedBetween(ctx context.Context, userID uuid.UUID, from, to time.Time) (int, error) {
+	var count int64
+	err := r.db.WithContext(ctx).Model(&ExamAttemptModel{}).
+		Where("user_id = ? AND status = ? AND submitted_at >= ? AND submitted_at < ?", userID, domain.StatusSubmitted, from, to).
+		Limit(1).
+		Count(&count).Error
+	return int(count), err
+}
+
 func (r *postgresRepository) AverageScorePercentByUser(ctx context.Context, userID uuid.UUID) (float64, error) {
 	var avg *float64
 	err := r.db.WithContext(ctx).Model(&ExamAttemptModel{}).
@@ -536,6 +547,7 @@ func toAttemptModel(a *domain.ExamAttempt) ExamAttemptModel {
 		UserID:              a.UserID,
 		ExamTrackID:         a.ExamTrackID,
 		ExamSetID:           a.ExamSetID,
+		BlueprintVersion:    a.BlueprintVersion,
 		Status:              a.Status,
 		TimingMode:          domain.NormalizeTimingMode(a.TimingMode),
 		StartedAt:           a.StartedAt,
@@ -561,6 +573,7 @@ func toAttemptDomain(m *ExamAttemptModel) domain.ExamAttempt {
 		UserID:              m.UserID,
 		ExamTrackID:         m.ExamTrackID,
 		ExamSetID:           m.ExamSetID,
+		BlueprintVersion:    m.BlueprintVersion,
 		Status:              m.Status,
 		TimingMode:          domain.NormalizeTimingMode(m.TimingMode),
 		StartedAt:           m.StartedAt,
@@ -582,12 +595,13 @@ func toAttemptDomain(m *ExamAttemptModel) domain.ExamAttempt {
 	}
 	if m.ExamSet.Code != "" {
 		attempt.ExamSet = &domain.ExamSetRef{
-			Code:            m.ExamSet.Code,
-			Title:           m.ExamSet.Title,
-			DurationMinutes: m.ExamSet.DurationMinutes,
-			TotalQuestions:  m.ExamSet.TotalQuestions,
-			PassingScore:    m.ExamSet.PassingScore,
-			AccessType:      m.ExamSet.AccessType,
+			Code:             m.ExamSet.Code,
+			Title:            m.ExamSet.Title,
+			DurationMinutes:  m.ExamSet.DurationMinutes,
+			TotalQuestions:   m.ExamSet.TotalQuestions,
+			PassingScore:     m.ExamSet.PassingScore,
+			AccessType:       m.ExamSet.AccessType,
+			BlueprintVersion: m.BlueprintVersion,
 			AnswerSheetLayout: examsetdomain.LayoutFromModel(
 				m.ExamSet.AnswerSheetBlockColumns,
 				m.ExamSet.AnswerSheetQuestionsPerBlock,
